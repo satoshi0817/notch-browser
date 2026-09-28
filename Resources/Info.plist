@@ -6,6 +6,8 @@
 	<string>NotchBrowser</string>
 	<key>CFBundleExecutable</key>
 	<string>NotchBrowser</string>
+	<key>CFBundleIconFile</key>
+	<string>NotchBrowser</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.satoshi0817.NotchBrowser</string>
 	<key>CFBundleName</key>

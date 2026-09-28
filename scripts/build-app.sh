@@ -20,6 +20,7 @@ else
 fi
 
 cp Resources/Info.plist "$APP/Contents/Info.plist"
+cp Resources/NotchBrowser.icns "$APP/Contents/Resources/NotchBrowser.icns"
 codesign --force --sign - "$APP"
 
 echo "Built $APP ($(du -sh "$APP" | cut -f1))"

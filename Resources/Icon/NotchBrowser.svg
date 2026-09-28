@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>NotchBrowser — Window to the web</title>
+  <desc>Original macOS app icon. A luminous blue browser screen with a sculpted black notch and a frosted glass globe. Transparent outside the icon.</desc>
+  <defs>
+    <path id="tile" d="M338 100H686C768 100 810 100 849 120C873 132 892 151 904 175C924 214 924 256 924 338V686C924 768 924 810 904 849C892 873 873 892 849 904C810 924 768 924 686 924H338C256 924 214 924 175 904C151 892 132 873 120 849C100 810 100 768 100 686V338C100 256 100 214 120 175C132 151 151 132 175 120C214 100 256 100 338 100Z"/>
+    <path id="screen" d="M341 121H683C761 121 802 121 838 140C860 151 876 168 887 190C905 225 905 265 905 342V682C905 759 905 801 887 836C876 858 858 876 836 887C801 905 759 905 682 905H342C265 905 225 905 190 887C168 876 151 860 140 838C121 802 121 761 121 683V341C121 263 121 222 140 186C151 164 164 151 186 140C222 121 263 121 341 121Z"/>
+    <clipPath id="screenClip"><use xlink:href="#screen"/></clipPath>
+    <linearGradient id="shell" x1="0.18" y1="0" x2="0.78" y2="1" gradientUnits="objectBoundingBox">
+      <stop stop-color="#fbfdff"/><stop offset=".25" stop-color="#e5ecf6"/><stop offset=".56" stop-color="#9cb2d3"/><stop offset=".8" stop-color="#dee9f9"/><stop offset="1" stop-color="#afbdd7"/>
+    </linearGradient>
+    <linearGradient id="blue" x1=".13" y1="0" x2=".9" y2="1" gradientUnits="objectBoundingBox">
+      <stop stop-color="#77edec"/><stop offset=".26" stop-color="#29c8ef"/><stop offset=".55" stop-color="#2484f4"/><stop offset=".8" stop-color="#445ce7"/><stop offset="1" stop-color="#6154d8"/>
+    </linearGradient>
+    <radialGradient id="aqua" cx=".19" cy=".02" r=".88">
+      <stop stop-color="#d3fff4" stop-opacity=".68"/><stop offset=".55" stop-color="#9bffe9" stop-opacity=".04"/><stop offset="1" stop-color="#93fcf0" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="cobalt" cx=".87" cy=".82" r=".67">
+      <stop stop-color="#4339d8" stop-opacity=".54"/><stop offset="1" stop-color="#242adb" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="sweep" x1=".1" y1="0" x2=".9" y2="1"><stop stop-color="#ffffff" stop-opacity=".31"/><stop offset=".6" stop-color="#acf6ff" stop-opacity=".06"/><stop offset="1" stop-color="#a6caff" stop-opacity=".02"/></linearGradient>
+    <linearGradient id="notch" x1=".2" y1="0" x2=".8" y2="1"><stop stop-color="#202b3d"/><stop offset=".3" stop-color="#151f30"/><stop offset="1" stop-color="#090f1c"/></linearGradient>
+    <linearGradient id="notchLip" x1="0" y1="0" x2=".4" y2="1"><stop stop-color="#7b899b"/><stop offset=".43" stop-color="#172134"/><stop offset="1" stop-color="#53677f"/></linearGradient>
+    <linearGradient id="orbFill" x1=".2" y1="0" x2=".8" y2="1"><stop stop-color="#f2ffff" stop-opacity=".21"/><stop offset=".55" stop-color="#ebfaff" stop-opacity=".055"/><stop offset="1" stop-color="#d1ceff" stop-opacity=".15"/></linearGradient>
+    <linearGradient id="glass" gradientUnits="userSpaceOnUse" x1="360" y1="360" x2="660" y2="746"><stop stop-color="#ffffff"/><stop offset=".28" stop-color="#f4ffff"/><stop offset=".6" stop-color="#d6f3ff"/><stop offset="1" stop-color="#b6d4ff"/></linearGradient>
+    <linearGradient id="glassLines" gradientUnits="userSpaceOnUse" x1="340" y1="360" x2="665" y2="746"><stop stop-color="#ffffff"/><stop offset=".5" stop-color="#e7fbff"/><stop offset="1" stop-color="#c1e1ff"/></linearGradient>
+    <linearGradient id="edge" x1=".12" y1="0" x2=".75" y2="1"><stop stop-color="#ffffff" stop-opacity=".94"/><stop offset=".43" stop-color="#fff" stop-opacity=".12"/><stop offset="1" stop-color="#e6eaff" stop-opacity=".45"/></linearGradient>
+    <filter id="tileShadow" x="-.2" y="-.2" width="1.4" height="1.5" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="14"/></filter>
+    <filter id="notchShadow" x="-.5" y="-.5" width="2" height="2" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="12"/></filter>
+    <filter id="orbShadow" x="-.3" y="-.3" width="1.6" height="1.7" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="9"/></filter>
+    <filter id="soft" x="-.4" y="-.4" width="1.8" height="1.8" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="35"/></filter>
+    <g id="globeLines" fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="512" cy="553" r="187" stroke-width="23"/>
+      <ellipse cx="512" cy="553" rx="78" ry="187" stroke-width="18"/>
+      <path d="M325 553H699" stroke-width="18"/>
+    </g>
+    <path id="notchShape" d="M362 119H662C644 119 636 127 636 145V192C636 224 617 242 585 242H439C407 242 388 224 388 192V145C388 127 380 119 362 119Z"/>
+  </defs>
+  <!-- macOS silhouette, transparent beyond the soft shadow -->
+  <use xlink:href="#tile" fill="#172b5b" opacity=".17" transform="translate(0 13)" filter="url(#tileShadow)"/>
+  <use xlink:href="#tile" fill="url(#shell)"/>
+  <use xlink:href="#tile" fill="none" stroke="url(#edge)" stroke-width="2"/>
+  <use xlink:href="#screen" fill="url(#blue)"/>
+  <g clip-path="url(#screenClip)">
+    <use xlink:href="#screen" fill="url(#aqua)"/>
+    <use xlink:href="#screen" fill="url(#cobalt)"/>
+    <!-- A restrained glass reflection, not a screenshot or tiny UI -->
+    <path d="M94 150C351 66 672 58 930 171V465C704 307 400 330 97 575Z" fill="url(#sweep)"/>
+    <path d="M126 750C370 876 703 798 907 581V939H123Z" fill="#7865ec" opacity=".095"/>
+    <ellipse cx="333" cy="306" rx="216" ry="92" fill="#c4fff5" opacity=".12" filter="url(#soft)"/>
+    <!-- Sculpted notch: an opaque inset in the luminous screen -->
+    <use xlink:href="#notchShape" fill="#092e60" opacity=".33" transform="translate(0 12)" filter="url(#notchShadow)"/>
+    <use xlink:href="#notchShape" fill="url(#notch)"/>
+    <path d="M388 151V192C388 224 407 242 439 242H585C617 242 636 224 636 192V151" fill="none" stroke="url(#notchLip)" stroke-width="2.4"/>
+    <!-- Globe: optical glass with subtle cast shadow and a crisp bevel -->
+    <g transform="rotate(-17 512 553)">
+      <g transform="translate(0 12)" filter="url(#orbShadow)" opacity=".3"><use xlink:href="#globeLines" stroke="#07338e"/></g>
+      <circle cx="512" cy="553" r="186" fill="url(#orbFill)"/>
+      <use xlink:href="#globeLines" stroke="#839cec" transform="translate(0 3)" opacity=".6"/>
+      <use xlink:href="#globeLines" stroke="url(#glass)"/>
+      <circle cx="512" cy="553" r="196" fill="none" stroke="#fff" stroke-opacity=".64" stroke-width="1.5"/>
+      <circle cx="512" cy="553" r="176" fill="none" stroke="#fff" stroke-opacity=".23" stroke-width="1"/>
+      <ellipse cx="512" cy="553" rx="78" ry="187" fill="none" stroke="url(#glassLines)" stroke-width="15"/>
+      <path d="M329 550H695" fill="none" stroke="#fff" stroke-opacity=".4" stroke-width="2"/>
+    </g>
+  </g>
+  <use xlink:href="#screen" fill="none" stroke="url(#edge)" stroke-width="2"/>
+</svg>
