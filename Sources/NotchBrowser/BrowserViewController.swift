@@ -718,8 +718,26 @@ extension BrowserViewController: WKUIDelegate {
 
 // MARK: - TabButton
 
+/// Hover opening deliberately leaves the panel non-key. AppKit's recessed bezel
+/// desaturates in that state, so draw the selected tab independently of focus.
+final class TabButtonCell: NSButtonCell {
+    override func drawBezel(withFrame frame: NSRect, in controlView: NSView) {
+        guard state == .on else {
+            super.drawBezel(withFrame: frame, in: controlView)
+            return
+        }
+        NSColor.systemBlue.setFill()
+        NSBezierPath(roundedRect: frame.insetBy(dx: 1, dy: 1), xRadius: 5, yRadius: 5).fill()
+    }
+}
+
 /// Tab button that can be dragged sideways to reorder. A click without movement acts normally.
 final class TabButton: NSButton {
+    override class var cellClass: AnyClass? {
+        get { TabButtonCell.self }
+        set { }
+    }
+
     var onDragBegan: ((TabButton) -> Void)?
     var onDragEnded: ((TabButton) -> Void)?
 
