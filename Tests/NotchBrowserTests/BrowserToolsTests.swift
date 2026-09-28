@@ -89,16 +89,23 @@ final class BrowserToolsTests: XCTestCase {
         let originalMenu = NSApp.mainMenu
         defer { NSApp.mainMenu = originalMenu }
         let menu = NSMenu()
-        let command = NSMenuItem(title: "メモ", action: #selector(BrowserViewController.toggleNotes(_:)), keyEquivalent: "m")
+        let command = NSMenuItem(title: "メモ", action: #selector(BrowserViewController.toggleNotes(_:)), keyEquivalent: "M")
         command.keyEquivalentModifierMask = [.command, .shift]
         command.target = browser
         menu.addItem(command)
         NSApp.mainMenu = menu
         browser.toggleNotes(nil)
         XCTAssertTrue(panel.firstResponder is NSTextView)
-        let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command, .shift], timestamp: 0, windowNumber: panel.windowNumber, context: nil, characters: "M", charactersIgnoringModifiers: "m", isARepeat: false, keyCode: 46))
+        let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command, .shift], timestamp: 0, windowNumber: panel.windowNumber, context: nil, characters: "M", charactersIgnoringModifiers: "M", isARepeat: false, keyCode: 46))
         XCTAssertTrue(panel.performKeyEquivalent(with: event))
         XCTAssertFalse(browser.dismissOverlay(), "The shortcut must close notes even while the editor owns focus")
+        let searchCommand = NSMenuItem(title: "タブ検索", action: #selector(BrowserViewController.showTabSwitcher(_:)), keyEquivalent: "A")
+        searchCommand.keyEquivalentModifierMask = [.command, .shift]
+        searchCommand.target = browser
+        menu.addItem(searchCommand)
+        let searchEvent = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command, .shift], timestamp: 0, windowNumber: panel.windowNumber, context: nil, characters: "A", charactersIgnoringModifiers: "A", isARepeat: false, keyCode: 0))
+        XCTAssertTrue(panel.performKeyEquivalent(with: searchEvent))
+        XCTAssertTrue(browser.dismissOverlay(), "The tab search shortcut must open the switcher")
         browser.closeCurrentTab(nil)
         XCTAssertTrue(descendants(browser.view).compactMap { $0 as? WKWebView }.isEmpty)
         browser.reopenClosedTab(nil)

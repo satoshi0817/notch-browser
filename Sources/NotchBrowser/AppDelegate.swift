@@ -100,7 +100,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func item(_ title: String, _ action: Selector, _ key: String = "", _ modifiers: NSEvent.ModifierFlags = .command, target: AnyObject? = nil, tag: Int = 0) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: modifiers.contains(.shift) ? key.uppercased() : key)
         item.keyEquivalentModifierMask = modifiers
         item.target = target // nil = first responder chain
         item.tag = tag
