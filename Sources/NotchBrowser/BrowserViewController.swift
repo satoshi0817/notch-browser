@@ -58,6 +58,7 @@ final class BrowserViewController: NSViewController {
     private lazy var keepOpenButton = iconButton("pin", "開いたままにする", #selector(toggleKeepOpen))
     private lazy var externalButton = iconButton("safari", "デフォルトブラウザで開く", #selector(openExternally))
     private lazy var settingsButton = iconButton("gearshape", "設定 (⌘,)", #selector(openSettings))
+    private lazy var quitButton = iconButton("power", "NotchBrowser を終了 (⌘Q)", #selector(NSApplication.terminate(_:)), target: NSApp)
 
     private var tabTrailingConstraint: NSLayoutConstraint?
     private var controlLeadingConstraint: NSLayoutConstraint?
@@ -94,7 +95,7 @@ final class BrowserViewController: NSViewController {
 
         for button in [backButton, forwardButton, reloadButton] { controlStack.addArrangedSubview(button) }
         controlStack.addArrangedSubview(addressField)
-        for button in [keepOpenButton, externalButton, settingsButton] { controlStack.addArrangedSubview(button) }
+        for button in [keepOpenButton, externalButton, settingsButton, quitButton] { controlStack.addArrangedSubview(button) }
 
         webContainer.wantsLayer = true
         webContainer.layer?.cornerRadius = 10
@@ -527,8 +528,8 @@ final class BrowserViewController: NSViewController {
             .withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
     }
 
-    private func iconButton(_ name: String, _ tooltip: String, _ action: Selector) -> NSButton {
-        let button = NSButton(image: symbol(name) ?? NSImage(), target: self, action: action)
+    private func iconButton(_ name: String, _ tooltip: String, _ action: Selector, target: AnyObject? = nil) -> NSButton {
+        let button = NSButton(image: symbol(name) ?? NSImage(), target: target ?? self, action: action)
         button.bezelStyle = .recessed
         button.showsBorderOnlyWhileMouseInside = true
         button.toolTip = tooltip

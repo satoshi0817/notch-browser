@@ -90,6 +90,10 @@ final class NotchRootView: NSView {
     override func mouseExited(with event: NSEvent) { onHoverChange?(false) }
     override func mouseDown(with event: NSEvent) { onClick?() }
 
+    /// Right-click menu on the notch itself, so there's always a visible way to quit.
+    var contextMenu: NSMenu?
+    override func menu(for event: NSEvent) -> NSMenu? { contextMenu }
+
     override func resizeSubviews(withOldSize oldSize: NSSize) { positionContent() }
     override func layout() {
         super.layout()
@@ -152,7 +156,24 @@ final class NotchController: NSObject, NSWindowDelegate {
 
         root.onHoverChange = { [weak self] inside in self?.hoverChanged(inside) }
         root.onClick = { [weak self] in self?.expand(focus: true) }
+        root.contextMenu = makeContextMenu()
     }
+
+    private func makeContextMenu() -> NSMenu {
+        let menu = NSMenu()
+        let open = NSMenuItem(title: "開く", action: #selector(openFromMenu), keyEquivalent: "")
+        open.target = self
+        let settings = NSMenuItem(title: "設定…", action: #selector(openSettingsFromMenu), keyEquivalent: "")
+        settings.target = self
+        let quit = NSMenuItem(title: "NotchBrowser を終了", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
+        quit.target = NSApp
+        quit.image = NSImage(systemSymbolName: "power", accessibilityDescription: nil)
+        menu.items = [open, settings, .separator(), quit]
+        return menu
+    }
+
+    @objc private func openFromMenu() { expand(focus: true) }
+    @objc private func openSettingsFromMenu() { manager.browser.onOpenSettings?() }
 
     func show() {
         relayout(animated: false)
