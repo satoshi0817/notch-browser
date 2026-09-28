@@ -122,6 +122,7 @@ final class NotchController: NSObject, NSWindowDelegate {
     private unowned let manager: NotchManager
     private(set) var isExpanded = false
     private var hoverTimer: Timer?
+    private var pointerInside = false
 
     static let level = NSWindow.Level.popUpMenu
 
@@ -289,35 +290,63 @@ final class NotchController: NSObject, NSWindowDelegate {
     private func animate(to frame: NSRect, radius: CGFloat, contentAlpha: CGFloat) {
         root.cornerRadius = radius
         let windowAlpha = isExpanded ? 1 : idleOpacity
+        let motion = SettingsStore.shared.data.motion
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.28
-            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.3, 1)
+            ctx.duration = motion.style == .none || reduceMotion ? 0 : (isExpanded ? motion.openDuration : motion.closeDuration)
+            switch motion.style {
+            case .responsive:
+                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.3, 1)
+            case .easeInOut:
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            case .linear, .none:
+                ctx.timingFunction = CAMediaTimingFunction(name: .linear)
+            }
             panel.animator().setFrame(frame, display: true)
             panel.animator().alphaValue = windowAlpha
             manager.browser.view.animator().alphaValue = contentAlpha
         }
     }
 
-    /// Hover just peeks. Once the panel has keyboard focus, it stays open until the
-    /// user clicks elsewhere, presses Esc, or hits the hotkey.
+    /// Leaving closes after the configured delay, even after clicking or typing.
+    /// Only pinning or an active modal temporarily holds the notch open.
     private func hoverChanged(_ inside: Bool) {
+        pointerInside = inside
         hoverTimer?.invalidate()
+        hoverTimer = nil
+        let motion = SettingsStore.shared.data.motion
         if inside {
             guard !isExpanded else { return }
-            hoverTimer = .scheduledTimer(withTimeInterval: 0.12, repeats: false) { [weak self] _ in
-                self?.expand(focus: false)
+            scheduleHover(after: motion.openDelay) { [weak self] in
+                guard let self, self.pointerInside else { return }
+                self.expand(focus: false)
             }
         } else {
-            guard isExpanded, !manager.keepOpen, !panel.isKeyWindow, !manager.isShowingModal else { return }
-            hoverTimer = .scheduledTimer(withTimeInterval: 0.4, repeats: false) { [weak self] _ in
-                self?.collapse()
+            guard isExpanded, !manager.keepOpen, !manager.isShowingModal else { return }
+            scheduleHover(after: motion.closeDelay) { [weak self] in
+                guard let self, !self.pointerInside, !self.manager.keepOpen,
+                      !self.manager.isShowingModal else { return }
+                self.collapse()
             }
+        }
+    }
+
+    private func scheduleHover(after delay: TimeInterval, action: @escaping () -> Void) {
+        if delay <= 0 {
+            action()
+        } else {
+            hoverTimer = .scheduledTimer(withTimeInterval: delay, repeats: false) { _ in action() }
         }
     }
 
     func windowDidResignKey(_ notification: Notification) {
         guard !manager.keepOpen, !manager.isShowingModal, !panel.frame.contains(NSEvent.mouseLocation) else { return }
-        collapse()
+        // Preserve the timer already started by mouseExited instead of closing early.
+        if hoverTimer?.isValid != true { hoverChanged(false) }
+    }
+
+    func resumeHoverCloseIfNeeded() {
+        if isExpanded, !pointerInside { hoverChanged(false) }
     }
 }
 
@@ -332,12 +361,18 @@ final class NotchManager {
     var isShowingModal = false
 
     var keepOpen = false {
-        didSet { browser.keepOpen = keepOpen }
+        didSet {
+            browser.keepOpen = keepOpen
+            if !keepOpen { controllers.values.forEach { $0.resumeHoverCloseIfNeeded() } }
+        }
     }
 
     init() {
         browser.onToggleKeepOpen = { [weak self] in self?.keepOpen.toggle() }
-        browser.onModalChange = { [weak self] showing in self?.isShowingModal = showing }
+        browser.onModalChange = { [weak self] showing in
+            self?.isShowingModal = showing
+            if !showing { self?.controllers.values.forEach { $0.resumeHoverCloseIfNeeded() } }
+        }
         calendar.onChange = { [weak self] minutes in
             self?.minutesToNextEvent = minutes
             self?.controllers.values.forEach { $0.relayout() }

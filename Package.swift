@@ -9,5 +9,6 @@ let package = Package(
             name: "NotchBrowser",
             path: "Sources/NotchBrowser"
         ),
+        .testTarget(name: "NotchBrowserTests", dependencies: ["NotchBrowser"]),
     ]
 )

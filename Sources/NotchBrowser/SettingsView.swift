@@ -56,6 +56,7 @@ struct SettingsView: View {
             PinnedTabsSettings().tabItem { Label("固定タブ", systemImage: "square.stack") }
             ProfilesSettings().tabItem { Label("プロファイル", systemImage: "person.2") }
             DisplaysSettings().tabItem { Label("ディスプレイ", systemImage: "display") }
+            MotionSettingsView().tabItem { Label("動き", systemImage: "waveform.path") }
             GeneralSettings().tabItem { Label("一般", systemImage: "gearshape") }
         }
         .padding(20)
@@ -357,6 +358,53 @@ struct DisplayRow: View {
             if !screen.hasNotch, settings.wrappedValue.enabled {
                 Text("ノッチがないディスプレイでは、画面上端の中央に表示されます。0% にすると見えなくなりますが、カーソルを乗せれば開けます。")
                     .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+// MARK: - Motion
+
+struct MotionSettingsView: View {
+    @EnvironmentObject var store: SettingsStore
+
+    var body: some View {
+        Form {
+            Section {
+                secondsSlider("カーソルを乗せてから開くまで", value: $store.data.motion.openDelay, range: MotionSettings.delayRange)
+                secondsSlider("カーソルを外してから閉じるまで", value: $store.data.motion.closeDelay, range: MotionSettings.delayRange)
+            } header: {
+                Text("カーソルへの反応")
+            } footer: {
+                Text("0秒にするとすぐに反応します。クリックやショートカットは待たずに開きます。操作した後もカーソルを外すと閉じます。ピン留め中とダイアログ表示中は開いたままになります。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section {
+                Picker("動き方", selection: $store.data.motion.style) {
+                    ForEach(NotchAnimationStyle.allCases) { Text($0.title).tag($0) }
+                }
+                secondsSlider("開くアニメーションの時間", value: $store.data.motion.openDuration, range: MotionSettings.durationRange)
+                    .disabled(store.data.motion.style == .none)
+                secondsSlider("閉じるアニメーションの時間", value: $store.data.motion.closeDuration, range: MotionSettings.durationRange)
+                    .disabled(store.data.motion.style == .none)
+            } header: {
+                Text("開閉アニメーション")
+            } footer: {
+                Text("時間が短いほど速く動きます。変更は次の開閉から反映されます。macOSの「視差効果を減らす」がオンの場合、アニメーションは省略します。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Button("動きの設定を初期値に戻す") { store.data.motion = MotionSettings() }
+        }
+        .formStyle(.grouped)
+    }
+
+    private func secondsSlider(_ title: String, value: Binding<Double>, range: ClosedRange<Double>) -> some View {
+        LabeledContent(title) {
+            HStack {
+                Slider(value: value, in: range, step: 0.01)
+                    .accessibilityLabel(title)
+                Text("\(value.wrappedValue, specifier: "%.2f") 秒")
+                    .monospacedDigit().frame(width: 64, alignment: .trailing)
             }
         }
     }

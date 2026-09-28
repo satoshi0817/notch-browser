@@ -63,6 +63,7 @@ struct SettingsData: Codable {
     var colorSelectedIcon = true
     /// Keep the notch out of screen sharing and screenshots.
     var hideFromScreenCapture = true
+    var motion = MotionSettings()
 
     init() {}
 
@@ -80,6 +81,7 @@ struct SettingsData: Codable {
         openTabBehavior = try c.decodeIfPresent(OpenTabBehavior.self, forKey: .openTabBehavior) ?? fallback.openTabBehavior
         grayscaleIcons = try c.decodeIfPresent(Bool.self, forKey: .grayscaleIcons) ?? fallback.grayscaleIcons
         colorSelectedIcon = try c.decodeIfPresent(Bool.self, forKey: .colorSelectedIcon) ?? fallback.colorSelectedIcon
+        motion = (try? c.decode(MotionSettings.self, forKey: .motion)) ?? fallback.motion
         if !profiles.contains(where: \.isDefault) {
             profiles.insert(Profile(id: Profile.defaultID, name: "デフォルト"), at: 0)
         }

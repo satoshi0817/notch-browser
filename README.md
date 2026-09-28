@@ -8,13 +8,9 @@ MacBook のノッチに住む、小さな WebKit ブラウザです。
 
 1. [Releases](https://github.com/satoshi0817/notch-browser/releases/latest) から `NotchBrowser-*.zip` をダウンロードして展開します。
 2. `NotchBrowser.app` を「アプリケーション」フォルダに移動して開きます。
-3. 「Apple は検証できませんでした」と表示されたら、**システム設定 › プライバシーとセキュリティ** を開き、「NotchBrowser」の **このまま開く** をクリックします。
+3. 初回に「インターネットからダウンロードしたアプリ」として確認された場合は、「開く」を選びます。
 
-   Apple の公証（notarization）を受けていないため、初回だけこの手順が必要です。ターミナルからは次のコマンドでも開けるようになります。
-
-   ```sh
-   xattr -dr com.apple.quarantine /Applications/NotchBrowser.app
-   ```
+配布ZIPはDeveloper ID署名・Apple公証済みです。
 
 **動作環境:** macOS 14 以降（Apple Silicon / Intel）。ノッチのない Mac や外部ディスプレイでは、画面上端の中央に表示されます。
 
@@ -30,12 +26,13 @@ MacBook のノッチに住む、小さな WebKit ブラウザです。
 | 設定 | `⌘,` またはメニューバーのアイコン |
 | 終了 | ブラウザ右上の電源ボタン / ノッチを右クリック › 終了 / メニューバーのアイコン / `⌘Q` |
 
-カーソルを乗せて開いただけのときは、入力は元のアプリのままです。クリックするか `⌃⌥N` で開くと、ブラウザに文字を入力できます。
+カーソルを乗せて開いただけのときは、入力は元のアプリのままです。クリックするか `⌃⌥N` で開くと、ブラウザに文字を入力できます。操作した後も、カーソルを外すと設定した待ち時間で閉じます（ピン留め中とダイアログ表示中を除きます）。
 
 ブラウザ右上のピンを押すと、カーソルを外しても開いたままになります。
 
 ## 機能
 
+- **開閉の動き:** 設定の「動き」で、カーソルを乗せてから開く・外してから閉じる待ち時間（0〜3秒）、動き方（従来の動き／ゆっくり加速・減速／一定速度／なし）、開閉それぞれのアニメーション時間（0.05〜1.5秒）を変更できます。クリックやショートカットは待たずに開きます。
 - **固定タブ:** 名前・URL・アイコン（サイトのアイコン / SF Symbols / 絵文字 / 画像）を設定できます。アイコンのみの表示や、ドラッグでの並べ替えもできます。
 - **プロファイル:** ログイン情報（Cookie）をプロファイルごとに分けられます。タブごとにプロファイルを選べます。
 - **ディスプレイごとの設定:** 表示するディスプレイ、待機時の不透明度、開いたときのサイズを設定できます。
@@ -46,7 +43,6 @@ MacBook のノッチに住む、小さな WebKit ブラウザです。
 ## 制限
 
 - 表示できるのは Web サイトだけです。macOS ではほかのアプリのウィンドウを埋め込めないため、Slack などは Web 版を使ってください。
-- Apple の公証を受けていないため、初回起動時に上記の手順が必要です。
 
 ## ソースからビルド
 
@@ -58,7 +54,26 @@ Xcode は不要で、Command Line Tools（Swift 5.9 以降）だけでビルド�
 open build/NotchBrowser.app
 ```
 
-リリース用の zip は `./scripts/release.sh` で作れます。`--publish` を付けると、タグを付けて GitHub Release を公開します。
+リリース用の zip は `./scripts/release.sh` で作れます。公開時は以下の署名・公証を行い、`--notarize <profile> --publish` を付けると、タグを付けて GitHub Release を公開します。
+
+### Developer ID 署名と Apple 公証
+
+キーチェーンに秘密鍵付きの Developer ID Application 証明書がある Mac では、次のように署名済み ZIP を作れます。
+
+```sh
+export SIGNING_IDENTITY='Developer ID Application: SATOSHI SUZUKI (4LPTZP2QZM)'
+./scripts/release.sh
+```
+
+署名時は Hardened Runtime と安全なタイムスタンプを有効にします。`SIGNING_IDENTITY` 未指定の場合は開発用のアドホック署名です。署名だけでは公証済みにはなりません。
+
+公証には、`xcrun notarytool store-credentials NotchBrowser` で認証情報をキーチェーンに保存してから、同じ環境変数を設定して実行します。秘密鍵やパスワードはリポジトリに保存しないでください。
+
+```sh
+./scripts/release.sh --notarize NotchBrowser
+```
+
+Apple の受理を確認した後、アプリに公証チケットを添付し、Gatekeeper の検証を通して ZIP を作り直します。公証結果は `build/notarization-result.json` に保存します。
 
 ## 構成
 

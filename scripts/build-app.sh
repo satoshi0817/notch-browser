@@ -1,6 +1,7 @@
 #!/bin/zsh
 # Builds NotchBrowser.app into ./build
 #   --universal  also build for Intel and merge (for releases)
+#   SIGNING_IDENTITY="Developer ID Application: ..." enables distribution signing
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -21,6 +22,12 @@ fi
 
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/NotchBrowser.icns "$APP/Contents/Resources/NotchBrowser.icns"
-codesign --force --sign - "$APP"
+if [[ -n "${SIGNING_IDENTITY:-}" ]]; then
+    codesign --force --sign "$SIGNING_IDENTITY" --options runtime --timestamp \
+        --entitlements Resources/NotchBrowser.entitlements "$APP"
+else
+    codesign --force --sign - "$APP"
+fi
+codesign --verify --strict --verbose=2 "$APP"
 
 echo "Built $APP ($(du -sh "$APP" | cut -f1))"
