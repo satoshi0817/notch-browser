@@ -36,7 +36,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func windowDidResignKey(_ notification: Notification) {
+        guard window?.attachedSheet == nil else { return }
         window?.level = .normal
+    }
+
+    func windowWillBeginSheet(_ notification: Notification) {
+        window?.level = Self.frontLevel
     }
 
     private var screenUnderMouse: NSScreen? {
@@ -312,120 +317,6 @@ struct ProfilesSettings: View {
 
 // MARK: - Displays
 
-struct DisplaysSettings: View {
-    @EnvironmentObject var store: SettingsStore
-    @State private var screens = NSScreen.screens
-
-    var body: some View {
-        Form {
-            ForEach(screens, id: \.displayUUID) { screen in
-                DisplayRow(screen: screen)
-            }
-        }
-        .formStyle(.grouped)
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)) { _ in
-            screens = NSScreen.screens
-        }
-    }
-}
-
-struct DisplayRow: View {
-    @EnvironmentObject var store: SettingsStore
-    let screen: NSScreen
-
-    private var settings: Binding<DisplaySettings> {
-        Binding(
-            get: { store.displaySettings(for: screen) },
-            set: { store.setDisplaySettings($0, for: screen) }
-        )
-    }
-
-    var body: some View {
-        Section {
-            Toggle("このディスプレイに表示", isOn: settings.enabled)
-            if settings.wrappedValue.enabled {
-                LabeledContent("待機時の不透明度") {
-                    HStack {
-                        Slider(value: settings.idleOpacity, in: 0...1)
-                        Text("\(Int(settings.wrappedValue.idleOpacity * 100))%")
-                            .monospacedDigit().frame(width: 40, alignment: .trailing)
-                    }
-                }
-                LabeledContent("開いたときの幅") {
-                    HStack {
-                        Slider(value: settings.width, in: 600...max(601, screen.frame.width - 40), step: 10)
-                        Text("\(Int(settings.wrappedValue.width))").monospacedDigit().frame(width: 40, alignment: .trailing)
-                    }
-                }
-                LabeledContent("開いたときの高さ") {
-                    HStack {
-                        Slider(value: settings.height, in: 400...max(401, screen.frame.height - 40), step: 10)
-                        Text("\(Int(settings.wrappedValue.height))").monospacedDigit().frame(width: 40, alignment: .trailing)
-                    }
-                }
-            }
-        } header: {
-            HStack {
-                Text(screen.localizedName)
-                if screen.hasNotch { Text("ノッチあり").font(.caption).foregroundStyle(.secondary) }
-                if screen == NSScreen.screens.first { Text("メイン").font(.caption).foregroundStyle(.secondary) }
-            }
-        } footer: {
-            if !screen.hasNotch, settings.wrappedValue.enabled {
-                Text("ノッチがないディスプレイでは、画面上端の中央に表示されます。0% にすると見えなくなりますが、カーソルを乗せれば開けます。")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-        }
-    }
-}
-
-// MARK: - Motion
-
-struct MotionSettingsView: View {
-    @EnvironmentObject var store: SettingsStore
-
-    var body: some View {
-        Form {
-            Section {
-                secondsSlider("カーソルを乗せてから開くまで", value: $store.data.motion.openDelay, range: MotionSettings.delayRange)
-                secondsSlider("カーソルを外してから閉じるまで", value: $store.data.motion.closeDelay, range: MotionSettings.delayRange)
-            } header: {
-                Text("カーソルへの反応")
-            } footer: {
-                Text("0秒にするとすぐに反応します。クリックやショートカットは待たずに開きます。操作した後もカーソルを外すと閉じます。ピン留め中とダイアログ表示中は開いたままになります。")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            Section {
-                Picker("動き方", selection: $store.data.motion.style) {
-                    ForEach(NotchAnimationStyle.allCases) { Text($0.title).tag($0) }
-                }
-                secondsSlider("開くアニメーションの時間", value: $store.data.motion.openDuration, range: MotionSettings.durationRange)
-                    .disabled(store.data.motion.style == .none)
-                secondsSlider("閉じるアニメーションの時間", value: $store.data.motion.closeDuration, range: MotionSettings.durationRange)
-                    .disabled(store.data.motion.style == .none)
-            } header: {
-                Text("開閉アニメーション")
-            } footer: {
-                Text("時間が短いほど速く動きます。変更は次の開閉から反映されます。macOSの「視差効果を減らす」がオンの場合、アニメーションは省略します。")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            Button("動きの設定を初期値に戻す") { store.data.motion = MotionSettings() }
-        }
-        .formStyle(.grouped)
-    }
-
-    private func secondsSlider(_ title: String, value: Binding<Double>, range: ClosedRange<Double>) -> some View {
-        LabeledContent(title) {
-            HStack {
-                Slider(value: value, in: range, step: 0.01)
-                    .accessibilityLabel(title)
-                Text("\(value.wrappedValue, specifier: "%.2f") 秒")
-                    .monospacedDigit().frame(width: 64, alignment: .trailing)
-            }
-        }
-    }
-}
-
 // MARK: - General
 
 struct GeneralSettings: View {
@@ -434,15 +325,7 @@ struct GeneralSettings: View {
     var body: some View {
         Form {
             Section {
-                LabeledContent("ガラスの濃度") {
-                    HStack {
-                        Image(systemName: "circle.lefthalf.filled")
-                        Slider(value: $store.data.glassTint, in: 0...1)
-                            .accessibilityLabel("ガラスの濃度")
-                        Text("\(Int(store.data.glassTint * 100))%")
-                            .monospacedDigit().frame(width: 40)
-                    }
-                }
+                PrecisionSlider(title: "ガラスの濃度", value: Binding(get: { store.data.glassTint * 100 }, set: { store.data.glassTint = $0 / 100 }), range: 0...100, step: 1, unit: "%")
                 Text("透明感と読みやすさのバランスを調整します。macOSの「透明度を下げる」「コントラストを上げる」が有効なときは、不透明な背景で表示します。")
                     .font(.caption).foregroundStyle(.secondary)
             } header: { Label("Liquid Glass", systemImage: "circle.hexagongrid") }

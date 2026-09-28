@@ -72,6 +72,7 @@ final class BrowserViewController: NSViewController {
     private lazy var toolsButton: NSPopUpButton = {
         let button = NSPopUpButton(frame: .zero, pullsDown: true)
         button.bezelStyle = .recessed
+        (button.cell as? NSPopUpButtonCell)?.arrowPosition = .noArrow
         button.toolTip = "ページの操作"
         button.setAccessibilityLabel("ページの操作")
         button.widthAnchor.constraint(equalToConstant: 28).isActive = true
@@ -80,13 +81,13 @@ final class BrowserViewController: NSViewController {
     private let controlStack = NSStackView()
     private let webContainer = NSView()
     private let addressField = NSTextField()
+    private let addressPopover = NSPopover()
+    private lazy var addressButton = iconButton("magnifyingglass", "URLを表示・検索 (⌘L)", #selector(focusAddressBar))
+    private lazy var homeButton = iconButton("house", "設定したページに戻る", #selector(goHome))
     private lazy var backButton = iconButton("chevron.left", "戻る", #selector(goBack))
     private lazy var forwardButton = iconButton("chevron.right", "進む", #selector(goForward))
     private lazy var reloadButton = iconButton("arrow.clockwise", "再読み込み", #selector(reloadOrStop))
     private lazy var keepOpenButton = iconButton("pin", "開いたままにする", #selector(toggleKeepOpen))
-    private lazy var externalButton = iconButton("safari", "デフォルトブラウザで開く", #selector(openExternally))
-    private lazy var settingsButton = iconButton("gearshape", "設定 (⌘,)", #selector(openSettings))
-    private lazy var quitButton = iconButton("power", "NotchBrowser を終了 (⌘Q)", #selector(NSApplication.terminate(_:)), target: NSApp)
 
     private var tabTrailingConstraint: NSLayoutConstraint!
     private var controlLeadingConstraint: NSLayoutConstraint!
@@ -118,7 +119,7 @@ final class BrowserViewController: NSViewController {
         tabStack.orientation = .horizontal
         tabStack.spacing = 4
         controlStack.orientation = .horizontal
-        controlStack.spacing = 2
+        controlStack.spacing = 4
         addressField.placeholderString = "検索またはURLを入力"
         addressField.bezelStyle = .roundedBezel
         addressField.controlSize = .small
@@ -130,10 +131,31 @@ final class BrowserViewController: NSViewController {
         addressField.setAccessibilityLabel("検索またはURL")
         addressField.setContentHuggingPriority(.defaultLow, for: .horizontal)
         addressField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        addressField.widthAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
-        for button in [backButton, forwardButton, reloadButton] { controlStack.addArrangedSubview(button) }
-        controlStack.addArrangedSubview(addressField)
-        for button in [keepOpenButton, externalButton, toolsButton, settingsButton, quitButton] { controlStack.addArrangedSubview(button) }
+        addressField.delegate = self
+        let addressController = NSViewController()
+        addressController.view = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 92))
+        let label = NSTextField(labelWithString: "URLを入力、または検索")
+        label.font = .systemFont(ofSize: 11, weight: .medium)
+        label.textColor = .secondaryLabelColor
+        addressField.translatesAutoresizingMaskIntoConstraints = false
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addressController.view.addSubview(label)
+        addressController.view.addSubview(addressField)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: addressController.view.leadingAnchor, constant: 16),
+            label.topAnchor.constraint(equalTo: addressController.view.topAnchor, constant: 14),
+            addressField.leadingAnchor.constraint(equalTo: addressController.view.leadingAnchor, constant: 16),
+            addressField.trailingAnchor.constraint(equalTo: addressController.view.trailingAnchor, constant: -16),
+            addressField.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 10),
+            addressField.heightAnchor.constraint(equalToConstant: 28)
+        ])
+        addressPopover.contentViewController = addressController
+        addressPopover.behavior = .transient
+        addressPopover.animates = false
+        addressPopover.delegate = self
+        for button in [backButton, forwardButton, homeButton, reloadButton, addressButton] { controlStack.addArrangedSubview(button) }
+        controlStack.addArrangedSubview(NSView())
+        for button in [keepOpenButton, toolsButton] { controlStack.addArrangedSubview(button) }
         tabScroll.drawsBackground = false
         tabScroll.hasHorizontalScroller = true
         tabScroll.scrollerStyle = .overlay
@@ -218,10 +240,9 @@ final class BrowserViewController: NSViewController {
 
     private func updateCompactControls() {
         let available = view.bounds.width / 2 - controlLeadingConstraint.constant - 12
-        let compact = available < 300
-        for button in [externalButton, settingsButton, quitButton] where button.isHidden != compact {
-            button.isHidden = compact
-        }
+        // Five 28pt controls plus spacing fit at 600pt with a physical camera cutout.
+        forwardButton.isHidden = available < 230
+        reloadButton.isHidden = available < 230
     }
 
     override func viewDidLayout() {
@@ -239,7 +260,7 @@ final class BrowserViewController: NSViewController {
             view.window?.makeFirstResponder(tab.webView)
             addressField.stringValue = tab.webView.url?.absoluteString ?? ""
         } else {
-            focusAddressBar()
+            view.window?.makeFirstResponder(addressButton)
         }
     }
 
@@ -379,7 +400,7 @@ final class BrowserViewController: NSViewController {
         if !notes.isHidden { notes.isHidden = true }
         findGeneration += 1
         findStatus.stringValue = ""
-        if selectedIndex != index, addressField.currentEditor() != nil { view.window?.endEditing(for: addressField) }
+        if selectedIndex != index { addressPopover.close() }
         selectedIndex = index
         if let index, let id = tabs[index].pinnedID { store.lastViewedPinnedID = id }
         for (i, tab) in tabs.enumerated() { tab.webView.isHidden = i != index }
@@ -538,7 +559,8 @@ final class BrowserViewController: NSViewController {
         reloadButton.image = symbol(webView?.isLoading == true ? "xmark" : "arrow.clockwise")
         keepOpenButton.image = symbol(keepOpen ? "pin.fill" : "pin")
         keepOpenButton.contentTintColor = keepOpen ? .controlAccentColor : nil
-        externalButton.isEnabled = webView?.url != nil
+        homeButton.isEnabled = selectedTab?.homeURL.flatMap(Self.url(from:)) != nil
+        addressButton.toolTip = "URLを表示・検索 (⌘L)" + (webView?.url.map { "\n" + $0.absoluteString } ?? "")
         rebuildToolsMenu()
         updateStartPage()
         if !switcher.isHidden { rebuildSwitcherResults() }
@@ -645,24 +667,46 @@ final class BrowserViewController: NSViewController {
         button.setAccessibilityLabel(tooltip)
         button.contentTintColor = .white
         button.setContentHuggingPriority(.required, for: .horizontal)
+        button.widthAnchor.constraint(equalToConstant: 28).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 24).isActive = true
         return button
     }
 
     // MARK: Navigation
 
     @objc func focusAddressBar(_ sender: Any? = nil) {
-        view.window?.makeFirstResponder(addressField)
+        guard let window = view.window else { return }
+        // Only explicit URL editing activates the app; hover opening stays nonactivating.
+        NSApp.activate()
+        if !addressPopover.isShown {
+            addressField.stringValue = selectedTab?.webView.url?.absoluteString ?? ""
+            onModalChange?(true)
+            addressPopover.show(relativeTo: addressButton.bounds, of: addressButton, preferredEdge: .minY)
+            addressField.window?.level = NSWindow.Level(rawValue: window.level.rawValue + 1)
+            addressField.window?.sharingType = hideFromScreenCapture ? .none : .readOnly
+        }
+        addressField.window?.makeKey()
+        addressField.window?.makeFirstResponder(addressField)
         addressField.currentEditor()?.selectAll(nil)
     }
 
     @objc private func addressSubmitted(_ sender: NSTextField) {
         guard let url = Self.url(from: sender.stringValue) else { return }
         if let tab = selectedTab {
+            if tab.homeURL == nil { tab.homeURL = url.absoluteString }
             tab.webView.load(URLRequest(url: url))
         } else {
             openInNewTab(url)
         }
+        addressPopover.close()
         if let webView = selectedTab?.webView { view.window?.makeFirstResponder(webView) }
+    }
+
+    @objc func goHome(_ sender: Any?) {
+        guard let tab = selectedTab, let home = tab.homeURL, let url = Self.url(from: home) else { return }
+        addressPopover.close()
+        tab.webView.load(URLRequest(url: url))
+        focusContent()
     }
 
     static func url(from input: String) -> URL? {
@@ -737,6 +781,10 @@ final class BrowserViewController: NSViewController {
         menu.addItem(refresh)
         menu.addItem(.separator())
         _ = add("閉じたタブを戻す  ⌘⇧T", "arrow.uturn.backward", #selector(reopenClosedTab), enabled: !closedTabs.isEmpty)
+        _ = add("設定したページに戻る", "house", #selector(goHome), enabled: homeButton.isEnabled)
+        _ = add("進む", "chevron.right", #selector(goForward), enabled: forwardButton.isEnabled)
+        _ = add("再読み込み  ⌘R", "arrow.clockwise", #selector(reloadPage), enabled: hasPage)
+        _ = add("URLを表示・検索  ⌘L", "magnifyingglass", #selector(focusAddressBar))
         _ = add("タブを検索  ⌘⇧A", "square.stack", #selector(showTabSwitcher))
         _ = add("タブを閉じる  ⌘W", "xmark", #selector(closeCurrentTab), enabled: selectedTab != nil && selectedTab?.pinnedID == nil)
         menu.addItem(.separator())
@@ -795,6 +843,7 @@ final class BrowserViewController: NSViewController {
     }
 
     @objc func showFind(_ sender: Any?) {
+        addressPopover.close()
         guard selectedTab?.webView.url != nil else { return }
         switcher.isHidden = true
         notes.isHidden = true
@@ -898,6 +947,7 @@ final class BrowserViewController: NSViewController {
         ])
     }
     @objc func showTabSwitcher(_ sender: Any?) {
+        addressPopover.close()
         notes.isHidden = true
         switcher.isHidden = false
         tabSearch.stringValue = ""
@@ -952,11 +1002,13 @@ final class BrowserViewController: NSViewController {
         buttons[searchRow].scrollToVisible(buttons[searchRow].bounds)
     }
     @objc func toggleNotes(_ sender: Any?) {
+        addressPopover.close()
         if !notes.isHidden { notes.isHidden = true; focusContent(); return }
         switcher.isHidden = true
         notes.show(profile: store.profile(selectedTab?.profileID ?? store.data.newTabProfileID))
     }
     func dismissOverlay() -> Bool {
+        if addressPopover.isShown { addressPopover.close(); focusContent(); return true }
         if !notes.isHidden { notes.isHidden = true; focusContent(); return true }
         if !switcher.isHidden { closeSwitcher(nil); return true }
         if !findBar.isHidden { closeFind(nil); return true }
@@ -1169,3 +1221,9 @@ extension BrowserViewController: NSSearchFieldDelegate {
 }
 
 private final class TopAlignedStackView: NSStackView { override var isFlipped: Bool { true } }
+
+extension BrowserViewController: NSPopoverDelegate {
+    func popoverDidClose(_ notification: Notification) {
+        onModalChange?(false)
+    }
+}

@@ -133,15 +133,68 @@ final class BrowserToolsTests: XCTestCase {
         browser.updateNotchMetrics(notchWidth: 200, stripHeight: 32)
         browser.newTab(nil)
         browser.view.layoutSubtreeIfNeeded()
-        let address = try XCTUnwrap(descendants(browser.view).compactMap { $0 as? NSTextField }.first { $0.placeholderString == "検索またはURLを入力" })
-        let rect = address.convert(address.bounds, to: browser.view)
-        XCTAssertGreaterThan(rect.width, 20)
-        XCTAssertGreaterThan(rect.minX, 420)
+        XCTAssertFalse(descendants(browser.view).contains { ($0 as? NSTextField)?.placeholderString == "検索またはURLを入力" }, "URL field should not occupy the toolbar")
+        _ = browser.dismissOverlay()
+        for width in [600.0, 640.0, 960.0] {
+            panel.setContentSize(NSSize(width: width, height: 500))
+            browser.view.layoutSubtreeIfNeeded()
+            browser.view.layoutSubtreeIfNeeded()
+            let buttons = descendants(browser.view).compactMap { $0 as? NSButton }.filter {
+                !$0.isHidden && ["戻る", "進む", "設定したページに戻る", "再読み込み", "URLを表示・検索 (⌘L)", "開いたままにする", "ページの操作"].contains($0.accessibilityLabel() ?? "")
+            }
+            let frames = buttons.map { $0.convert($0.bounds, to: browser.view) }.sorted { $0.minX < $1.minX }
+            XCTAssertGreaterThanOrEqual(frames.count, 5)
+            for frame in frames { XCTAssertGreaterThanOrEqual(frame.minX, width / 2 + 112 - 1); XCTAssertLessThanOrEqual(frame.maxX, width - 11) }
+            for pair in zip(frames, frames.dropFirst()) { XCTAssertLessThanOrEqual(pair.0.maxX + 3, pair.1.minX) }
+        }
         let web = try XCTUnwrap(descendants(browser.view).compactMap { $0 as? WKWebView }.first)
         let webRect = web.convert(web.bounds, to: browser.view)
         XCTAssertEqual(webRect.maxY, 468, accuracy: 1)
         XCTAssertEqual(webRect.minX, 8, accuracy: 1)
         XCTAssertEqual(webRect.minY, 8, accuracy: 1)
+    }
+
+    @MainActor
+    func testAddressPopoverAndHomeReturnToConfiguredPage() throws {
+        _ = NSApplication.shared
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let home = folder.appendingPathComponent("home.html")
+        let other = folder.appendingPathComponent("other.html")
+        try "<h1>Home</h1>".write(to: home, atomically: true, encoding: .utf8)
+        try "<h1>Other</h1>".write(to: other, atomically: true, encoding: .utf8)
+        let store = SettingsStore.shared
+        let saved = store.data
+        defer { store.data = saved }
+        var settings = SettingsData()
+        settings.pinnedTabs = [PinnedTab(name: "Home", url: home.absoluteString)]
+        store.data = settings
+        let browser = BrowserViewController()
+        let panel = NotchPanel(contentRect: NSRect(x: 100, y: 100, width: 960, height: 660), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.contentView = browser.view
+        panel.orderFrontRegardless()
+        defer { _ = browser.dismissOverlay(); panel.orderOut(nil) }
+        browser.view.layoutSubtreeIfNeeded()
+        let web = try XCTUnwrap(descendants(browser.view).compactMap { $0 as? WKWebView }.first)
+        func waitForURL(_ url: URL) {
+            let deadline = Date().addingTimeInterval(5)
+            while (web.url != url || web.isLoading) && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+            XCTAssertEqual(web.url, url)
+        }
+        waitForURL(home)
+        browser.focusAddressBar()
+        let address = try XCTUnwrap(NSApp.windows.flatMap { $0.contentView.map { descendants($0) } ?? [] }.compactMap { $0 as? NSTextField }.first { $0.placeholderString == "検索またはURLを入力" })
+        XCTAssertEqual(address.stringValue, home.absoluteString)
+        address.stringValue = other.absoluteString
+        XCTAssertTrue(NSApp.sendAction(try XCTUnwrap(address.action), to: address.target, from: address))
+        waitForURL(other)
+        XCTAssertFalse(browser.dismissOverlay(), "Submitting the URL must close the popover")
+        browser.goHome(nil)
+        waitForURL(home)
+        browser.focusAddressBar()
+        XCTAssertTrue(browser.dismissOverlay(), "Escape can dismiss the address popover")
+        XCTAssertFalse(browser.dismissOverlay())
     }
 
     @MainActor

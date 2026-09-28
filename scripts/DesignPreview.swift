@@ -35,6 +35,7 @@ struct DesignPreview {
         for (title, action, key, modifiers) in [
             ("クイックメモ", #selector(BrowserViewController.toggleNotes(_:)), "m", NSEvent.ModifierFlags([.command, .shift])),
             ("タブを検索", #selector(BrowserViewController.showTabSwitcher(_:)), "a", NSEvent.ModifierFlags([.command, .shift])),
+            ("URLを表示", #selector(BrowserViewController.focusAddressBar(_:)), "l", NSEvent.ModifierFlags.command),
             ("ページ内を検索", #selector(BrowserViewController.showFind(_:)), "f", NSEvent.ModifierFlags.command)
         ] {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: modifiers.contains(.shift) ? key.uppercased() : key)
@@ -46,9 +47,16 @@ struct DesignPreview {
         manager.start()
         manager.keepOpen = true
         manager.toggle()
-        manager.browser.newTab(nil)
+        if CommandLine.arguments.contains("--settings") {
+            DispatchQueue.main.async { settings.present() }
+        } else {
+            manager.browser.newTab(nil)
+        }
         if CommandLine.arguments.contains("--tabs") {
             DispatchQueue.main.async { app.activate(); manager.browser.showTabSwitcher(nil) }
+        }
+        if CommandLine.arguments.contains("--address") {
+            DispatchQueue.main.async { app.activate(); manager.browser.focusAddressBar(nil) }
         }
         withExtendedLifetime((manager, settings)) { app.run() }
     }
