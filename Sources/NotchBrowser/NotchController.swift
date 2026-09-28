@@ -225,6 +225,7 @@ final class NotchController: NSObject, NSWindowDelegate {
     func expand(focus: Bool) {
         hoverTimer?.invalidate()
         if !isExpanded {
+            manager.browser.prepareForOpen()
             manager.willExpand(self)
             isExpanded = true
             panel.hasShadow = true

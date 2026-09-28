@@ -32,6 +32,12 @@ struct PinnedTab: Codable, Identifiable, Hashable {
     var host: String? { URL(string: url)?.host() }
 }
 
+/// Which tab to show when the notch opens.
+enum OpenTabBehavior: Codable, Hashable {
+    case lastViewed
+    case pinned(UUID)
+}
+
 struct DisplaySettings: Codable, Hashable {
     var enabled: Bool
     /// Opacity of the collapsed notch (1 = solid black).
@@ -51,6 +57,10 @@ struct SettingsData: Codable {
     var displays: [String: DisplaySettings] = [:]
     var countdownEnabled = true
     var countdownMinutes = 30
+    var openTabBehavior = OpenTabBehavior.lastViewed
+    var grayscaleIcons = false
+    /// With grayscale icons, still show the selected tab's icon in color.
+    var colorSelectedIcon = true
 
     init() {}
 
@@ -64,6 +74,9 @@ struct SettingsData: Codable {
         displays = try c.decodeIfPresent([String: DisplaySettings].self, forKey: .displays) ?? fallback.displays
         countdownEnabled = try c.decodeIfPresent(Bool.self, forKey: .countdownEnabled) ?? fallback.countdownEnabled
         countdownMinutes = try c.decodeIfPresent(Int.self, forKey: .countdownMinutes) ?? fallback.countdownMinutes
+        openTabBehavior = try c.decodeIfPresent(OpenTabBehavior.self, forKey: .openTabBehavior) ?? fallback.openTabBehavior
+        grayscaleIcons = try c.decodeIfPresent(Bool.self, forKey: .grayscaleIcons) ?? fallback.grayscaleIcons
+        colorSelectedIcon = try c.decodeIfPresent(Bool.self, forKey: .colorSelectedIcon) ?? fallback.colorSelectedIcon
         if !profiles.contains(where: \.isDefault) {
             profiles.insert(Profile(id: Profile.defaultID, name: "デフォルト"), at: 0)
         }
@@ -75,7 +88,12 @@ final class SettingsStore: ObservableObject {
     private static let key = "settings.v1"
 
     @Published var data: SettingsData {
-        didSet { save() }
+        didSet {
+            if case .pinned(let id) = data.openTabBehavior, pinnedTab(id) == nil {
+                data.openTabBehavior = .lastViewed
+            }
+            save()
+        }
     }
 
     private init() {
@@ -130,6 +148,13 @@ final class SettingsStore: ObservableObject {
 
     func setDisplaySettings(_ settings: DisplaySettings, for screen: NSScreen) {
         data.displays[screen.displayUUID] = settings
+    }
+
+    /// The pinned tab last viewed, restored on launch. Kept out of `data` so selecting a
+    /// tab doesn't trigger a settings sync.
+    var lastViewedPinnedID: UUID? {
+        get { UserDefaults.standard.string(forKey: "lastViewedPinnedID").flatMap(UUID.init) }
+        set { UserDefaults.standard.set(newValue?.uuidString, forKey: "lastViewedPinnedID") }
     }
 
     func deleteProfile(_ id: UUID) {

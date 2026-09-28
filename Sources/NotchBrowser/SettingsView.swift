@@ -343,6 +343,26 @@ struct GeneralSettings: View {
 
     var body: some View {
         Form {
+            Section {
+                Picker("ノッチを開いたときのタブ", selection: $store.data.openTabBehavior) {
+                    Text("前回見ていたタブ").tag(OpenTabBehavior.lastViewed)
+                    if !store.data.pinnedTabs.isEmpty {
+                        Divider()
+                        ForEach(store.data.pinnedTabs) { tab in
+                            Text(tab.name).tag(OpenTabBehavior.pinned(tab.id))
+                        }
+                    }
+                }
+                Toggle("アイコンをグレースケールで表示", isOn: $store.data.grayscaleIcons)
+                Toggle("選択中のタブはカラーで表示", isOn: $store.data.colorSelectedIcon)
+                    .disabled(!store.data.grayscaleIcons)
+            } header: {
+                Text("タブ")
+            } footer: {
+                Text("タブはノッチ上でドラッグして並べ替えられます（固定タブと通常タブはそれぞれのグループ内で移動します）。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
             Section("次の予定") {
                 Toggle("次の予定までの分数をノッチに表示", isOn: $store.data.countdownEnabled)
                 Stepper(value: $store.data.countdownMinutes, in: 5...120, step: 5) {

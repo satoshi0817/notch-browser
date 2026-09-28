@@ -24,8 +24,8 @@ final class Tab {
         return webView.url?.host() ?? "新規タブ"
     }
 
-    var icon: NSImage {
-        TabIconRenderer.image(for: pinned?.icon ?? .favicon, hosts: [webView.url?.host(), pinned?.host])
+    func icon(grayscale: Bool) -> NSImage {
+        TabIconRenderer.image(for: pinned?.icon ?? .favicon, hosts: [webView.url?.host(), pinned?.host], grayscale: grayscale)
     }
 
     func replaceWebView(_ newWebView: WKWebView) {
@@ -40,6 +40,8 @@ final class BrowserViewController: NSViewController {
     var keepOpen = false { didSet { updateChrome() } }
 
     private var tabs: [Tab] = []
+    private var tabButtons: [TabButton] = []
+    private var isDraggingTab = false
     private var selectedIndex: Int?
     private var selectedTab: Tab? { selectedIndex.map { tabs[$0] } }
     private var downloadDestinations: [ObjectIdentifier: URL] = [:]
@@ -126,7 +128,7 @@ final class BrowserViewController: NSViewController {
         ])
 
         syncPinnedTabs()
-        select(tabs.isEmpty ? nil : 0)
+        selectInitialTab()
 
         NotificationCenter.default.addObserver(forName: .faviconUpdated, object: nil, queue: .main) { [weak self] _ in
             self?.chromeNeedsUpdate()
@@ -262,8 +264,25 @@ final class BrowserViewController: NSViewController {
 
     private var firstUnpinnedIndex: Int { tabs.firstIndex { $0.pinnedID == nil } ?? tabs.count }
 
+    private func selectInitialTab() {
+        let id: UUID?
+        switch store.data.openTabBehavior {
+        case .lastViewed: id = store.lastViewedPinnedID
+        case .pinned(let pinnedID): id = pinnedID
+        }
+        select(id.flatMap { id in tabs.firstIndex { $0.pinnedID == id } } ?? (tabs.isEmpty ? nil : 0))
+    }
+
+    /// Called just before the notch expands.
+    func prepareForOpen() {
+        guard case .pinned(let id) = store.data.openTabBehavior,
+              let tab = tabs.first(where: { $0.pinnedID == id }) else { return }
+        select(tab)
+    }
+
     private func select(_ index: Int?) {
         selectedIndex = index
+        if let index, let id = tabs[index].pinnedID { store.lastViewedPinnedID = id }
         for (i, tab) in tabs.enumerated() { tab.webView.isHidden = i != index }
         updateChrome()
     }
@@ -316,6 +335,31 @@ final class BrowserViewController: NSViewController {
     @objc private func tabClicked(_ sender: NSButton) {
         select(sender.tag)
         focusContent()
+    }
+
+    /// Drops the dragged tab where it was released, within its own group (pinned or not).
+    private func tabDragEnded(_ button: TabButton) {
+        isDraggingTab = false
+        let from = button.tag
+        guard tabs.indices.contains(from) else { return updateChrome() }
+        let tab = tabs[from]
+        let midX = button.frame.midX
+        let others = tabButtons.filter { $0 !== button }
+        var destination = others.filter { $0.frame.midX < midX }.count
+
+        let pinnedCount = tabs.filter { $0.pinnedID != nil }.count - (tab.pinnedID != nil ? 1 : 0)
+        destination = tab.pinnedID != nil ? min(destination, pinnedCount) : max(destination, pinnedCount)
+
+        let selected = selectedTab
+        tabs.remove(at: from)
+        tabs.insert(tab, at: destination)
+        selectedIndex = selected.flatMap { s in tabs.firstIndex { $0 === s } }
+
+        if tab.pinnedID != nil {
+            let order = tabs.compactMap(\.pinnedID)
+            store.data.pinnedTabs.sort { (order.firstIndex(of: $0.id) ?? .max) < (order.firstIndex(of: $1.id) ?? .max) }
+        }
+        updateChrome()
     }
 
     // MARK: Tab context menu
@@ -400,7 +444,10 @@ final class BrowserViewController: NSViewController {
     }
 
     private func rebuildTabButtons() {
+        guard !isDraggingTab else { return } // the dragged button must stay alive
         tabStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        tabButtons = []
+        let grayscale = store.data.grayscaleIcons
         for (i, tab) in tabs.enumerated() {
             if i == firstUnpinnedIndex, i > 0 {
                 let divider = NSBox()
@@ -409,7 +456,10 @@ final class BrowserViewController: NSViewController {
                 tabStack.addArrangedSubview(divider)
             }
             let iconOnly = tab.pinned?.iconOnly ?? false
-            let button = NSButton(title: iconOnly ? "" : tab.displayName, image: tab.icon, target: self, action: #selector(tabClicked))
+            let colored = !grayscale || (store.data.colorSelectedIcon && i == selectedIndex)
+            let button = TabButton(title: iconOnly ? "" : tab.displayName, image: tab.icon(grayscale: !colored), target: self, action: #selector(tabClicked))
+            button.onDragBegan = { [weak self] _ in self?.isDraggingTab = true }
+            button.onDragEnded = { [weak self] button in self?.tabDragEnded(button) }
             button.bezelStyle = .recessed
             button.setButtonType(.pushOnPushOff)
             button.state = i == selectedIndex ? .on : .off
@@ -427,6 +477,7 @@ final class BrowserViewController: NSViewController {
             }
             button.menu = contextMenu(for: tab, at: i)
             tabStack.addArrangedSubview(button)
+            tabButtons.append(button)
         }
         tabStack.addArrangedSubview(iconButton("plus", "新規タブ (⌘T)", #selector(newTab)))
     }
@@ -658,6 +709,41 @@ extension BrowserViewController: WKUIDelegate {
             alert.addButton(withTitle: "キャンセル")
             raise(alert.window)
             return alert.runModal() == .alertFirstButtonReturn
+        }
+    }
+}
+
+// MARK: - TabButton
+
+/// Tab button that can be dragged sideways to reorder. A click without movement acts normally.
+final class TabButton: NSButton {
+    var onDragBegan: ((TabButton) -> Void)?
+    var onDragEnded: ((TabButton) -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        guard let window else { return super.mouseDown(with: event) }
+        let start = event.locationInWindow
+        let originX = frame.origin.x
+        var dragging = false
+
+        while let next = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+            let dx = next.locationInWindow.x - start.x
+            if next.type == .leftMouseUp {
+                if dragging {
+                    onDragEnded?(self)
+                } else {
+                    sendAction(action, to: target)
+                }
+                return
+            }
+            if !dragging, abs(dx) > 4 {
+                dragging = true
+                onDragBegan?(self)
+                alphaValue = 0.85
+            }
+            if dragging {
+                frame.origin.x = originX + dx
+            }
         }
     }
 }

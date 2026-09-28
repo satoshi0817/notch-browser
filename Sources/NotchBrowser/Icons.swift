@@ -1,4 +1,5 @@
 import AppKit
+import CoreImage
 import UniformTypeIdentifiers
 import WebKit
 
@@ -69,6 +70,7 @@ final class FaviconCache {
                 DispatchQueue.main.async {
                     self.memory[host] = image
                     try? data.write(to: self.fileURL(for: host))
+                    TabIconRenderer.clearGrayscaleCache()
                     NotificationCenter.default.post(name: .faviconUpdated, object: host)
                 }
             }.resume()
@@ -84,11 +86,15 @@ enum TabIconRenderer {
     ]
 
     /// `hosts` are tried in order when the icon is the site favicon.
-    static func image(for icon: TabIcon, hosts: [String?], size: CGFloat = 16) -> NSImage {
-        let image: NSImage?
+    static func image(for icon: TabIcon, hosts: [String?], size: CGFloat = 16, grayscale: Bool = false) -> NSImage {
+        var image: NSImage?
+        var cacheKey = "\(icon)|\(size)"
         switch icon {
         case .favicon:
-            image = hosts.lazy.compactMap { $0 }.compactMap { FaviconCache.shared.image(for: $0) }.first
+            if let (host, favicon) = hosts.lazy.compactMap({ $0 }).compactMap({ h in FaviconCache.shared.image(for: h).map { (h, $0) } }).first {
+                image = favicon
+                cacheKey += "|\(host)"
+            }
         case .symbol(let name):
             image = symbol(name, size: size)
         case .emoji(let emoji):
@@ -100,7 +106,27 @@ enum TabIconRenderer {
         if image.isTemplate { return image }
         let sized = image.copy() as! NSImage
         sized.size = NSSize(width: size, height: size)
-        return sized
+        return grayscale ? desaturated(sized, key: cacheKey) : sized
+    }
+
+    private static let ciContext = CIContext()
+    private static let grayscaleCache = NSCache<NSString, NSImage>()
+
+    /// Called when a favicon is replaced, since cache keys don't capture image content.
+    static func clearGrayscaleCache() { grayscaleCache.removeAllObjects() }
+
+    /// Desaturated copy of a color image. Template images (SF Symbols) are already monochrome.
+    private static func desaturated(_ image: NSImage, key: String) -> NSImage {
+        if let cached = grayscaleCache.object(forKey: key as NSString) { return cached }
+        guard let tiff = image.tiffRepresentation, let input = CIImage(data: tiff),
+              let filter = CIFilter(name: "CIColorControls") else { return image }
+        filter.setValue(input, forKey: kCIInputImageKey)
+        filter.setValue(0, forKey: kCIInputSaturationKey)
+        guard let output = filter.outputImage,
+              let cgImage = ciContext.createCGImage(output, from: output.extent) else { return image }
+        let result = NSImage(cgImage: cgImage, size: image.size)
+        grayscaleCache.setObject(result, forKey: key as NSString)
+        return result
     }
 
     static func symbol(_ name: String, size: CGFloat) -> NSImage? {
