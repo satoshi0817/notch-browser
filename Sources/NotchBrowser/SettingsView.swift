@@ -369,7 +369,7 @@ struct GeneralSettings: View {
                     LabeledContent("表示し始めるタイミング", value: "\(store.data.countdownMinutes) 分前から")
                 }
                 .disabled(!store.data.countdownEnabled)
-                Text("Mac の「カレンダー」アプリの予定を使います。Google カレンダーは システム設定 › インターネットアカウント で追加できます。")
+                Text("Mac の「カレンダー」アプリの予定を使うため、オンのときだけカレンダーへのアクセスを求めます。タブで開くカレンダーのサイトとは別です。Google カレンダーは システム設定 › インターネットアカウント で追加できます。")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("ショートカット") {

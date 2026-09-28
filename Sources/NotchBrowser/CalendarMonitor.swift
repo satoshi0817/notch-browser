@@ -5,15 +5,30 @@ import Foundation
 /// that starts within `thresholdMinutes`, or nil when there is none.
 final class CalendarMonitor {
     var onChange: ((Int?) -> Void)?
-    var isEnabled = true { didSet { refresh() } }
+    var isEnabled = true {
+        didSet {
+            requestAccessIfNeeded()
+            refresh()
+        }
+    }
     var thresholdMinutes = 30 { didSet { refresh() } }
 
     private let store = EKEventStore()
     private var timer: Timer?
     private var hasAccess = false
+    private var isStarted = false
+    private var didRequestAccess = false
     private var lastValue: Int??
 
     func start() {
+        isStarted = true
+        requestAccessIfNeeded()
+    }
+
+    /// Calendar access is only needed for the countdown, so don't ask while it's off.
+    private func requestAccessIfNeeded() {
+        guard isStarted, isEnabled, !didRequestAccess else { return }
+        didRequestAccess = true
         store.requestFullAccessToEvents { [weak self] granted, _ in
             guard granted else { return }
             DispatchQueue.main.async { self?.begin() }
