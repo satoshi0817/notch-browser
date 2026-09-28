@@ -122,6 +122,10 @@ final class NotchController: NSObject, NSWindowDelegate {
     static let level = NSWindow.Level.popUpMenu
 
     /// Drops the notch just below a launcher window (e.g. Raycast), or restores it.
+    func applyScreenCaptureSetting() {
+        panel.sharingType = SettingsStore.shared.data.hideFromScreenCapture ? .none : .readOnly
+    }
+
     func setBelowLauncher(level launcherLevel: Int?) {
         panel.level = launcherLevel.map { NSWindow.Level(rawValue: $0 - 1) } ?? Self.level
     }
@@ -141,6 +145,7 @@ final class NotchController: NSObject, NSWindowDelegate {
         panel.isMovable = false
         panel.hidesOnDeactivate = false
         panel.appearance = NSAppearance(named: .darkAqua)
+        applyScreenCaptureSetting()
         panel.delegate = self
         panel.contentView = root
         panel.onCancel = { [weak self] in self?.collapse() }
@@ -335,13 +340,20 @@ final class NotchManager {
         browser.view.alphaValue = 0
         applyCalendarSettings()
         rebuild()
+        applyWindowSettings()
         calendar.start()
     }
 
     private func settingsChanged() {
         applyCalendarSettings()
         rebuild()
+        applyWindowSettings()
         browser.settingsChanged()
+    }
+
+    private func applyWindowSettings() {
+        controllers.values.forEach { $0.applyScreenCaptureSetting() }
+        browser.hideFromScreenCapture = SettingsStore.shared.data.hideFromScreenCapture
     }
 
     private func applyCalendarSettings() {

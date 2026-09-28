@@ -38,6 +38,7 @@ final class BrowserViewController: NSViewController {
     var onModalChange: ((Bool) -> Void)?
     var onOpenSettings: (() -> Void)?
     var keepOpen = false { didSet { updateChrome() } }
+    var hideFromScreenCapture = true
 
     private var tabs: [Tab] = []
     private var tabButtons: [TabButton] = []
@@ -593,6 +594,7 @@ final class BrowserViewController: NSViewController {
 
     private func raise(_ window: NSWindow) {
         window.level = NSWindow.Level(rawValue: NotchController.level.rawValue + 1)
+        if hideFromScreenCapture { window.sharingType = .none }
     }
 }
 

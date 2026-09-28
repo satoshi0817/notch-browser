@@ -61,6 +61,8 @@ struct SettingsData: Codable {
     var grayscaleIcons = false
     /// With grayscale icons, still show the selected tab's icon in color.
     var colorSelectedIcon = true
+    /// Keep the notch out of screen sharing and screenshots.
+    var hideFromScreenCapture = true
 
     init() {}
 
@@ -74,6 +76,7 @@ struct SettingsData: Codable {
         displays = try c.decodeIfPresent([String: DisplaySettings].self, forKey: .displays) ?? fallback.displays
         countdownEnabled = try c.decodeIfPresent(Bool.self, forKey: .countdownEnabled) ?? fallback.countdownEnabled
         countdownMinutes = try c.decodeIfPresent(Int.self, forKey: .countdownMinutes) ?? fallback.countdownMinutes
+        hideFromScreenCapture = try c.decodeIfPresent(Bool.self, forKey: .hideFromScreenCapture) ?? fallback.hideFromScreenCapture
         openTabBehavior = try c.decodeIfPresent(OpenTabBehavior.self, forKey: .openTabBehavior) ?? fallback.openTabBehavior
         grayscaleIcons = try c.decodeIfPresent(Bool.self, forKey: .grayscaleIcons) ?? fallback.grayscaleIcons
         colorSelectedIcon = try c.decodeIfPresent(Bool.self, forKey: .colorSelectedIcon) ?? fallback.colorSelectedIcon

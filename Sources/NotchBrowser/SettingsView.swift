@@ -372,6 +372,15 @@ struct GeneralSettings: View {
                 Text("Mac の「カレンダー」アプリの予定を使うため、オンのときだけカレンダーへのアクセスを求めます。タブで開くカレンダーのサイトとは別です。Google カレンダーは システム設定 › インターネットアカウント で追加できます。")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            Section {
+                Toggle("画面共有・スクリーンショットに表示しない", isOn: $store.data.hideFromScreenCapture)
+            } header: {
+                Text("プライバシー")
+            } footer: {
+                Text("Zoom や Google Meet などで画面を共有しているとき、ノッチのブラウザは相手に映りません。一部の録画・共有アプリでは効かない場合があります。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
             Section("ショートカット") {
                 LabeledContent("開く / 閉じる", value: "⌃⌥N")
                 LabeledContent("設定", value: "⌘,")
