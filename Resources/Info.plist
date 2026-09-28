@@ -7,7 +7,7 @@
     <key>CFBundleDisplayName</key>
     <string>NotchBrowser</string>
     <key>CFBundleIdentifier</key>
-    <string>com.ssuzuki.NotchBrowser</string>
+    <string>com.satoshi0817.NotchBrowser</string>
     <key>CFBundleExecutable</key>
     <string>NotchBrowser</string>
     <key>CFBundlePackageType</key>
