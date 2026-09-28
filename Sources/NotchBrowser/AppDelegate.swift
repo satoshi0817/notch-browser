@@ -67,7 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         edit.addItem(item("ペースト", #selector(NSText.paste(_:)), "v"))
         edit.addItem(item("すべてを選択", #selector(NSText.selectAll(_:)), "a"))
         edit.addItem(.separator())
-        edit.addItem(item("検索", #selector(NSTextView.performFindPanelAction(_:)), "f", tag: Int(NSFindPanelAction.showFindPanel.rawValue)))
+        edit.addItem(item("ページ内を検索", #selector(BrowserViewController.showFind(_:)), "f", target: browser))
         addSubmenu(edit, to: main)
 
         let nav = NSMenu(title: "移動")
@@ -77,6 +77,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         nav.addItem(item("再読み込み", #selector(BrowserViewController.reloadPage(_:)), "r", target: browser))
         nav.addItem(item("戻る", #selector(BrowserViewController.goBack(_:)), "[", target: browser))
         nav.addItem(item("進む", #selector(BrowserViewController.goForward(_:)), "]", target: browser))
+        nav.addItem(item("閉じたタブを戻す", #selector(BrowserViewController.reopenClosedTab(_:)), "t", [.command, .shift], target: browser))
+        nav.addItem(item("クイックメモ", #selector(BrowserViewController.toggleNotes(_:)), "m", [.command, .shift], target: browser))
+        nav.addItem(item("タブを検索", #selector(BrowserViewController.showTabSwitcher(_:)), "a", [.command, .shift], target: browser))
+        nav.addItem(item("拡大", #selector(BrowserViewController.zoomIn(_:)), "+", target: browser))
+        nav.addItem(item("拡大", #selector(BrowserViewController.zoomIn(_:)), "=", target: browser))
+        nav.addItem(item("縮小", #selector(BrowserViewController.zoomOut(_:)), "-", target: browser))
+        nav.addItem(item("実際のサイズ", #selector(BrowserViewController.resetZoom(_:)), "0", target: browser))
         nav.addItem(.separator())
         for n in 1...9 {
             nav.addItem(item("タブ \(n)", #selector(BrowserViewController.selectTabByNumber(_:)), "\(n)", target: browser, tag: n))

@@ -20,6 +20,12 @@ final class NotchPanel: NSPanel {
         super.sendEvent(event)
     }
 
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        // Browser commands must also work while editing a note or a web form.
+        if event.modifierFlags.contains(.command), NSApp.mainMenu?.performKeyEquivalent(with: event) == true { return true }
+        return super.performKeyEquivalent(with: event)
+    }
+
     override func cancelOperation(_ sender: Any?) {
         onCancel?()
     }
@@ -153,7 +159,10 @@ final class NotchController: NSObject, NSWindowDelegate {
         applyScreenCaptureSetting()
         panel.delegate = self
         panel.contentView = root
-        panel.onCancel = { [weak self] in self?.collapse() }
+        panel.onCancel = { [weak self] in
+            guard let self, !self.manager.browser.dismissOverlay() else { return }
+            self.collapse()
+        }
 
         root.onHoverChange = { [weak self] inside in self?.hoverChanged(inside) }
         root.onClick = { [weak self] in self?.expand(focus: true) }

@@ -15,8 +15,9 @@ struct Profile: Codable, Identifiable, Hashable {
 enum TabIcon: Codable, Hashable {
     case favicon
     case symbol(String)
+    // Retained only to decode preferences from older releases.
     case emoji(String)
-    /// File name inside `IconStore.directory`.
+    /// Legacy custom image file name; rendered as an automatic symbol now.
     case image(String)
 }
 
@@ -64,6 +65,7 @@ struct SettingsData: Codable {
     /// Keep the notch out of screen sharing and screenshots.
     var hideFromScreenCapture = true
     var motion = MotionSettings()
+    var glassTint = 0.5
 
     init() {}
 
@@ -81,6 +83,8 @@ struct SettingsData: Codable {
         openTabBehavior = try c.decodeIfPresent(OpenTabBehavior.self, forKey: .openTabBehavior) ?? fallback.openTabBehavior
         grayscaleIcons = try c.decodeIfPresent(Bool.self, forKey: .grayscaleIcons) ?? fallback.grayscaleIcons
         colorSelectedIcon = try c.decodeIfPresent(Bool.self, forKey: .colorSelectedIcon) ?? fallback.colorSelectedIcon
+        let tint = (try? c.decode(Double.self, forKey: .glassTint)) ?? fallback.glassTint
+        glassTint = tint.isFinite ? min(1, max(0, tint)) : fallback.glassTint
         motion = (try? c.decode(MotionSettings.self, forKey: .motion)) ?? fallback.motion
         if !profiles.contains(where: \.isDefault) {
             profiles.insert(Profile(id: Profile.defaultID, name: "デフォルト"), at: 0)
@@ -169,6 +173,7 @@ final class SettingsStore: ObservableObject {
         }
         if data.newTabProfileID == id { data.newTabProfileID = Profile.defaultID }
         data.profiles.removeAll { $0.id == id }
+        ScratchpadStore().remove(for: id)
         // Give open tabs a moment to move off the store before deleting it.
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { ProfileDataStores.delete(id) }
     }

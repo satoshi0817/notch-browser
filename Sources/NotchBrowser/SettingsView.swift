@@ -1,18 +1,19 @@
 import AppKit
 import SwiftUI
-import UniformTypeIdentifiers
 
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     convenience init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 680, height: 500),
+            contentRect: NSRect(x: 0, y: 0, width: 920, height: 620),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "NotchBrowser 設定"
+        window.titlebarAppearsTransparent = true
+        window.appearance = NSAppearance(named: .darkAqua)
         window.contentViewController = NSHostingController(rootView: SettingsView().environmentObject(SettingsStore.shared))
-        window.setContentSize(NSSize(width: 680, height: 500))
+        window.setContentSize(NSSize(width: 920, height: 620))
         window.isReleasedWhenClosed = false
         self.init(window: window)
         window.delegate = self
@@ -50,17 +51,81 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 }
 
-struct SettingsView: View {
-    var body: some View {
-        TabView {
-            PinnedTabsSettings().tabItem { Label("固定タブ", systemImage: "square.stack") }
-            ProfilesSettings().tabItem { Label("プロファイル", systemImage: "person.2") }
-            DisplaysSettings().tabItem { Label("ディスプレイ", systemImage: "display") }
-            MotionSettingsView().tabItem { Label("動き", systemImage: "waveform.path") }
-            GeneralSettings().tabItem { Label("一般", systemImage: "gearshape") }
+private enum SettingsSection: String, CaseIterable, Identifiable {
+    case tabs = "固定ページ", profiles = "プロファイル", displays = "ディスプレイ", motion = "動き", general = "一般"
+    var id: Self { self }
+    var symbol: String {
+        switch self {
+        case .tabs: "square.stack"
+        case .profiles: "person.crop.circle"
+        case .displays: "display"
+        case .motion: "waveform.path"
+        case .general: "slider.horizontal.3"
         }
-        .padding(20)
-        .frame(minWidth: 640, minHeight: 460)
+    }
+    var subtitle: String {
+        switch self {
+        case .tabs: "いつものページを、自分の並びで。"
+        case .profiles: "仕事とプライベートのログインを分ける。"
+        case .displays: "画面ごとに、ちょうどいいサイズへ。"
+        case .motion: "開く、閉じる。その感触まで自分好みに。"
+        case .general: "見た目と、日々の使い方を整える。"
+        }
+    }
+}
+
+struct SettingsView: View {
+    @State private var section = SettingsSection.tabs
+    var body: some View {
+        HStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 24) {
+                HStack(spacing: 10) {
+                    Image(systemName: "safari").font(.system(size: 25, weight: .light)).foregroundStyle(.cyan)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("NotchBrowser").font(.system(size: 14, weight: .semibold, design: .rounded))
+                        Text("あなたの小さなワークスペース").font(.system(size: 9)).foregroundStyle(.secondary)
+                    }
+                }.padding(.top, 8)
+                VStack(spacing: 8) {
+                    ForEach(SettingsSection.allCases) { item in
+                        Button { section = item } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: item.symbol).frame(width: 20)
+                                Text(item.rawValue)
+                                Spacer()
+                                if item == section { Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold)) }
+                            }
+                            .font(.system(size: 13, weight: item == section ? .semibold : .regular))
+                            .padding(12)
+                            .background(item == section ? Color.blue.opacity(0.25) : .clear, in: RoundedRectangle(cornerRadius: 13))
+                            .foregroundStyle(item == section ? .white : .secondary)
+                        }.buttonStyle(.plain).accessibilityLabel(item.rawValue)
+                    }
+                }
+                Spacer()
+                Label("⌃ ⌥ N で開く", systemImage: "keyboard").font(.system(size: 11)).foregroundStyle(.secondary)
+            }.padding(20).frame(width: 210).background(.ultraThinMaterial)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 12) {
+                    Image(systemName: section.symbol).font(.system(size: 22)).foregroundStyle(.cyan)
+                        .frame(width: 48, height: 48).modifier(GlassCard())
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(section.rawValue).font(.system(size: 24, weight: .semibold, design: .rounded))
+                        Text(section.subtitle).font(.system(size: 12)).foregroundStyle(.secondary)
+                    }
+                }.padding(.horizontal, 24).padding(.top, 22).padding(.bottom, 12)
+                Group {
+                    switch section {
+                    case .tabs: PinnedTabsSettings()
+                    case .profiles: ProfilesSettings()
+                    case .displays: DisplaysSettings()
+                    case .motion: MotionSettingsView()
+                    case .general: GeneralSettings()
+                    }
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .background(LinearGradient(colors: [Color(red: 0.09, green: 0.12, blue: 0.19), Color(red: 0.055, green: 0.065, blue: 0.10)], startPoint: .topLeading, endPoint: .bottomTrailing))
+        }.frame(minWidth: 880, minHeight: 560).preferredColorScheme(.dark).tint(.blue)
     }
 }
 
@@ -89,9 +154,10 @@ struct PinnedTabsSettings: View {
                 }
                 Divider()
                 HStack(spacing: 0) {
-                    Button { add() } label: { Image(systemName: "plus").frame(width: 24, height: 20) }
+                    Button { add() } label: { Image(systemName: "plus").frame(width: 24, height: 20) }.help("固定ページを追加")
                     Button { remove() } label: { Image(systemName: "minus").frame(width: 24, height: 20) }
                         .disabled(selection == nil)
+                        .help("選択した固定ページを削除")
                     Spacer()
                 }
                 .buttonStyle(.borderless)
@@ -103,7 +169,7 @@ struct PinnedTabsSettings: View {
                 if let id = selection, let binding = binding(for: id) {
                     PinnedTabEditor(tab: binding)
                 } else {
-                    Text("タブを選択するか、＋で追加してください")
+                    Label("タブを選択するか、追加してください", systemImage: "plus.circle")
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
@@ -138,32 +204,6 @@ struct PinnedTabEditor: View {
     @EnvironmentObject var store: SettingsStore
     @Binding var tab: PinnedTab
 
-    private enum IconKind: String, CaseIterable, Identifiable {
-        case favicon = "サイトのアイコン", symbol = "シンボル", emoji = "絵文字", image = "画像"
-        var id: Self { self }
-    }
-
-    private var iconKind: Binding<IconKind> {
-        Binding(
-            get: {
-                switch tab.icon {
-                case .favicon: .favicon
-                case .symbol: .symbol
-                case .emoji: .emoji
-                case .image: .image
-                }
-            },
-            set: { kind in
-                switch kind {
-                case .favicon: tab.icon = .favicon
-                case .symbol: tab.icon = .symbol("star")
-                case .emoji: tab.icon = .emoji("⭐️")
-                case .image: chooseImage()
-                }
-            }
-        )
-    }
-
     var body: some View {
         Form {
             TextField("名前", text: $tab.name)
@@ -174,42 +214,18 @@ struct PinnedTabEditor: View {
             Toggle("タブにアイコンのみ表示", isOn: $tab.iconOnly)
 
             Section("アイコン") {
-                Picker("種類", selection: iconKind) {
-                    ForEach(IconKind.allCases) { Text($0.rawValue).tag($0) }
+                LabeledContent("現在のアイコン") {
+                    Image(nsImage: TabIconRenderer.image(for: tab.icon, hosts: [tab.host], size: 24))
                 }
-                .pickerStyle(.segmented)
-
-                switch tab.icon {
-                case .favicon:
-                    LabeledContent("プレビュー") {
-                        Image(nsImage: TabIconRenderer.image(for: .favicon, hosts: [tab.host], size: 24))
-                    }
-                    Text("一度開くとサイトのアイコンが取得されます").font(.caption).foregroundStyle(.secondary)
-                case .symbol(let current):
-                    SymbolGrid(selected: current) { tab.icon = .symbol($0) }
-                case .emoji(let current):
-                    TextField("絵文字", text: Binding(
-                        get: { current },
-                        set: { tab.icon = .emoji(String($0.prefix(2))) }
-                    ))
-                    Text("⌃⌘Space で絵文字ピッカーを開けます").font(.caption).foregroundStyle(.secondary)
-                case .image:
-                    HStack {
-                        Image(nsImage: TabIconRenderer.image(for: tab.icon, hosts: [], size: 32))
-                        Button("画像を選択…") { chooseImage() }
-                    }
+                SymbolGrid(selected: TabIconRenderer.symbolName(for: tab.icon, hosts: [tab.host])) {
+                    tab.icon = .symbol($0)
                 }
+                Button("URLに合わせて自動選択") { tab.icon = .favicon }
+                Text("ページの用途に合うアイコンを選べます。")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
-    }
-
-    private func chooseImage() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.image]
-        panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK, let url = panel.url, let fileName = IconStore.importImage(from: url) else { return }
-        tab.icon = .image(fileName)
     }
 }
 
@@ -226,7 +242,7 @@ struct SymbolGrid: View {
                         .background(name == selected ? Color.accentColor.opacity(0.3) : .clear, in: RoundedRectangle(cornerRadius: 6))
                 }
                 .buttonStyle(.plain)
-                .help(name)
+                .help(name).accessibilityLabel(name)
             }
         }
     }
@@ -281,7 +297,7 @@ struct ProfilesSettings: View {
             Button("削除", role: .destructive) { if let p = confirmDelete { store.deleteProfile(p.id) } }
             Button("キャンセル", role: .cancel) {}
         } message: {
-            Text("このプロファイルのログイン情報も削除されます。使っていた固定タブはデフォルトに戻ります。")
+            Text("このプロファイルのログイン情報とクイックメモも削除されます。使っていた固定タブはデフォルトに戻ります。")
         }
         .alert("「\(confirmClear?.name ?? "")」のログイン情報を消去しますか？", isPresented: Binding(get: { confirmClear != nil }, set: { if !$0 { confirmClear = nil } })) {
             Button("消去", role: .destructive) { if let p = confirmClear { ProfileDataStores.clearData(for: p.id) } }
@@ -418,6 +434,20 @@ struct GeneralSettings: View {
     var body: some View {
         Form {
             Section {
+                LabeledContent("ガラスの濃度") {
+                    HStack {
+                        Image(systemName: "circle.lefthalf.filled")
+                        Slider(value: $store.data.glassTint, in: 0...1)
+                            .accessibilityLabel("ガラスの濃度")
+                        Text("\(Int(store.data.glassTint * 100))%")
+                            .monospacedDigit().frame(width: 40)
+                    }
+                }
+                Text("透明感と読みやすさのバランスを調整します。macOSの「透明度を下げる」「コントラストを上げる」が有効なときは、不透明な背景で表示します。")
+                    .font(.caption).foregroundStyle(.secondary)
+            } header: { Label("Liquid Glass", systemImage: "circle.hexagongrid") }
+
+            Section {
                 Picker("ノッチを開いたときのタブ", selection: $store.data.openTabBehavior) {
                     Text("前回見ていたタブ").tag(OpenTabBehavior.lastViewed)
                     if !store.data.pinnedTabs.isEmpty {
@@ -427,9 +457,7 @@ struct GeneralSettings: View {
                         }
                     }
                 }
-                Toggle("アイコンをグレースケールで表示", isOn: $store.data.grayscaleIcons)
-                Toggle("選択中のタブはカラーで表示", isOn: $store.data.colorSelectedIcon)
-                    .disabled(!store.data.grayscaleIcons)
+
             } header: {
                 Text("タブ")
             } footer: {

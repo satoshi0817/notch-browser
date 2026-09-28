@@ -1,5 +1,6 @@
 import AppKit
 import WebKit
+import SwiftUI
 
 final class Tab {
     /// Set when the tab is pinned; its name, icon and profile come from settings.
@@ -9,6 +10,9 @@ final class Tab {
     var homeURL: String?
     private(set) var webView: WKWebView
     var observations: [NSKeyValueObservation] = []
+    var refreshTimer: Timer?
+    var refreshInterval: TimeInterval = 0
+    deinit { refreshTimer?.invalidate() }
 
     init(pinnedID: UUID?, profileID: UUID, webView: WKWebView) {
         self.pinnedID = pinnedID
@@ -48,7 +52,31 @@ final class BrowserViewController: NSViewController {
     private var downloadDestinations: [ObjectIdentifier: URL] = [:]
     private var store: SettingsStore { .shared }
 
+    private let glass = GlassSurface()
+    private let tabScroll = NSScrollView()
+    private var needsTabReveal = true
+    private lazy var addTabButton = iconButton("plus", "新規タブ (⌘T)", #selector(newTab))
     private let tabStack = NSStackView()
+    private let findBar = NSStackView()
+    private let findField = NSSearchField()
+    private let findStatus = NSTextField(labelWithString: "")
+    private var findHeight: NSLayoutConstraint!
+    private var findGeneration = 0
+    private let notes = ScratchpadView()
+    private let switcher = NSView()
+    private let tabSearch = NSSearchField()
+    private let switchResults = TopAlignedStackView()
+    private var searchRow = 0
+    private var startPage: NSHostingView<StartPage>?
+    private var closedTabs = ClosedTabHistory()
+    private lazy var toolsButton: NSPopUpButton = {
+        let button = NSPopUpButton(frame: .zero, pullsDown: true)
+        button.bezelStyle = .recessed
+        button.toolTip = "ページの操作"
+        button.setAccessibilityLabel("ページの操作")
+        button.widthAnchor.constraint(equalToConstant: 28).isActive = true
+        return button
+    }()
     private let controlStack = NSStackView()
     private let webContainer = NSView()
     private let addressField = NSTextField()
@@ -60,8 +88,8 @@ final class BrowserViewController: NSViewController {
     private lazy var settingsButton = iconButton("gearshape", "設定 (⌘,)", #selector(openSettings))
     private lazy var quitButton = iconButton("power", "NotchBrowser を終了 (⌘Q)", #selector(NSApplication.terminate(_:)), target: NSApp)
 
-    private var tabTrailingConstraint: NSLayoutConstraint?
-    private var controlLeadingConstraint: NSLayoutConstraint?
+    private var tabTrailingConstraint: NSLayoutConstraint!
+    private var controlLeadingConstraint: NSLayoutConstraint!
     private var stripHeightConstraints: [NSLayoutConstraint] = []
 
     /// Matches the installed Safari so sites like Slack don't reject us as outdated.
@@ -78,11 +106,19 @@ final class BrowserViewController: NSViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
 
+        view.addSubview(glass)
+        glass.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            glass.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            glass.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            glass.topAnchor.constraint(equalTo: view.topAnchor),
+            glass.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        ])
+        let chrome = glass.content
         tabStack.orientation = .horizontal
         tabStack.spacing = 4
         controlStack.orientation = .horizontal
         controlStack.spacing = 2
-
         addressField.placeholderString = "検索またはURLを入力"
         addressField.bezelStyle = .roundedBezel
         addressField.controlSize = .small
@@ -91,64 +127,117 @@ final class BrowserViewController: NSViewController {
         addressField.usesSingleLineMode = true
         addressField.target = self
         addressField.action = #selector(addressSubmitted)
+        addressField.setAccessibilityLabel("検索またはURL")
         addressField.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
+        addressField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        addressField.widthAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
         for button in [backButton, forwardButton, reloadButton] { controlStack.addArrangedSubview(button) }
         controlStack.addArrangedSubview(addressField)
-        for button in [keepOpenButton, externalButton, settingsButton, quitButton] { controlStack.addArrangedSubview(button) }
-
+        for button in [keepOpenButton, externalButton, toolsButton, settingsButton, quitButton] { controlStack.addArrangedSubview(button) }
+        tabScroll.drawsBackground = false
+        tabScroll.hasHorizontalScroller = true
+        tabScroll.scrollerStyle = .overlay
+        tabScroll.autohidesScrollers = true
+        tabScroll.documentView = tabStack
         webContainer.wantsLayer = true
         webContainer.layer?.cornerRadius = 10
         webContainer.layer?.masksToBounds = true
-        webContainer.layer?.backgroundColor = NSColor(white: 0.12, alpha: 1).cgColor
-
-        for sub in [tabStack, controlStack, webContainer] {
+        webContainer.layer?.backgroundColor = NSColor(white: 0.08, alpha: 1).cgColor
+        findBar.orientation = .horizontal
+        findBar.spacing = 8
+        findField.placeholderString = "ページ内を検索"
+        findField.sendsWholeSearchString = true
+        findField.delegate = self
+        findField.target = self
+        findField.action = #selector(findNext)
+        findField.setAccessibilityLabel("ページ内を検索")
+        findStatus.font = .systemFont(ofSize: 11)
+        findStatus.textColor = .secondaryLabelColor
+        findBar.addArrangedSubview(findField)
+        findBar.addArrangedSubview(findStatus)
+        findBar.addArrangedSubview(iconButton("chevron.up", "前の一致 (⇧↩)", #selector(findPrevious)))
+        findBar.addArrangedSubview(iconButton("chevron.down", "次の一致 (↩)", #selector(findNext)))
+        findBar.addArrangedSubview(iconButton("xmark", "検索を閉じる", #selector(closeFind)))
+        findBar.isHidden = true
+        for sub in [tabScroll, addTabButton, controlStack, findBar, webContainer] as [NSView] {
             sub.translatesAutoresizingMaskIntoConstraints = false
-            view.addSubview(sub)
+            chrome.addSubview(sub)
         }
-
-        let tabTrailing = tabStack.trailingAnchor.constraint(lessThanOrEqualTo: view.centerXAnchor, constant: -110)
-        let controlLeading = controlStack.leadingAnchor.constraint(equalTo: view.centerXAnchor, constant: 110)
-        let tabHeight = tabStack.heightAnchor.constraint(equalToConstant: 32)
+        tabTrailingConstraint = addTabButton.trailingAnchor.constraint(equalTo: chrome.centerXAnchor, constant: -110)
+        controlLeadingConstraint = controlStack.leadingAnchor.constraint(equalTo: chrome.centerXAnchor, constant: 110)
+        let tabHeight = tabScroll.heightAnchor.constraint(equalToConstant: 32)
         let controlHeight = controlStack.heightAnchor.constraint(equalToConstant: 32)
-        let containerTop = webContainer.topAnchor.constraint(equalTo: view.topAnchor, constant: 32)
-        tabTrailingConstraint = tabTrailing
-        controlLeadingConstraint = controlLeading
-        stripHeightConstraints = [tabHeight, controlHeight, containerTop]
-
+        stripHeightConstraints = [tabHeight, controlHeight]
+        findHeight = findBar.heightAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
-            tabStack.topAnchor.constraint(equalTo: view.topAnchor),
-            tabStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 14),
-            tabTrailing, tabHeight,
-            controlStack.topAnchor.constraint(equalTo: view.topAnchor),
-            controlStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
-            controlLeading, controlHeight,
-            containerTop,
-            webContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 8),
-            webContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -8),
-            webContainer.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -8),
+            tabScroll.topAnchor.constraint(equalTo: chrome.topAnchor),
+            tabScroll.leadingAnchor.constraint(equalTo: chrome.leadingAnchor, constant: 14),
+            tabTrailingConstraint, tabHeight,
+            tabScroll.trailingAnchor.constraint(equalTo: addTabButton.leadingAnchor, constant: -4),
+            addTabButton.centerYAnchor.constraint(equalTo: tabScroll.centerYAnchor),
+            controlStack.topAnchor.constraint(equalTo: chrome.topAnchor),
+            controlStack.trailingAnchor.constraint(equalTo: chrome.trailingAnchor, constant: -12),
+            controlLeadingConstraint, controlHeight,
+            findBar.topAnchor.constraint(equalTo: controlStack.bottomAnchor),
+            findBar.leadingAnchor.constraint(equalTo: chrome.leadingAnchor, constant: 14),
+            findBar.trailingAnchor.constraint(equalTo: chrome.trailingAnchor, constant: -14), findHeight,
+            webContainer.topAnchor.constraint(equalTo: findBar.bottomAnchor),
+            webContainer.leadingAnchor.constraint(equalTo: chrome.leadingAnchor, constant: 8),
+            webContainer.trailingAnchor.constraint(equalTo: chrome.trailingAnchor, constant: -8),
+            webContainer.bottomAnchor.constraint(equalTo: chrome.bottomAnchor, constant: -8)
         ])
-
+        configureSwitcher(in: chrome)
+        notes.isHidden = true
+        notes.translatesAutoresizingMaskIntoConstraints = false
+        chrome.addSubview(notes)
+        NSLayoutConstraint.activate([
+            notes.trailingAnchor.constraint(equalTo: chrome.trailingAnchor, constant: -18),
+            notes.topAnchor.constraint(equalTo: controlStack.bottomAnchor, constant: 10),
+            notes.bottomAnchor.constraint(equalTo: chrome.bottomAnchor, constant: -18),
+            notes.widthAnchor.constraint(equalToConstant: 320)
+        ])
+        notes.onClose = { [weak self] in self?.notes.isHidden = true; self?.focusContent() }
+        notes.pageLink = { [weak self] in
+            guard let tab = self?.selectedTab, let url = tab.webView.url else { return nil }
+            return (tab.displayName, url)
+        }
         syncPinnedTabs()
         selectInitialTab()
-
-        NotificationCenter.default.addObserver(forName: .faviconUpdated, object: nil, queue: .main) { [weak self] _ in
-            self?.chromeNeedsUpdate()
-        }
     }
 
-    /// Tabs go left of the notch, navigation goes right of it.
+    /// Preserve the original single strip, with the camera cutout between tabs and navigation.
     func updateNotchMetrics(notchWidth: CGFloat, stripHeight: CGFloat) {
         _ = view
         let gap = notchWidth / 2 + 12
-        tabTrailingConstraint?.constant = -gap
-        controlLeadingConstraint?.constant = gap
+        tabTrailingConstraint.constant = -gap
+        controlLeadingConstraint.constant = gap
         for constraint in stripHeightConstraints { constraint.constant = stripHeight }
+        updateCompactControls()
+        tabStack.setFrameSize(NSSize(width: tabStack.frame.width, height: stripHeight))
+    }
+
+    private func updateCompactControls() {
+        let available = view.bounds.width / 2 - controlLeadingConstraint.constant - 12
+        let compact = available < 300
+        for button in [externalButton, settingsButton, quitButton] where button.isHidden != compact {
+            button.isHidden = compact
+        }
+    }
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        updateCompactControls()
+        if needsTabReveal, tabScroll.bounds.width > 0, let index = selectedIndex, tabButtons.indices.contains(index) {
+            needsTabReveal = false
+            tabStack.layoutSubtreeIfNeeded()
+            tabButtons[index].scrollToVisible(tabButtons[index].bounds)
+        }
     }
 
     func focusContent() {
         if let tab = selectedTab, tab.webView.url != nil {
             view.window?.makeFirstResponder(tab.webView)
+            addressField.stringValue = tab.webView.url?.absoluteString ?? ""
         } else {
             focusAddressBar()
         }
@@ -157,6 +246,7 @@ final class BrowserViewController: NSViewController {
     func settingsChanged() {
         guard isViewLoaded else { return }
         syncPinnedTabs()
+        glass.updateAppearance()
         updateChrome()
     }
 
@@ -243,6 +333,9 @@ final class BrowserViewController: NSViewController {
     }
 
     private func discard(_ tab: Tab) {
+        tab.refreshTimer?.invalidate()
+        tab.refreshTimer = nil
+        tab.refreshInterval = 0
         tab.observations.removeAll()
         tab.webView.stopLoading()
         tab.webView.removeFromSuperview()
@@ -283,10 +376,16 @@ final class BrowserViewController: NSViewController {
     }
 
     private func select(_ index: Int?) {
+        if !notes.isHidden { notes.isHidden = true }
+        findGeneration += 1
+        findStatus.stringValue = ""
+        if selectedIndex != index, addressField.currentEditor() != nil { view.window?.endEditing(for: addressField) }
         selectedIndex = index
         if let index, let id = tabs[index].pinnedID { store.lastViewedPinnedID = id }
         for (i, tab) in tabs.enumerated() { tab.webView.isHidden = i != index }
         updateChrome()
+        needsTabReveal = true
+        view.needsLayout = true
     }
 
     private func select(_ tab: Tab) {
@@ -295,6 +394,9 @@ final class BrowserViewController: NSViewController {
 
     private func closeTab(at index: Int) {
         let tab = tabs.remove(at: index)
+        if tab.pinnedID == nil, let url = tab.webView.url {
+            closedTabs.push(ClosedTab(url: url, profileID: tab.profileID, zoom: tab.webView.pageZoom))
+        }
         discard(tab)
         if tabs.isEmpty {
             select(nil)
@@ -374,7 +476,6 @@ final class BrowserViewController: NSViewController {
         tab.pinnedID = entry.id
         tab.homeURL = entry.url
         store.data.pinnedTabs.append(entry)
-        FaviconCache.shared.fetch(from: tab.webView)
     }
 
     @objc private func unpinTab(_ sender: NSMenuItem) {
@@ -438,6 +539,9 @@ final class BrowserViewController: NSViewController {
         keepOpenButton.image = symbol(keepOpen ? "pin.fill" : "pin")
         keepOpenButton.contentTintColor = keepOpen ? .controlAccentColor : nil
         externalButton.isEnabled = webView?.url != nil
+        rebuildToolsMenu()
+        updateStartPage()
+        if !switcher.isHidden { rebuildSwitcherResults() }
 
         // Don't clobber what the user is typing.
         if addressField.currentEditor() == nil {
@@ -467,6 +571,9 @@ final class BrowserViewController: NSViewController {
             button.state = i == selectedIndex ? .on : .off
             button.showsBorderOnlyWhileMouseInside = i != selectedIndex
             button.imagePosition = iconOnly ? .imageOnly : .imageLeading
+            button.contentTintColor = .white
+            button.setAccessibilityLabel(tab.displayName)
+            button.setAccessibilityValue(i == selectedIndex ? "選択中" : "")
             button.font = .systemFont(ofSize: 12, weight: i == selectedIndex ? .semibold : .regular)
             button.lineBreakMode = .byTruncatingTail
             button.tag = i
@@ -481,7 +588,7 @@ final class BrowserViewController: NSViewController {
             tabStack.addArrangedSubview(button)
             tabButtons.append(button)
         }
-        tabStack.addArrangedSubview(iconButton("plus", "新規タブ (⌘T)", #selector(newTab)))
+        tabStack.frame = NSRect(origin: .zero, size: NSSize(width: tabStack.fittingSize.width, height: stripHeightConstraints.first?.constant ?? 32))
     }
 
     private func contextMenu(for tab: Tab, at index: Int) -> NSMenu {
@@ -490,6 +597,8 @@ final class BrowserViewController: NSViewController {
         func add(_ title: String, _ action: Selector, to menu: NSMenu = menu) -> NSMenuItem {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
             item.target = self
+            let icons: [Selector: String] = [#selector(toggleIconOnly): "eye", #selector(setPinnedHome): "house", #selector(openSettings): "slider.horizontal.3", #selector(pinTab): "pin", #selector(unpinTab): "pin.slash", #selector(closeTabFromMenu): "xmark", #selector(changeProfile): "person.crop.circle"]
+            item.image = symbol(icons[action] ?? "circle")
             item.tag = index
             menu.addItem(item)
             return item
@@ -533,6 +642,8 @@ final class BrowserViewController: NSViewController {
         button.bezelStyle = .recessed
         button.showsBorderOnlyWhileMouseInside = true
         button.toolTip = tooltip
+        button.setAccessibilityLabel(tooltip)
+        button.contentTintColor = .white
         button.setContentHuggingPriority(.required, for: .horizontal)
         return button
     }
@@ -584,6 +695,274 @@ final class BrowserViewController: NSViewController {
         if let url = selectedTab?.webView.url { NSWorkspace.shared.open(url) }
     }
 
+    // MARK: Page tools
+
+    private func rebuildToolsMenu() {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let heading = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        heading.image = symbol("ellipsis.circle")
+        menu.addItem(heading)
+        func add(_ title: String, _ icon: String, _ action: Selector, enabled: Bool = true) -> NSMenuItem {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = self
+            item.image = symbol(icon)
+            item.isEnabled = enabled
+            menu.addItem(item)
+            return item
+        }
+        let hasPage = selectedTab?.webView.url != nil
+        _ = add("ページ内を検索  ⌘F", "magnifyingglass", #selector(showFind), enabled: hasPage)
+        _ = add("URLをコピー", "link", #selector(copyPageURL), enabled: hasPage)
+        menu.addItem(.separator())
+        let zoom = selectedTab?.webView.pageZoom ?? 1
+        _ = add("拡大  ⌘+", "plus.magnifyingglass", #selector(zoomIn), enabled: hasPage && zoom < 3)
+        _ = add("縮小  ⌘−", "minus.magnifyingglass", #selector(zoomOut), enabled: hasPage && zoom > 0.5)
+        _ = add("実際のサイズ (\(Int((zoom * 100).rounded()))%)  ⌘0", "arrow.up.left.and.arrow.down.right", #selector(resetZoom), enabled: hasPage)
+        menu.addItem(.separator())
+        let refresh = NSMenuItem(title: "自動更新", action: nil, keyEquivalent: "")
+        refresh.image = symbol("arrow.triangle.2.circlepath")
+        refresh.isEnabled = hasPage
+        let intervals = NSMenu()
+        intervals.autoenablesItems = false
+        for (seconds, title) in [(0, "オフ"), (30, "30秒ごと"), (60, "1分ごと"), (300, "5分ごと")] {
+            let item = NSMenuItem(title: title, action: #selector(setAutoRefresh), keyEquivalent: "")
+            item.target = self
+            item.tag = seconds
+            item.state = selectedTab?.refreshInterval == Double(seconds) ? .on : .off
+            item.isEnabled = hasPage
+            intervals.addItem(item)
+        }
+        refresh.submenu = intervals
+        menu.addItem(refresh)
+        menu.addItem(.separator())
+        _ = add("閉じたタブを戻す  ⌘⇧T", "arrow.uturn.backward", #selector(reopenClosedTab), enabled: !closedTabs.isEmpty)
+        _ = add("タブを検索  ⌘⇧A", "square.stack", #selector(showTabSwitcher))
+        _ = add("タブを閉じる  ⌘W", "xmark", #selector(closeCurrentTab), enabled: selectedTab != nil && selectedTab?.pinnedID == nil)
+        menu.addItem(.separator())
+        _ = add("クイックメモ  ⌘⇧M", "square.and.pencil", #selector(toggleNotes))
+        menu.addItem(.separator())
+        _ = add("デフォルトブラウザで開く", "safari", #selector(openExternally), enabled: hasPage)
+        _ = add("設定…  ⌘,", "gearshape", #selector(openSettings))
+        let quit = add("NotchBrowser を終了  ⌘Q", "power", #selector(NSApplication.terminate(_:)))
+        quit.target = NSApp
+        toolsButton.menu = menu
+        reloadButton.toolTip = (selectedTab?.refreshInterval ?? 0) > 0
+            ? "再読み込み・自動更新中 (\(Int(selectedTab!.refreshInterval))秒ごと)" : "再読み込み (⌘R)"
+        reloadButton.contentTintColor = (selectedTab?.refreshInterval ?? 0) > 0 ? .systemCyan : .white
+    }
+
+    @objc func copyPageURL(_ sender: Any?) {
+        guard let url = selectedTab?.webView.url else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(url.absoluteString, forType: .string)
+    }
+
+    @objc func zoomIn(_ sender: Any?) { changeZoom(by: 0.1) }
+    @objc func zoomOut(_ sender: Any?) { changeZoom(by: -0.1) }
+    @objc func resetZoom(_ sender: Any?) { selectedTab?.webView.pageZoom = 1; updateChrome() }
+    private func changeZoom(by delta: Double) {
+        guard let webView = selectedTab?.webView else { return }
+        webView.pageZoom = BrowserTools.zoom(((webView.pageZoom + delta) * 100).rounded() / 100)
+        updateChrome()
+    }
+
+    @objc func reopenClosedTab(_ sender: Any?) {
+        guard let entry = closedTabs.pop() else { return }
+        let profileID = store.data.profiles.contains { $0.id == entry.profileID } ? entry.profileID : Profile.defaultID
+        let tab = insertTab(makeTab(pinnedID: nil, profileID: profileID), after: nil)
+        tab.webView.pageZoom = BrowserTools.zoom(entry.zoom)
+        tab.webView.load(URLRequest(url: entry.url))
+        select(tab)
+        focusContent()
+    }
+
+    @objc private func setAutoRefresh(_ sender: NSMenuItem) {
+        guard let tab = selectedTab else { return }
+        tab.refreshTimer?.invalidate()
+        tab.refreshTimer = nil
+        tab.refreshInterval = Double(sender.tag)
+        if sender.tag > 0 {
+            let timer = Timer(timeInterval: Double(sender.tag), repeats: true) { [weak tab] _ in
+                guard let tab, !tab.webView.isLoading else { return }
+                tab.webView.reload()
+            }
+            timer.tolerance = min(5, Double(sender.tag) * 0.1)
+            RunLoop.main.add(timer, forMode: .common)
+            tab.refreshTimer = timer
+        }
+        updateChrome()
+    }
+
+    @objc func showFind(_ sender: Any?) {
+        guard selectedTab?.webView.url != nil else { return }
+        switcher.isHidden = true
+        notes.isHidden = true
+        findBar.isHidden = false
+        findHeight.constant = 34
+        view.window?.makeKey()
+        view.window?.makeFirstResponder(findField)
+        findField.currentEditor()?.selectAll(nil)
+    }
+    @objc func closeFind(_ sender: Any?) {
+        findGeneration += 1
+        findBar.isHidden = true
+        findHeight.constant = 0
+        findStatus.stringValue = ""
+        selectedTab?.webView.find("", configuration: WKFindConfiguration()) { _ in }
+        focusContent()
+    }
+    @objc func findNext(_ sender: Any?) { find(backwards: false) }
+    @objc func findPrevious(_ sender: Any?) { find(backwards: true) }
+    private func find(backwards: Bool) {
+        guard let webView = selectedTab?.webView else { return }
+        findGeneration += 1
+        let generation = findGeneration
+        let query = findField.stringValue
+        let config = WKFindConfiguration()
+        config.backwards = backwards
+        config.wraps = true
+        config.caseSensitive = false
+        webView.find(query, configuration: config) { [weak self, weak webView] result in
+            guard let self, generation == self.findGeneration, webView === self.selectedTab?.webView else { return }
+            self.findStatus.stringValue = query.isEmpty ? "" : (result.matchFound ? "一致あり" : "見つかりません")
+        }
+    }
+
+    // MARK: Start page and tab switcher
+
+    private func updateStartPage() {
+        let show = selectedTab == nil || (selectedTab?.webView.url == nil && selectedTab?.webView.isLoading != true)
+        guard show else { startPage?.isHidden = true; return }
+        let page = StartPage(tabs: store.data.pinnedTabs, open: { [weak self] id in
+            guard let self, let tab = self.tabs.first(where: { $0.pinnedID == id }) else { return }
+            self.select(tab)
+            self.focusContent()
+        }, search: { [weak self] in self?.focusAddressBar() }, restore: { [weak self] in
+            self?.reopenClosedTab(nil)
+        }, canRestore: !closedTabs.isEmpty, settings: { [weak self] in self?.onOpenSettings?() })
+        if let startPage { startPage.rootView = page; startPage.isHidden = false }
+        else {
+            let host = NSHostingView(rootView: page)
+            host.frame = webContainer.bounds
+            host.autoresizingMask = [.width, .height]
+            webContainer.addSubview(host)
+            startPage = host
+        }
+        if let startPage { webContainer.addSubview(startPage, positioned: .above, relativeTo: nil) }
+    }
+
+    private func configureSwitcher(in chrome: NSView) {
+        switcher.wantsLayer = true
+        switcher.layer?.backgroundColor = NSColor(calibratedRed: 0.08, green: 0.11, blue: 0.18, alpha: 1).cgColor
+        switcher.layer?.cornerRadius = 20
+        switcher.layer?.borderColor = NSColor.white.withAlphaComponent(0.2).cgColor
+        switcher.layer?.borderWidth = 1
+        switcher.isHidden = true
+        switcher.translatesAutoresizingMaskIntoConstraints = false
+        chrome.addSubview(switcher)
+        tabSearch.placeholderString = "タブ名・URL・プロファイルで検索"
+        tabSearch.setAccessibilityLabel("タブを検索")
+        tabSearch.sendsWholeSearchString = true
+        tabSearch.delegate = self
+        tabSearch.target = self
+        tabSearch.action = #selector(selectFirstSearchResult)
+        let close = iconButton("xmark", "タブ検索を閉じる (Esc)", #selector(closeSwitcher))
+        let scroll = NSScrollView()
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        switchResults.orientation = .vertical
+        switchResults.alignment = .leading
+        switchResults.spacing = 6
+        scroll.documentView = switchResults
+        for sub in [tabSearch, close, scroll] as [NSView] {
+            sub.translatesAutoresizingMaskIntoConstraints = false
+            switcher.addSubview(sub)
+        }
+        NSLayoutConstraint.activate([
+            switcher.centerXAnchor.constraint(equalTo: chrome.centerXAnchor),
+            switcher.topAnchor.constraint(equalTo: controlStack.bottomAnchor, constant: 10),
+            switcher.widthAnchor.constraint(equalTo: chrome.widthAnchor, multiplier: 0.75),
+            switcher.bottomAnchor.constraint(equalTo: chrome.bottomAnchor, constant: -26),
+            tabSearch.topAnchor.constraint(equalTo: switcher.topAnchor, constant: 18),
+            tabSearch.leadingAnchor.constraint(equalTo: switcher.leadingAnchor, constant: 18),
+            tabSearch.trailingAnchor.constraint(equalTo: close.leadingAnchor, constant: -8),
+            tabSearch.heightAnchor.constraint(equalToConstant: 30),
+            close.centerYAnchor.constraint(equalTo: tabSearch.centerYAnchor),
+            close.trailingAnchor.constraint(equalTo: switcher.trailingAnchor, constant: -18),
+            scroll.topAnchor.constraint(equalTo: tabSearch.bottomAnchor, constant: 12),
+            scroll.leadingAnchor.constraint(equalTo: switcher.leadingAnchor, constant: 18),
+            scroll.trailingAnchor.constraint(equalTo: switcher.trailingAnchor, constant: -18),
+            scroll.bottomAnchor.constraint(equalTo: switcher.bottomAnchor, constant: -18)
+        ])
+    }
+    @objc func showTabSwitcher(_ sender: Any?) {
+        notes.isHidden = true
+        switcher.isHidden = false
+        tabSearch.stringValue = ""
+        rebuildSwitcherResults()
+        view.window?.makeKey()
+        view.window?.makeFirstResponder(tabSearch)
+    }
+    @objc private func closeSwitcher(_ sender: Any?) { switcher.isHidden = true; focusContent() }
+    @objc private func selectFirstSearchResult(_ sender: Any?) {
+        let buttons = switchResults.arrangedSubviews.compactMap { $0 as? NSButton }
+        if buttons.indices.contains(searchRow) { switcherTabClicked(buttons[searchRow]) }
+    }
+    @objc private func switcherTabClicked(_ sender: NSButton) {
+        select(sender.tag)
+        switcher.isHidden = true
+        focusContent()
+    }
+    private func rebuildSwitcherResults() {
+        switchResults.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        searchRow = 0
+        let width = max(220, view.bounds.width * 0.75 - 40)
+        for (index, tab) in tabs.enumerated() where BrowserTools.matches(query: tabSearch.stringValue,
+                title: tab.displayName, url: tab.webView.url?.absoluteString ?? tab.homeURL ?? "", profile: store.profile(tab.profileID).name) {
+            let button = NSButton(title: "  \(tab.displayName)  ·  \(store.profile(tab.profileID).name)",
+                                  image: tab.icon(grayscale: false), target: self, action: #selector(switcherTabClicked))
+            button.tag = index
+            button.setButtonType(.pushOnPushOff)
+            button.state = switchResults.arrangedSubviews.isEmpty ? .on : .off
+            button.bezelStyle = .recessed
+            button.alignment = .left
+            button.imagePosition = .imageLeading
+            button.lineBreakMode = .byTruncatingTail
+            button.font = .systemFont(ofSize: 13, weight: index == selectedIndex ? .semibold : .regular)
+            button.contentTintColor = index == selectedIndex ? .systemCyan : .white
+            button.toolTip = tab.webView.url?.absoluteString
+            button.widthAnchor.constraint(equalToConstant: width).isActive = true
+            button.heightAnchor.constraint(equalToConstant: 38).isActive = true
+            switchResults.addArrangedSubview(button)
+        }
+        if switchResults.arrangedSubviews.isEmpty {
+            let empty = NSTextField(labelWithString: "一致するタブがありません")
+            empty.textColor = .secondaryLabelColor
+            switchResults.addArrangedSubview(empty)
+        }
+        switchResults.frame = NSRect(origin: .zero, size: NSSize(width: width, height: switchResults.fittingSize.height))
+    }
+    private func moveSearchSelection(by delta: Int) {
+        let buttons = switchResults.arrangedSubviews.compactMap { $0 as? NSButton }
+        guard !buttons.isEmpty else { return }
+        searchRow = min(buttons.count - 1, max(0, searchRow + delta))
+        for (index, button) in buttons.enumerated() { button.state = index == searchRow ? .on : .off }
+        buttons[searchRow].scrollToVisible(buttons[searchRow].bounds)
+    }
+    @objc func toggleNotes(_ sender: Any?) {
+        if !notes.isHidden { notes.isHidden = true; focusContent(); return }
+        switcher.isHidden = true
+        notes.show(profile: store.profile(selectedTab?.profileID ?? store.data.newTabProfileID))
+    }
+    func dismissOverlay() -> Bool {
+        if !notes.isHidden { notes.isHidden = true; focusContent(); return true }
+        if !switcher.isHidden { closeSwitcher(nil); return true }
+        if !findBar.isHidden { closeFind(nil); return true }
+        return false
+    }
+
     // MARK: Modals
 
     /// Modal windows must sit above the notch panel, and it must not collapse while one is up.
@@ -621,7 +1000,7 @@ extension BrowserViewController: WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        FaviconCache.shared.fetch(from: webView)
+        chromeNeedsUpdate()
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse) async -> WKNavigationResponsePolicy {
@@ -768,3 +1147,25 @@ final class TabButton: NSButton {
         }
     }
 }
+
+
+extension BrowserViewController: NSSearchFieldDelegate {
+    func controlTextDidChange(_ notification: Notification) {
+        if notification.object as? NSSearchField === tabSearch { rebuildSwitcherResults() }
+        if notification.object as? NSSearchField === findField { find(backwards: false) }
+    }
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) { return dismissOverlay() }
+        if control === tabSearch {
+            if commandSelector == #selector(NSResponder.moveDown(_:)) { moveSearchSelection(by: 1); return true }
+            if commandSelector == #selector(NSResponder.moveUp(_:)) { moveSearchSelection(by: -1); return true }
+        }
+        if control === findField, commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            find(backwards: NSApp.currentEvent?.modifierFlags.contains(.shift) == true)
+            return true
+        }
+        return false
+    }
+}
+
+private final class TopAlignedStackView: NSStackView { override var isFlipped: Bool { true } }
