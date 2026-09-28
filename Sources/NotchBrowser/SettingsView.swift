@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-final class SettingsWindowController: NSWindowController {
+final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     convenience init() {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 680, height: 500),
@@ -14,13 +14,39 @@ final class SettingsWindowController: NSWindowController {
         window.contentViewController = NSHostingController(rootView: SettingsView().environmentObject(SettingsStore.shared))
         window.setContentSize(NSSize(width: 680, height: 500))
         window.isReleasedWhenClosed = false
-        window.center()
         self.init(window: window)
+        window.delegate = self
     }
 
     func present() {
+        guard let window else { return }
+        if !window.isVisible { center(on: screenUnderMouse) }
+        window.level = Self.frontLevel
         NSApp.activate()
-        window?.makeKeyAndOrderFront(nil)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    /// Above the notch while being used; a normal window otherwise, so it doesn't
+    /// float over other apps (or over the notch once the notch is clicked).
+    private static let frontLevel = NSWindow.Level(rawValue: NotchController.level.rawValue + 1)
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        window?.level = Self.frontLevel
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        window?.level = .normal
+    }
+
+    private var screenUnderMouse: NSScreen? {
+        let mouse = NSEvent.mouseLocation
+        return NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main
+    }
+
+    private func center(on screen: NSScreen?) {
+        guard let window, let visible = screen?.visibleFrame else { return window?.center() ?? () }
+        let size = window.frame.size
+        window.setFrameOrigin(NSPoint(x: visible.midX - size.width / 2, y: visible.midY - size.height / 2 + visible.height * 0.1))
     }
 }
 
