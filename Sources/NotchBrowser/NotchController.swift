@@ -36,6 +36,8 @@ final class NotchPanel: NSPanel {
 final class NotchRootView: NSView {
     var onHoverChange: ((Bool) -> Void)?
     var onClick: (() -> Void)?
+    var onFileDrag: (() -> Bool)?
+    var onFileDrop: (([URL]) -> Bool)?
     let content = NSView()
     var contentSize: NSSize = .zero { didSet { positionContent() } }
     private var trackingArea: NSTrackingArea?
@@ -52,6 +54,7 @@ final class NotchRootView: NSView {
         layer?.masksToBounds = true
         // Round only the bottom corners; the top is flush with the screen edge.
         layer?.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+        registerForDraggedTypes([.fileURL])
         addSubview(content)
 
         badgeIcon.image = NSImage(systemSymbolName: "calendar", accessibilityDescription: nil)?
@@ -96,6 +99,17 @@ final class NotchRootView: NSView {
     override func mouseExited(with event: NSEvent) { onHoverChange?(false) }
     override func mouseDown(with event: NSEvent) { onClick?() }
 
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard sender.draggingSourceOperationMask.contains(.copy),
+              !ShelfViewController.urls(from: sender.draggingPasteboard).isEmpty,
+              onFileDrag?() == true else { return [] }
+        return .copy
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        onFileDrop?(ShelfViewController.urls(from: sender.draggingPasteboard)) ?? false
+    }
+
     /// Right-click menu on the notch itself, so there's always a visible way to quit.
     var contextMenu: NSMenu?
     override func menu(for event: NSEvent) -> NSMenu? { contextMenu }
@@ -129,6 +143,8 @@ final class NotchController: NSObject, NSWindowDelegate {
     private(set) var isExpanded = false
     private var hoverTimer: Timer?
     private var pointerInside = false
+    private(set) var shelfVisible = false
+    private(set) var shelfOnly = false
 
     static let level = NSWindow.Level.popUpMenu
 
@@ -161,11 +177,22 @@ final class NotchController: NSObject, NSWindowDelegate {
         panel.contentView = root
         panel.onCancel = { [weak self] in
             guard let self, !self.manager.browser.dismissOverlay() else { return }
-            self.collapse()
+            if self.shelfVisible { self.hideShelf() } else { self.collapse() }
         }
 
         root.onHoverChange = { [weak self] inside in self?.hoverChanged(inside) }
         root.onClick = { [weak self] in self?.expand(focus: true) }
+        root.onFileDrag = { [weak self] in
+            guard let self, SettingsStore.shared.data.shelfTrigger != .manual || self.shelfVisible else { return false }
+            if !self.shelfVisible { self.manager.showShelf(on: self) }
+            return true
+        }
+        root.onFileDrop = { [weak self] urls in
+            guard let self, self.shelfVisible else { return false }
+            let accepted = self.manager.shelf.store.add(urls)
+            if accepted { self.manager.shelf.onDrop?() }
+            return accepted
+        }
         root.contextMenu = makeContextMenu()
     }
 
@@ -175,13 +202,17 @@ final class NotchController: NSObject, NSWindowDelegate {
         open.target = self
         let settings = NSMenuItem(title: "設定…", action: #selector(openSettingsFromMenu), keyEquivalent: "")
         settings.target = self
+        let shelf = NSMenuItem(title: "ファイル棚", action: #selector(openShelfFromMenu), keyEquivalent: "")
+        shelf.target = self
+        shelf.image = NSImage(systemSymbolName: "tray", accessibilityDescription: nil)
         let quit = NSMenuItem(title: "NotchBrowser を終了", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
         quit.target = NSApp
         quit.image = NSImage(systemSymbolName: "power", accessibilityDescription: nil)
-        menu.items = [open, settings, .separator(), quit]
+        menu.items = [open, shelf, settings, .separator(), quit]
         return menu
     }
 
+    @objc private func openShelfFromMenu() { manager.showShelf(on: self) }
     @objc private func openFromMenu() { expand(focus: true) }
     @objc private func openSettingsFromMenu() { manager.browser.onOpenSettings?() }
 
@@ -214,6 +245,7 @@ final class NotchController: NSObject, NSWindowDelegate {
     var stripHeight: CGFloat { max(notchSize.height, 32) }
 
     var expandedSize: NSSize {
+        if shelfOnly { return NSSize(width: min(480, screen.frame.width - 40), height: 280 + stripHeight) }
         let frame = screen.frame
         return NSSize(
             width: min(settings.width, frame.width - 40).rounded(),
@@ -240,6 +272,7 @@ final class NotchController: NSObject, NSWindowDelegate {
     /// Re-applies size and opacity, e.g. after settings or the calendar badge changed.
     func relayout(animated: Bool = true) {
         root.contentSize = expandedSize
+        layoutContent()
         root.cornerRadius = isExpanded ? 18 : 10
         root.setBadge(minutes: manager.minutesToNextEvent, visible: !isExpanded)
         let frame = isExpanded ? expandedFrame : collapsedFrame
@@ -259,8 +292,10 @@ final class NotchController: NSObject, NSWindowDelegate {
     // MARK: Expand / collapse
 
     func expand(focus: Bool) {
+        if shelfOnly { hideShelf() }
         hoverTimer?.invalidate()
         if !isExpanded {
+            root.contentSize = expandedSize
             manager.browser.prepareForOpen()
             manager.willExpand(self)
             isExpanded = true
@@ -278,6 +313,9 @@ final class NotchController: NSObject, NSWindowDelegate {
         hoverTimer?.invalidate()
         guard isExpanded else { return }
         isExpanded = false
+        shelfVisible = false
+        shelfOnly = false
+        if manager.shelf.view.superview === root.content { manager.shelf.view.removeFromSuperview() }
         if panel.isKeyWindow {
             // Hand keyboard focus back to the app underneath.
             panel.orderOut(nil)
@@ -289,11 +327,46 @@ final class NotchController: NSObject, NSWindowDelegate {
             animate(to: collapsedFrame, radius: 10, contentAlpha: 0)
         } else {
             root.cornerRadius = 10
-            manager.browser.view.alphaValue = 0
+            if manager.browser.view.superview === root.content { manager.browser.view.alphaValue = 0 }
             panel.setFrame(collapsedFrame, display: true)
             panel.alphaValue = idleOpacity
         }
         manager.didCollapse()
+    }
+
+    func showShelf() {
+        hoverTimer?.invalidate()
+        if !shelfVisible { shelfOnly = !isExpanded }
+        shelfVisible = true
+        isExpanded = true
+        panel.hasShadow = true
+        let shelf = manager.shelf.view
+        shelf.removeFromSuperview()
+        root.content.addSubview(shelf)
+        relayout(animated: false)
+        panel.orderFrontRegardless()
+    }
+
+    func hideShelf() {
+        guard shelfVisible else { return }
+        let wasOnly = shelfOnly
+        shelfVisible = false
+        shelfOnly = false
+        manager.shelf.view.removeFromSuperview()
+        if wasOnly { collapse() }
+        else { relayout(animated: false) }
+    }
+
+    func layoutContent() {
+        let bounds = root.content.bounds
+        let shelfHeight: CGFloat = shelfVisible ? (shelfOnly ? max(0, bounds.height - stripHeight) : 220) : 0
+        if manager.shelf.view.superview === root.content {
+            manager.shelf.view.frame = NSRect(x: 0, y: 0, width: bounds.width, height: shelfHeight)
+        }
+        if manager.browser.view.superview === root.content {
+            manager.browser.view.isHidden = shelfOnly
+            manager.browser.view.frame = NSRect(x: 0, y: shelfHeight, width: bounds.width, height: max(0, bounds.height - shelfHeight))
+        }
     }
 
     private func animate(to frame: NSRect, radius: CGFloat, contentAlpha: CGFloat) {
@@ -313,7 +386,7 @@ final class NotchController: NSObject, NSWindowDelegate {
             }
             panel.animator().setFrame(frame, display: true)
             panel.animator().alphaValue = windowAlpha
-            manager.browser.view.animator().alphaValue = contentAlpha
+            if manager.browser.view.superview === root.content { manager.browser.view.animator().alphaValue = contentAlpha }
         }
     }
 
@@ -324,6 +397,7 @@ final class NotchController: NSObject, NSWindowDelegate {
         hoverTimer?.invalidate()
         hoverTimer = nil
         let motion = SettingsStore.shared.data.motion
+        guard !manager.dragActive else { return }
         if inside {
             guard !isExpanded else { return }
             scheduleHover(after: motion.openDelay) { [weak self] in
@@ -331,10 +405,10 @@ final class NotchController: NSObject, NSWindowDelegate {
                 self.expand(focus: false)
             }
         } else {
-            guard isExpanded, !manager.keepOpen, !manager.isShowingModal else { return }
+            guard isExpanded, !manager.keepOpen, !manager.isShowingModal, !manager.dragActive else { return }
             scheduleHover(after: motion.closeDelay) { [weak self] in
                 guard let self, !self.pointerInside, !self.manager.keepOpen,
-                      !self.manager.isShowingModal else { return }
+                      !self.manager.isShowingModal, !self.manager.dragActive else { return }
                 self.collapse()
             }
         }
@@ -349,7 +423,7 @@ final class NotchController: NSObject, NSWindowDelegate {
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        guard !manager.keepOpen, !manager.isShowingModal, !panel.frame.contains(NSEvent.mouseLocation) else { return }
+        guard !manager.keepOpen, !manager.isShowingModal, !manager.dragActive, !shelfVisible, !panel.frame.contains(NSEvent.mouseLocation) else { return }
         // Preserve the timer already started by mouseExited instead of closing early.
         if hoverTimer?.isValid != true { hoverChanged(false) }
     }
@@ -362,6 +436,14 @@ final class NotchController: NSObject, NSWindowDelegate {
 /// Owns the browser and one notch per enabled display.
 final class NotchManager {
     let browser = BrowserViewController()
+    let shelf: ShelfViewController
+    private let dragMonitor = ShelfDragMonitor()
+    private(set) var dragActive = false
+    private var dragWasActive = false
+    private var automaticShelf: NotchController?
+    private var shelfDropReceived = false
+    private var shelfDragOutgoing = false
+    private var dragFinishWork: DispatchWorkItem?
     private var controllers: [String: NotchController] = [:]
     private let calendar = CalendarMonitor()
     private let launcherWatcher = LauncherWatcher()
@@ -376,7 +458,16 @@ final class NotchManager {
         }
     }
 
-    init() {
+    init(shelfStore: ShelfStore = .shared) {
+        shelf = ShelfViewController(store: shelfStore)
+        browser.onOpenShelf = { [weak self] in self?.showShelf() }
+        shelf.onClose = { [weak self] in self?.controllers.values.filter(\.shelfVisible).forEach { $0.hideShelf() } }
+        shelf.onDrop = { [weak self] in self?.shelfDropReceived = true }
+        shelf.onDrag = { [weak self] active in
+            self?.shelfDragOutgoing = active
+            self?.dragActive = active
+        }
+        dragMonitor.onChange = { [weak self] active in self?.dragChanged(active) }
         browser.onToggleKeepOpen = { [weak self] in self?.keepOpen.toggle() }
         browser.onModalChange = { [weak self] showing in
             self?.isShowingModal = showing
@@ -407,6 +498,7 @@ final class NotchManager {
         rebuild()
         applyWindowSettings()
         calendar.start()
+        dragMonitor.start()
     }
 
     private func settingsChanged() {
@@ -441,7 +533,7 @@ final class NotchManager {
         for screen in enabled {
             if let controller = controllers[screen.displayUUID] {
                 controller.update(screen: screen)
-                if controller.isExpanded { attachBrowser(to: controller) }
+                if controller.isExpanded && !controller.shelfOnly { attachBrowser(to: controller) }
             } else {
                 let controller = NotchController(screen: screen, manager: self)
                 controllers[screen.displayUUID] = controller
@@ -473,9 +565,50 @@ final class NotchManager {
             view.removeFromSuperview()
             controller.root.content.addSubview(view)
         }
-        view.frame = controller.root.content.bounds
-        view.autoresizingMask = [.width, .height]
+        view.isHidden = controller.shelfOnly
+        controller.layoutContent()
+        view.autoresizingMask = []
         browser.updateNotchMetrics(notchWidth: controller.notchSize.width, stripHeight: controller.stripHeight)
+    }
+
+    func showShelf(on target: NotchController? = nil) {
+        let target = target ?? orderedControllers.first { $0.screen.frame.contains(NSEvent.mouseLocation) } ?? orderedControllers.first
+        guard let target else { return }
+        for other in controllers.values where other !== target && other.shelfVisible { other.hideShelf() }
+        target.showShelf()
+    }
+
+    private func dragChanged(_ active: Bool) {
+        dragActive = active || shelfDragOutgoing
+        if active {
+            dragFinishWork?.cancel()
+            if !dragWasActive { shelfDropReceived = false }
+            dragWasActive = true
+            guard !shelfDragOutgoing,
+                  NSPasteboard(name: .drag).availableType(from: [ShelfDragMonitor.originType]) == nil,
+                  SettingsStore.shared.data.shelfTrigger != .manual,
+                  let target = orderedControllers.first(where: { $0.screen.frame.contains(NSEvent.mouseLocation) }) else { return }
+            if SettingsStore.shared.data.shelfTrigger == .nearby {
+                let mouse = NSEvent.mouseLocation
+                guard abs(mouse.x - target.screen.frame.midX) < 260,
+                      mouse.y > target.screen.frame.maxY - 100 else { return }
+            }
+            if let previous = automaticShelf, previous !== target { previous.hideShelf(); automaticShelf = nil }
+            if !target.shelfVisible {
+                automaticShelf = target
+                showShelf(on: target)
+            }
+        } else if dragWasActive {
+            dragWasActive = false
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, !self.dragActive else { return }
+                if !self.shelfDropReceived { self.automaticShelf?.hideShelf() }
+                self.automaticShelf = nil
+                if !self.shelfDropReceived { self.controllers.values.forEach { $0.resumeHoverCloseIfNeeded() } }
+            }
+            dragFinishWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
+        }
     }
 
     /// Hotkey: collapse if focused, otherwise open on the display under the pointer.

@@ -40,6 +40,7 @@ final class Tab {
 final class BrowserViewController: NSViewController {
     var onToggleKeepOpen: (() -> Void)?
     var onModalChange: ((Bool) -> Void)?
+    var onOpenShelf: (() -> Void)?
     var onOpenSettings: (() -> Void)?
     var keepOpen = false { didSet { updateChrome() } }
     var hideFromScreenCapture = true
@@ -788,6 +789,8 @@ final class BrowserViewController: NSViewController {
         _ = add("タブを検索  ⌘⇧A", "square.stack", #selector(showTabSwitcher))
         _ = add("タブを閉じる  ⌘W", "xmark", #selector(closeCurrentTab), enabled: selectedTab != nil && selectedTab?.pinnedID == nil)
         menu.addItem(.separator())
+        _ = add("クイックスイッチ", "switch.2", #selector(openQuickSwitches))
+        _ = add("ファイル棚", "tray", #selector(openShelf))
         _ = add("クイックメモ  ⌘⇧M", "square.and.pencil", #selector(toggleNotes))
         menu.addItem(.separator())
         _ = add("デフォルトブラウザで開く", "safari", #selector(openExternally), enabled: hasPage)
@@ -799,6 +802,10 @@ final class BrowserViewController: NSViewController {
             ? "再読み込み・自動更新中 (\(Int(selectedTab!.refreshInterval))秒ごと)" : "再読み込み (⌘R)"
         reloadButton.contentTintColor = (selectedTab?.refreshInterval ?? 0) > 0 ? .systemCyan : .white
     }
+
+    @objc private func openQuickSwitches() { QuickSwitchWindow.shared.present() }
+
+    @objc private func openShelf() { onOpenShelf?() }
 
     @objc func copyPageURL(_ sender: Any?) {
         guard let url = selectedTab?.webView.url else { return }
@@ -1088,6 +1095,7 @@ extension BrowserViewController: WKDownloadDelegate {
 
     func downloadDidFinish(_ download: WKDownload) {
         guard let url = downloadDestinations.removeValue(forKey: ObjectIdentifier(download)) else { return }
+        if SettingsStore.shared.data.shelfDownloads { ShelfStore.shared.add([url]) }
         // Bounces the Downloads stack in the Dock, like Safari.
         DistributedNotificationCenter.default().post(name: .init("com.apple.DownloadFileFinished"), object: url.path)
     }

@@ -57,7 +57,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 }
 
 private enum SettingsSection: String, CaseIterable, Identifiable {
-    case tabs = "固定ページ", profiles = "プロファイル", displays = "ディスプレイ", motion = "動き", general = "一般"
+    case tabs = "固定ページ", profiles = "プロファイル", displays = "ディスプレイ", motion = "動き", shelf = "ファイル棚", general = "一般"
     var id: Self { self }
     var symbol: String {
         switch self {
@@ -66,17 +66,10 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
         case .displays: "display"
         case .motion: "waveform.path"
         case .general: "slider.horizontal.3"
+        case .shelf: "tray"
         }
     }
-    var subtitle: String {
-        switch self {
-        case .tabs: "いつものページを、自分の並びで。"
-        case .profiles: "仕事とプライベートのログインを分ける。"
-        case .displays: "画面ごとに、ちょうどいいサイズへ。"
-        case .motion: "開く、閉じる。その感触まで自分好みに。"
-        case .general: "見た目と、日々の使い方を整える。"
-        }
-    }
+
 }
 
 struct SettingsView: View {
@@ -85,10 +78,9 @@ struct SettingsView: View {
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 24) {
                 HStack(spacing: 10) {
-                    Image(systemName: "safari").font(.system(size: 25, weight: .light)).foregroundStyle(.cyan)
+                    Image(systemName: "safari").font(.system(size: 25, weight: .light)).foregroundStyle(.secondary)
                     VStack(alignment: .leading, spacing: 3) {
                         Text("NotchBrowser").font(.system(size: 14, weight: .semibold, design: .rounded))
-                        Text("あなたの小さなワークスペース").font(.system(size: 9)).foregroundStyle(.secondary)
                     }
                 }.padding(.top, 8)
                 VStack(spacing: 8) {
@@ -102,7 +94,7 @@ struct SettingsView: View {
                             }
                             .font(.system(size: 13, weight: item == section ? .semibold : .regular))
                             .padding(12)
-                            .background(item == section ? Color.blue.opacity(0.25) : .clear, in: RoundedRectangle(cornerRadius: 13))
+                            .background(item == section ? Color.white.opacity(0.10) : .clear, in: RoundedRectangle(cornerRadius: 13))
                             .foregroundStyle(item == section ? .white : .secondary)
                         }.buttonStyle(.plain).accessibilityLabel(item.rawValue)
                     }
@@ -111,14 +103,6 @@ struct SettingsView: View {
                 Label("⌃ ⌥ N で開く", systemImage: "keyboard").font(.system(size: 11)).foregroundStyle(.secondary)
             }.padding(20).frame(width: 210).background(.ultraThinMaterial)
             VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 12) {
-                    Image(systemName: section.symbol).font(.system(size: 22)).foregroundStyle(.cyan)
-                        .frame(width: 48, height: 48).modifier(GlassCard())
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text(section.rawValue).font(.system(size: 24, weight: .semibold, design: .rounded))
-                        Text(section.subtitle).font(.system(size: 12)).foregroundStyle(.secondary)
-                    }
-                }.padding(.horizontal, 24).padding(.top, 22).padding(.bottom, 12)
                 Group {
                     switch section {
                     case .tabs: PinnedTabsSettings()
@@ -126,10 +110,11 @@ struct SettingsView: View {
                     case .displays: DisplaysSettings()
                     case .motion: MotionSettingsView()
                     case .general: GeneralSettings()
+                    case .shelf: ShelfSettingsView()
                     }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .background(LinearGradient(colors: [Color(red: 0.09, green: 0.12, blue: 0.19), Color(red: 0.055, green: 0.065, blue: 0.10)], startPoint: .topLeading, endPoint: .bottomTrailing))
+            .background(Color(nsColor: .windowBackgroundColor))
         }.frame(minWidth: 880, minHeight: 560).preferredColorScheme(.dark).tint(.blue)
     }
 }

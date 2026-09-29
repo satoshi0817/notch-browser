@@ -66,6 +66,8 @@ struct SettingsData: Codable {
     var hideFromScreenCapture = true
     var motion = MotionSettings()
     var glassTint = 0.5
+    var shelfTrigger = ShelfTrigger.automatic
+    var shelfDownloads = false
 
     init() {}
 
@@ -83,6 +85,8 @@ struct SettingsData: Codable {
         openTabBehavior = try c.decodeIfPresent(OpenTabBehavior.self, forKey: .openTabBehavior) ?? fallback.openTabBehavior
         grayscaleIcons = try c.decodeIfPresent(Bool.self, forKey: .grayscaleIcons) ?? fallback.grayscaleIcons
         colorSelectedIcon = try c.decodeIfPresent(Bool.self, forKey: .colorSelectedIcon) ?? fallback.colorSelectedIcon
+        shelfTrigger = (try? c.decode(ShelfTrigger.self, forKey: .shelfTrigger)) ?? .automatic
+        shelfDownloads = (try? c.decode(Bool.self, forKey: .shelfDownloads)) ?? false
         let tint = (try? c.decode(Double.self, forKey: .glassTint)) ?? fallback.glassTint
         glassTint = tint.isFinite ? min(1, max(0, tint)) : fallback.glassTint
         motion = (try? c.decode(MotionSettings.self, forKey: .motion)) ?? fallback.motion

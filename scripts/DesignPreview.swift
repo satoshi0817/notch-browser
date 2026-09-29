@@ -23,7 +23,7 @@ struct DesignPreview {
         ]
         for screen in NSScreen.screens { data.displays[screen.displayUUID] = DisplaySettings(enabled: screen == NSScreen.screens.first, width: 960, height: 660) }
         SettingsStore.shared.data = data
-        let manager = NotchManager()
+        let manager = NotchManager(shelfStore: ShelfStore(file: fixture.deletingLastPathComponent().appendingPathComponent("preview-shelf.json")))
         let settings = SettingsWindowController()
         manager.browser.onOpenSettings = { settings.present() }
         let menu = NSMenu()
@@ -46,7 +46,8 @@ struct DesignPreview {
         app.mainMenu = menu
         manager.start()
         manager.keepOpen = true
-        manager.toggle()
+        if !CommandLine.arguments.contains("--drag-preview") { manager.toggle() }
+        if CommandLine.arguments.contains("--shelf") { manager.showShelf() }
         if CommandLine.arguments.contains("--settings") {
             DispatchQueue.main.async { settings.present() }
         } else {
@@ -58,11 +59,48 @@ struct DesignPreview {
         if CommandLine.arguments.contains("--address") {
             DispatchQueue.main.async { app.activate(); manager.browser.focusAddressBar(nil) }
         }
+        if CommandLine.arguments.contains("--switches") { DispatchQueue.main.async { QuickSwitchWindow.shared.present() } }
+        var dragFixture: NSWindow?
+        if CommandLine.arguments.contains("--drag-preview") {
+            let window = NSWindow(contentRect: NSRect(x: 400, y: 200, width: 600, height: 320), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            window.title = "Shelf Drag Fixture"
+            window.contentView = FileDragFixture(url: fixture)
+            window.makeKeyAndOrderFront(nil)
+            dragFixture = window
+        }
         var updatePreview: UpdateWindowController?
         if CommandLine.arguments.contains("--update-preview") {
             let release = GitHubRelease(tag_name: "v0.2.2", draft: false, prerelease: false, assets: [.init(name: "NotchBrowser-0.2.2.zip", state: "uploaded", size: 1)])
             updatePreview = UpdateWindowController(release: release, checker: UpdateChecker(currentVersion: "0.2.1"), manual: true)
         }
-        withExtendedLifetime((manager, settings, updatePreview)) { app.run() }
+        withExtendedLifetime((manager, settings, updatePreview, dragFixture)) { app.run() }
     }
+}
+
+
+/// Real AppKit drag source for repeatable offline verification without touching user files.
+final class FileDragFixture: NSView, NSDraggingSource {
+    let url: URL
+    init(url: URL) {
+        self.url = url
+        super.init(frame: .zero)
+        registerForDraggedTypes([.fileURL])
+        let label = NSTextField(labelWithString: "Drag preview-page.html from here")
+        label.frame = NSRect(x: 40, y: 140, width: 420, height: 30)
+        addSubview(label)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override func mouseDown(with event: NSEvent) {
+        let item = NSDraggingItem(pasteboardWriter: url as NSURL)
+        item.setDraggingFrame(NSRect(origin: convert(event.locationInWindow, from: nil), size: NSSize(width: 32, height: 32)), contents: NSImage(systemSymbolName: "doc", accessibilityDescription: nil))
+        beginDraggingSession(with: [item], event: event, source: self)
+    }
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { .copy }
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let urls = ShelfViewController.urls(from: sender.draggingPasteboard)
+        let output = url.deletingLastPathComponent().appendingPathComponent("preview-shelf-received.json")
+        try? JSONEncoder().encode(urls.map(\.absoluteString)).write(to: output)
+        return !urls.isEmpty
+    }
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation { .copy }
 }
