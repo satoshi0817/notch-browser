@@ -318,6 +318,7 @@ final class NotchController: NSObject, NSWindowDelegate {
     func collapse(animated: Bool = true, preservingShelf: Bool = true) {
         hoverTimer?.invalidate()
         guard isExpanded else { return }
+        if manager.browser.view.superview === root.content { manager.browser.setQuickSwitchVisible(false) }
         if preservingShelf && shelfVisible && !manager.shelf.store.entries.isEmpty {
             shelfOnly = true
             if panel.isKeyWindow { panel.orderOut(nil); panel.orderFrontRegardless() }
@@ -347,6 +348,7 @@ final class NotchController: NSObject, NSWindowDelegate {
     }
 
     func showShelf() {
+        manager.browser.setQuickSwitchVisible(false)
         hoverTimer?.invalidate()
         if !shelfVisible { shelfOnly = !isExpanded }
         shelfVisible = true
@@ -371,8 +373,10 @@ final class NotchController: NSObject, NSWindowDelegate {
 
     func layoutContent() {
         let bounds = root.content.bounds
-        let shelfHeight: CGFloat = shelfVisible ? (shelfOnly ? max(0, bounds.height - stripHeight) : 220) : 0
+        let switches = manager.browser.quickSwitchVisible && !shelfOnly
+        let shelfHeight: CGFloat = shelfVisible && !switches ? (shelfOnly ? max(0, bounds.height - stripHeight) : 220) : 0
         if manager.shelf.view.superview === root.content {
+            manager.shelf.view.isHidden = switches
             manager.shelf.view.frame = NSRect(x: 0, y: 0, width: bounds.width, height: shelfHeight)
         }
         if manager.browser.view.superview === root.content {
@@ -472,7 +476,8 @@ final class NotchManager {
 
     init(shelfStore: ShelfStore = .shared) {
         shelf = ShelfViewController(store: shelfStore)
-        browser.onOpenShelf = { [weak self] in self?.showShelf() }
+        browser.onOpenShelf = { [weak self] in self?.browser.setQuickSwitchVisible(false); self?.showShelf() }
+        browser.onQuickSwitchChange = { [weak self] in self?.controllers.values.forEach { $0.layoutContent() } }
         shelf.onClose = { [weak self] in self?.controllers.values.filter(\.shelfVisible).forEach { $0.hideShelf() } }
         shelf.onSizeChange = { [weak self] in self?.controllers.values.filter(\.shelfOnly).forEach { $0.relayout(animated: false) } }
         shelf.onDrop = { [weak self] in self?.shelfDropReceived = true }
@@ -596,6 +601,14 @@ final class NotchManager {
         guard let target else { return }
         for other in controllers.values where other !== target && other.shelfVisible { other.hideShelf() }
         target.showShelf()
+    }
+
+    func showQuickSwitches() {
+        let target = orderedControllers.first(where: \.isExpanded)
+            ?? orderedControllers.first { $0.screen.frame.contains(NSEvent.mouseLocation) } ?? orderedControllers.first
+        guard let target else { return }
+        target.expand(focus: true)
+        browser.setQuickSwitchVisible(true)
     }
 
     private func dragChanged(_ active: Bool) {

@@ -21,7 +21,7 @@ struct DesignPreview {
             PinnedTab(name: "ドキュメント", url: fixture.absoluteString, icon: .symbol("doc.text"), profileID: profile.id),
             PinnedTab(name: "チーム", url: fixture.absoluteString, icon: .symbol("bubble.left.and.bubble.right"), profileID: profile.id)
         ]
-        for screen in NSScreen.screens { data.displays[screen.displayUUID] = DisplaySettings(enabled: screen == NSScreen.screens.first, width: 960, height: 660) }
+        for screen in NSScreen.screens { data.displays[screen.displayUUID] = DisplaySettings(enabled: screen == NSScreen.screens.first, width: CommandLine.arguments.contains("--compact") ? 600 : 960, height: 660) }
         SettingsStore.shared.data = data
         let manager = NotchManager(shelfStore: ShelfStore(file: fixture.deletingLastPathComponent().appendingPathComponent("preview-shelf.json")))
         let settings = SettingsWindowController()
@@ -59,7 +59,7 @@ struct DesignPreview {
         if CommandLine.arguments.contains("--address") {
             DispatchQueue.main.async { app.activate(); manager.browser.focusAddressBar(nil) }
         }
-        if CommandLine.arguments.contains("--switches") { DispatchQueue.main.async { QuickSwitchWindow.shared.present() } }
+        if CommandLine.arguments.contains("--switches") { DispatchQueue.main.async { manager.showQuickSwitches() } }
         var dragFixture: NSWindow?
         if CommandLine.arguments.contains("--drag-preview") {
             let window = NSWindow(contentRect: NSRect(x: 400, y: 200, width: 600, height: 320), styleMask: [.titled, .closable], backing: .buffered, defer: false)

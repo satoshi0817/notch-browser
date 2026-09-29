@@ -56,7 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu = menu
     }
 
-    @objc private func openQuickSwitches() { QuickSwitchWindow.shared.present() }
+    @objc private func openQuickSwitches() { notch.showQuickSwitches() }
 
     @objc private func openShelf() { notch.showShelf() }
 
