@@ -58,6 +58,11 @@ struct DesignPreview {
         if CommandLine.arguments.contains("--address") {
             DispatchQueue.main.async { app.activate(); manager.browser.focusAddressBar(nil) }
         }
-        withExtendedLifetime((manager, settings)) { app.run() }
+        var updatePreview: UpdateWindowController?
+        if CommandLine.arguments.contains("--update-preview") {
+            let release = GitHubRelease(tag_name: "v0.2.2", draft: false, prerelease: false, assets: [.init(name: "NotchBrowser-0.2.2.zip", state: "uploaded", size: 1)])
+            updatePreview = UpdateWindowController(release: release, checker: UpdateChecker(currentVersion: "0.2.1"), manual: true)
+        }
+        withExtendedLifetime((manager, settings, updatePreview)) { app.run() }
     }
 }

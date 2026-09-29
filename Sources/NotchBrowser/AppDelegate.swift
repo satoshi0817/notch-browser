@@ -7,6 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var hotKey: HotKey?
     private var keepOpenItem: NSMenuItem!
+    private var updateWindow: UpdateWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         notch = NotchManager()
@@ -14,6 +15,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.mainMenu = buildMainMenu()
         setupStatusItem()
         notch.start()
+        UpdateChecker.shared.onUpdate = { [weak self] release, manual in
+            self?.updateWindow?.close()
+            self?.updateWindow = UpdateWindowController(release: release, checker: .shared, manual: manual)
+        }
+        UpdateChecker.shared.onMessage = { message in
+            let alert = NSAlert()
+            alert.messageText = "アップデートの確認"
+            alert.informativeText = message
+            alert.addButton(withTitle: "OK")
+            alert.window.level = NSWindow.Level(rawValue: NotchController.level.rawValue + 1)
+            NSApp.activate()
+            alert.runModal()
+        }
+        UpdateChecker.shared.start()
 
         // ⌃⌥N toggles the browser from anywhere.
         hotKey = HotKey(keyCode: kVK_ANSI_N, modifiers: controlKey | optionKey) { [weak self] in
@@ -32,11 +47,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         keepOpenItem = item("開いたままにする", #selector(toggleKeepOpen), target: self)
         menu.addItem(keepOpenItem)
         menu.addItem(item("設定…", #selector(openSettings), ",", target: self))
+        menu.addItem(item("アップデートを確認…", #selector(checkForUpdates), target: self))
         menu.addItem(.separator())
         menu.addItem(item("NotchBrowser を終了", #selector(NSApplication.terminate(_:)), "q", target: NSApp))
         menu.delegate = self
         statusItem.menu = menu
     }
+
+    @objc private func checkForUpdates() { Task { await UpdateChecker.shared.check() } }
 
     @objc private func toggleNotch() { notch.toggle() }
     @objc private func toggleKeepOpen() { notch.keepOpen.toggle() }
@@ -54,6 +72,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let appMenu = NSMenu()
         appMenu.addItem(item("設定…", #selector(openSettings), ",", target: self))
+        appMenu.addItem(item("アップデートを確認…", #selector(checkForUpdates), target: self))
         appMenu.addItem(.separator())
         appMenu.addItem(item("NotchBrowser を終了", #selector(NSApplication.terminate(_:)), "q", target: NSApp))
         addSubmenu(appMenu, to: main)

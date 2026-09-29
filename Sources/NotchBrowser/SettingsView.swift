@@ -370,13 +370,15 @@ struct GeneralSettings: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("NotchBrowser を終了")
-                        Text("メニューバーのアイコン、ノッチの右クリック、ブラウザ右上の電源ボタンからも終了できます。")
+                        Text("メニューバーのアイコン、ノッチの右クリック、ブラウザ右上の操作メニューからも終了できます。")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
                     Button("終了") { NSApp.terminate(nil) }
                 }
             }
+
+            UpdateSettingsView()
 
             Section("ショートカット") {
                 LabeledContent("開く / 閉じる", value: "⌃⌥N")
