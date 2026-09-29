@@ -46,7 +46,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(item("開く / 閉じる", #selector(toggleNotch), "n", [.control, .option], target: self))
         keepOpenItem = item("開いたままにする", #selector(toggleKeepOpen), target: self)
         menu.addItem(keepOpenItem)
-        menu.addItem(item("クイックスイッチ", #selector(openQuickSwitches), target: self))
         menu.addItem(item("ファイル棚", #selector(openShelf), target: self))
         menu.addItem(item("設定…", #selector(openSettings), ",", target: self))
         menu.addItem(item("アップデートを確認…", #selector(checkForUpdates), target: self))
@@ -56,7 +55,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu = menu
     }
 
-    @objc private func openQuickSwitches() { notch.showQuickSwitches() }
 
     @objc private func openShelf() { notch.showShelf() }
 

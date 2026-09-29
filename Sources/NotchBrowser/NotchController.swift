@@ -87,8 +87,8 @@ final class NotchRootView: NSView {
             badgeIcon.contentTintColor = tint
         }
         let alpha: CGFloat = minutes != nil && visible ? 1 : 0
-        badgeIcon.animator().alphaValue = alpha
-        badgeLabel.animator().alphaValue = alpha
+        badgeIcon.alphaValue = alpha
+        badgeLabel.alphaValue = alpha
     }
 
     override func updateTrackingAreas() {
@@ -147,6 +147,7 @@ final class NotchController: NSObject, NSWindowDelegate {
     private unowned let manager: NotchManager
     private(set) var isExpanded = false
     private var hoverTimer: Timer?
+    private let transition = NotchTransition()
     private var pointerInside = false
     private(set) var shelfVisible = false
     private(set) var shelfOnly = false
@@ -227,6 +228,7 @@ final class NotchController: NSObject, NSWindowDelegate {
     }
 
     func close() {
+        transition.cancel()
         hoverTimer?.invalidate()
         panel.orderOut(nil)
     }
@@ -278,20 +280,9 @@ final class NotchController: NSObject, NSWindowDelegate {
     func relayout(animated: Bool = true) {
         root.contentSize = expandedSize
         layoutContent()
-        root.cornerRadius = isExpanded ? 18 : 10
         root.setBadge(minutes: manager.minutesToNextEvent, visible: !isExpanded)
-        let frame = isExpanded ? expandedFrame : collapsedFrame
-        let alpha = isExpanded ? 1 : idleOpacity
-        if animated {
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.28
-                panel.animator().setFrame(frame, display: true)
-                panel.animator().alphaValue = alpha
-            }
-        } else {
-            panel.setFrame(frame, display: true)
-            panel.alphaValue = alpha
-        }
+        animate(to: isExpanded ? expandedFrame : collapsedFrame,
+                radius: isExpanded ? 18 : 10, contentAlpha: isExpanded ? 1 : 0, animated: animated)
     }
 
     // MARK: Expand / collapse
@@ -318,11 +309,10 @@ final class NotchController: NSObject, NSWindowDelegate {
     func collapse(animated: Bool = true, preservingShelf: Bool = true) {
         hoverTimer?.invalidate()
         guard isExpanded else { return }
-        if manager.browser.view.superview === root.content { manager.browser.setQuickSwitchVisible(false) }
         if preservingShelf && shelfVisible && !manager.shelf.store.entries.isEmpty {
             shelfOnly = true
             if panel.isKeyWindow { panel.orderOut(nil); panel.orderFrontRegardless() }
-            relayout(animated: false)
+            relayout(animated: animated)
             return
         }
         isExpanded = false
@@ -336,19 +326,11 @@ final class NotchController: NSObject, NSWindowDelegate {
         }
         panel.hasShadow = false
         root.setBadge(minutes: manager.minutesToNextEvent, visible: true)
-        if animated {
-            animate(to: collapsedFrame, radius: 10, contentAlpha: 0)
-        } else {
-            root.cornerRadius = 10
-            if manager.browser.view.superview === root.content { manager.browser.view.alphaValue = 0 }
-            panel.setFrame(collapsedFrame, display: true)
-            panel.alphaValue = idleOpacity
-        }
+        animate(to: collapsedFrame, radius: 10, contentAlpha: 0, animated: animated)
         manager.didCollapse()
     }
 
     func showShelf() {
-        manager.browser.setQuickSwitchVisible(false)
         hoverTimer?.invalidate()
         if !shelfVisible { shelfOnly = !isExpanded }
         shelfVisible = true
@@ -357,7 +339,7 @@ final class NotchController: NSObject, NSWindowDelegate {
         let shelf = manager.shelf.view
         shelf.removeFromSuperview()
         root.content.addSubview(shelf)
-        relayout(animated: false)
+        relayout(animated: true)
         panel.orderFrontRegardless()
     }
 
@@ -368,15 +350,13 @@ final class NotchController: NSObject, NSWindowDelegate {
         shelfOnly = false
         manager.shelf.view.removeFromSuperview()
         if wasOnly { collapse() }
-        else { relayout(animated: false) }
+        else { relayout(animated: true) }
     }
 
     func layoutContent() {
         let bounds = root.content.bounds
-        let switches = manager.browser.quickSwitchVisible && !shelfOnly
-        let shelfHeight: CGFloat = shelfVisible && !switches ? (shelfOnly ? max(0, bounds.height - stripHeight) : 220) : 0
+        let shelfHeight: CGFloat = shelfVisible ? (shelfOnly ? max(0, bounds.height - stripHeight) : 220) : 0
         if manager.shelf.view.superview === root.content {
-            manager.shelf.view.isHidden = switches
             manager.shelf.view.frame = NSRect(x: 0, y: 0, width: bounds.width, height: shelfHeight)
         }
         if manager.browser.view.superview === root.content {
@@ -385,24 +365,31 @@ final class NotchController: NSObject, NSWindowDelegate {
         }
     }
 
-    private func animate(to frame: NSRect, radius: CGFloat, contentAlpha: CGFloat) {
-        root.cornerRadius = radius
-        let windowAlpha = isExpanded ? 1 : idleOpacity
+    private func animate(to frame: NSRect, radius: CGFloat, contentAlpha: CGFloat, animated: Bool = true) {
+        let opening = isExpanded
+        let windowAlpha = opening ? 1 : idleOpacity
         let motion = SettingsStore.shared.data.motion
-        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = motion.style == .none || reduceMotion ? 0 : (isExpanded ? motion.openDuration : motion.closeDuration)
-            switch motion.style {
-            case .responsive:
-                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.3, 1)
-            case .easeInOut:
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            case .linear, .none:
-                ctx.timingFunction = CAMediaTimingFunction(name: .linear)
-            }
-            panel.animator().setFrame(frame, display: true)
-            panel.animator().alphaValue = windowAlpha
-            if manager.browser.view.superview === root.content { manager.browser.view.animator().alphaValue = contentAlpha }
+        let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let duration = !animated || motion.style == .none || reduced ? 0 : (opening ? motion.openDuration : motion.closeDuration)
+        let startFrame = panel.frame
+        let startAlpha = panel.alphaValue
+        let startContent = root.content.alphaValue
+        let startRadius = root.cornerRadius
+        transition.run(duration: duration) { [weak self] progress in
+            guard let self else { return }
+            let shape = CGFloat(NotchMotionTiming.shape(progress, style: motion.style, opening: opening))
+            let content = CGFloat(NotchMotionTiming.content(progress, opening: opening))
+            func mix(_ a: CGFloat, _ b: CGFloat, _ t: CGFloat) -> CGFloat { a + (b - a) * t }
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            self.panel.setFrame(NSRect(x: mix(startFrame.minX, frame.minX, shape),
+                y: mix(startFrame.minY, frame.minY, shape),
+                width: mix(startFrame.width, frame.width, shape),
+                height: mix(startFrame.height, frame.height, shape)), display: true)
+            self.panel.alphaValue = mix(startAlpha, windowAlpha, shape)
+            self.root.cornerRadius = mix(startRadius, radius, shape)
+            self.root.content.alphaValue = mix(startContent, contentAlpha, content)
+            CATransaction.commit()
         }
     }
 
@@ -476,8 +463,7 @@ final class NotchManager {
 
     init(shelfStore: ShelfStore = .shared) {
         shelf = ShelfViewController(store: shelfStore)
-        browser.onOpenShelf = { [weak self] in self?.browser.setQuickSwitchVisible(false); self?.showShelf() }
-        browser.onQuickSwitchChange = { [weak self] in self?.controllers.values.forEach { $0.layoutContent() } }
+        browser.onOpenShelf = { [weak self] in self?.showShelf() }
         shelf.onClose = { [weak self] in self?.controllers.values.filter(\.shelfVisible).forEach { $0.hideShelf() } }
         shelf.onSizeChange = { [weak self] in self?.controllers.values.filter(\.shelfOnly).forEach { $0.relayout(animated: false) } }
         shelf.onDrop = { [weak self] in self?.shelfDropReceived = true }
@@ -516,7 +502,7 @@ final class NotchManager {
     }
 
     func start() {
-        browser.view.alphaValue = 0
+        browser.view.alphaValue = 1
         applyCalendarSettings()
         rebuild()
         applyWindowSettings()
@@ -601,14 +587,6 @@ final class NotchManager {
         guard let target else { return }
         for other in controllers.values where other !== target && other.shelfVisible { other.hideShelf() }
         target.showShelf()
-    }
-
-    func showQuickSwitches() {
-        let target = orderedControllers.first(where: \.isExpanded)
-            ?? orderedControllers.first { $0.screen.frame.contains(NSEvent.mouseLocation) } ?? orderedControllers.first
-        guard let target else { return }
-        target.expand(focus: true)
-        browser.setQuickSwitchVisible(true)
     }
 
     private func dragChanged(_ active: Bool) {

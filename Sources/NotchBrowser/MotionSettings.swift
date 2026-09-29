@@ -6,7 +6,7 @@ enum NotchAnimationStyle: String, Codable, CaseIterable, Identifiable {
     var id: Self { self }
     var title: String {
         switch self {
-        case .responsive: "すばやく滑らか（従来の動き）"
+        case .responsive: "自然な加速・減速"
         case .easeInOut: "ゆっくり加速・減速"
         case .linear: "一定速度"
         case .none: "アニメーションなし"

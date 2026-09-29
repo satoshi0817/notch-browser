@@ -140,7 +140,7 @@ final class BrowserToolsTests: XCTestCase {
             browser.view.layoutSubtreeIfNeeded()
             browser.view.layoutSubtreeIfNeeded()
             let buttons = descendants(browser.view).compactMap { $0 as? NSButton }.filter {
-                !$0.isHidden && ["戻る", "進む", "設定したページに戻る", "再読み込み", "URLを表示・検索 (⌘L)", "開いたままにする", "クイックスイッチ", "ページの操作"].contains($0.accessibilityLabel() ?? "")
+                !$0.isHidden && ["戻る", "進む", "設定したページに戻る", "再読み込み", "URLを表示・検索 (⌘L)", "開いたままにする", "ページの操作"].contains($0.accessibilityLabel() ?? "")
             }
             let frames = buttons.map { $0.convert($0.bounds, to: browser.view) }.sorted { $0.minX < $1.minX }
             XCTAssertGreaterThanOrEqual(frames.count, 5)

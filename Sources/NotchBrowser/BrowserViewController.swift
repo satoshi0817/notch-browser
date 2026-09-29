@@ -41,11 +41,6 @@ final class BrowserViewController: NSViewController {
     var onToggleKeepOpen: (() -> Void)?
     var onModalChange: ((Bool) -> Void)?
     var onOpenShelf: (() -> Void)?
-    var onQuickSwitchChange: (() -> Void)?
-    private(set) var quickSwitchVisible = false
-    let quickSwitchStore = QuickSwitchStore()
-    let systemSwitchStore = SystemSwitchStore()
-    private var quickSwitchHost: NSHostingView<QuickSwitchView>?
     var onOpenSettings: (() -> Void)?
     var keepOpen = false { didSet { updateChrome() } }
     var hideFromScreenCapture = true
@@ -93,7 +88,6 @@ final class BrowserViewController: NSViewController {
     private lazy var backButton = iconButton("chevron.left", "戻る", #selector(goBack))
     private lazy var forwardButton = iconButton("chevron.right", "進む", #selector(goForward))
     private lazy var reloadButton = iconButton("arrow.clockwise", "再読み込み", #selector(reloadOrStop))
-    private lazy var quickSwitchButton = iconButton("switch.2", "クイックスイッチ", #selector(openQuickSwitches))
     private lazy var keepOpenButton = iconButton("pin", "開いたままにする", #selector(toggleKeepOpen))
 
     private var tabTrailingConstraint: NSLayoutConstraint!
@@ -162,7 +156,7 @@ final class BrowserViewController: NSViewController {
         addressPopover.delegate = self
         for button in [backButton, forwardButton, homeButton, reloadButton, addressButton] { controlStack.addArrangedSubview(button) }
         controlStack.addArrangedSubview(NSView())
-        for button in [keepOpenButton, quickSwitchButton, toolsButton] { controlStack.addArrangedSubview(button) }
+        for button in [keepOpenButton, toolsButton] { controlStack.addArrangedSubview(button) }
         tabScroll.drawsBackground = false
         tabScroll.hasHorizontalScroller = true
         tabScroll.scrollerStyle = .overlay
@@ -248,11 +242,8 @@ final class BrowserViewController: NSViewController {
     private func updateCompactControls() {
         let available = view.bounds.width / 2 - controlLeadingConstraint.constant - 12
         // Five 28pt controls plus spacing fit at 600pt with a physical camera cutout.
-        forwardButton.isHidden = quickSwitchVisible || available < 265
-        reloadButton.isHidden = quickSwitchVisible || available < 265
-        backButton.isHidden = quickSwitchVisible || available < 160
-        homeButton.isHidden = quickSwitchVisible || available < 195
-        addressButton.isHidden = quickSwitchVisible || available < 130
+        forwardButton.isHidden = available < 230
+        reloadButton.isHidden = available < 230
     }
 
     override func viewDidLayout() {
@@ -266,7 +257,6 @@ final class BrowserViewController: NSViewController {
     }
 
     func focusContent() {
-        if quickSwitchVisible { view.window?.makeFirstResponder(quickSwitchHost); return }
         if let tab = selectedTab, tab.webView.url != nil {
             view.window?.makeFirstResponder(tab.webView)
             addressField.stringValue = tab.webView.url?.absoluteString ?? ""
@@ -408,7 +398,6 @@ final class BrowserViewController: NSViewController {
     }
 
     private func select(_ index: Int?) {
-        if quickSwitchVisible { setQuickSwitchVisible(false) }
         if !notes.isHidden { notes.isHidden = true }
         findGeneration += 1
         findStatus.stringValue = ""
@@ -800,7 +789,6 @@ final class BrowserViewController: NSViewController {
         _ = add("タブを検索  ⌘⇧A", "square.stack", #selector(showTabSwitcher))
         _ = add("タブを閉じる  ⌘W", "xmark", #selector(closeCurrentTab), enabled: selectedTab != nil && selectedTab?.pinnedID == nil)
         menu.addItem(.separator())
-        _ = add("クイックスイッチ", "switch.2", #selector(openQuickSwitches))
         _ = add("ファイル棚", "tray", #selector(openShelf))
         _ = add("クイックメモ  ⌘⇧M", "square.and.pencil", #selector(toggleNotes))
         menu.addItem(.separator())
@@ -812,35 +800,6 @@ final class BrowserViewController: NSViewController {
         reloadButton.toolTip = (selectedTab?.refreshInterval ?? 0) > 0
             ? "再読み込み・自動更新中 (\(Int(selectedTab!.refreshInterval))秒ごと)" : "再読み込み (⌘R)"
         reloadButton.contentTintColor = (selectedTab?.refreshInterval ?? 0) > 0 ? .systemCyan : .white
-    }
-
-    @objc private func openQuickSwitches() { setQuickSwitchVisible(!quickSwitchVisible) }
-
-    func setQuickSwitchVisible(_ visible: Bool) {
-        _ = view
-        guard quickSwitchVisible != visible else { return }
-        quickSwitchVisible = visible
-        addressPopover.close(); notes.isHidden = true; switcher.isHidden = true
-        if visible {
-            let host = NSHostingView(rootView: QuickSwitchView(store: quickSwitchStore, system: systemSwitchStore, onBack: { [weak self] in self?.setQuickSwitchVisible(false) }))
-            host.translatesAutoresizingMaskIntoConstraints = false
-            view.addSubview(host)
-            NSLayoutConstraint.activate([
-                host.topAnchor.constraint(equalTo: controlStack.bottomAnchor),
-                host.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 8),
-                host.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -8),
-                host.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -8)
-            ])
-            quickSwitchHost = host
-        } else {
-            quickSwitchHost?.removeFromSuperview(); quickSwitchHost = nil
-            quickSwitchStore.stopObserving(); systemSwitchStore.stop()
-        }
-        webContainer.isHidden = visible
-        quickSwitchButton.contentTintColor = visible ? .systemBlue : .white
-        updateCompactControls()
-        onQuickSwitchChange?()
-        focusContent()
     }
 
     @objc private func openShelf() { onOpenShelf?() }
@@ -1053,7 +1012,6 @@ final class BrowserViewController: NSViewController {
         notes.show(profile: store.profile(selectedTab?.profileID ?? store.data.newTabProfileID))
     }
     func dismissOverlay() -> Bool {
-        if quickSwitchVisible { setQuickSwitchVisible(false); return true }
         if addressPopover.isShown { addressPopover.close(); focusContent(); return true }
         if !notes.isHidden { notes.isHidden = true; focusContent(); return true }
         if !switcher.isHidden { closeSwitcher(nil); return true }

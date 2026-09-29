@@ -10,7 +10,7 @@ struct DesignPreview {
         var data = SettingsData()
         data.countdownEnabled = false
         data.hideFromScreenCapture = false
-        data.motion.style = .none
+        data.motion.style = CommandLine.arguments.contains("--motion") ? .responsive : .none
         let profile = Profile(id: UUID(), name: "Preview")
         data.profiles = [Profile(id: Profile.defaultID, name: "デフォルト"), profile]
         data.newTabProfileID = profile.id
@@ -59,7 +59,6 @@ struct DesignPreview {
         if CommandLine.arguments.contains("--address") {
             DispatchQueue.main.async { app.activate(); manager.browser.focusAddressBar(nil) }
         }
-        if CommandLine.arguments.contains("--switches") { DispatchQueue.main.async { manager.showQuickSwitches() } }
         var dragFixture: NSWindow?
         if CommandLine.arguments.contains("--drag-preview") {
             let window = NSWindow(contentRect: NSRect(x: 400, y: 200, width: 600, height: 320), styleMask: [.titled, .closable], backing: .buffered, defer: false)

@@ -5,7 +5,7 @@ enum MotionPreset: String, CaseIterable, Identifiable {
     case standard, quick, gentle, instant
     var id: Self { self }
     var title: String { switch self { case .standard: "標準"; case .quick: "きびきび"; case .gentle: "ゆったり"; case .instant: "すぐに表示" } }
-    var subtitle: String { switch self { case .standard: "いつもの滑らかな動き"; case .quick: "短い待ち時間で軽快に"; case .gentle: "余裕のある、穏やかな開閉"; case .instant: "待ち時間・アニメーションなし" } }
+    var subtitle: String { switch self { case .standard: "素早く開き、静かに収まる"; case .quick: "短い待ち時間で軽快に"; case .gentle: "余裕のある、穏やかな開閉"; case .instant: "待ち時間・アニメーションなし" } }
     var symbol: String { switch self { case .standard: "waveform.path"; case .quick: "bolt"; case .gentle: "wind"; case .instant: "rectangle" } }
     var settings: MotionSettings {
         var value = MotionSettings()
@@ -108,7 +108,8 @@ struct MotionSettingsView: View {
                         draft = store.data.motion; editing = true
                     }
                 }
-                Text("カードを選ぶと次の開閉から反映されます。視差効果を減らす設定が有効な場合、アニメーションは省略します。")
+                MotionPreview(settings: store.data.motion)
+                Text("カードを選ぶと次の開閉から反映されます。「視差効果を減らす」が有効な場合、動きを省略します。")
                     .font(.caption).foregroundStyle(.secondary)
             }.padding(24)
         }
@@ -117,6 +118,7 @@ struct MotionSettingsView: View {
                 Text("動きをカスタマイズ").font(.title2.bold())
                 ScrollView {
                     VStack(spacing: 18) {
+                        MotionPreview(settings: draft)
                         PrecisionSlider(title: "開くまでの待ち時間", value: $draft.openDelay, range: MotionSettings.delayRange, step: 0.01, unit: "秒", digits: 2)
                         PrecisionSlider(title: "閉じるまでの待ち時間", value: $draft.closeDelay, range: MotionSettings.delayRange, step: 0.01, unit: "秒", digits: 2)
                         Picker("アニメーション", selection: $draft.style) { ForEach(NotchAnimationStyle.allCases) { Text($0.title).tag($0) } }
