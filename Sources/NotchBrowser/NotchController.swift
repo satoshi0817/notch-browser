@@ -22,6 +22,10 @@ final class NotchPanel: NSPanel {
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         // Browser commands must also work while editing a note or a web form.
+        if let table = firstResponder as? ShelfTable, event.modifierFlags.contains(.command),
+           ["a", "c", "v", "z"].contains(event.charactersIgnoringModifiers?.lowercased() ?? "") {
+            table.keyDown(with: event); return true
+        }
         if event.modifierFlags.contains(.command), NSApp.mainMenu?.performKeyEquivalent(with: event) == true { return true }
         return super.performKeyEquivalent(with: event)
     }
@@ -100,7 +104,8 @@ final class NotchRootView: NSView {
     override func mouseDown(with event: NSEvent) { onClick?() }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard sender.draggingSourceOperationMask.contains(.copy),
+        guard sender.draggingPasteboard.availableType(from: [ShelfDragMonitor.originType]) == nil,
+              sender.draggingSourceOperationMask.contains(.copy),
               !ShelfViewController.urls(from: sender.draggingPasteboard).isEmpty,
               onFileDrag?() == true else { return [] }
         return .copy
@@ -245,7 +250,7 @@ final class NotchController: NSObject, NSWindowDelegate {
     var stripHeight: CGFloat { max(notchSize.height, 32) }
 
     var expandedSize: NSSize {
-        if shelfOnly { return NSSize(width: min(480, screen.frame.width - 40), height: 280 + stripHeight) }
+        if shelfOnly { return NSSize(width: min(480, screen.frame.width - 40), height: manager.shelf.preferredShelfHeight + stripHeight) }
         let frame = screen.frame
         return NSSize(
             width: min(settings.width, frame.width - 40).rounded(),
@@ -299,6 +304,7 @@ final class NotchController: NSObject, NSWindowDelegate {
             manager.browser.prepareForOpen()
             manager.willExpand(self)
             isExpanded = true
+            if !manager.shelf.store.entries.isEmpty { manager.showShelf(on: self) }
             panel.hasShadow = true
             root.setBadge(minutes: manager.minutesToNextEvent, visible: false)
             animate(to: expandedFrame, radius: 18, contentAlpha: 1)
@@ -309,9 +315,15 @@ final class NotchController: NSObject, NSWindowDelegate {
         }
     }
 
-    func collapse(animated: Bool = true) {
+    func collapse(animated: Bool = true, preservingShelf: Bool = true) {
         hoverTimer?.invalidate()
         guard isExpanded else { return }
+        if preservingShelf && shelfVisible && !manager.shelf.store.entries.isEmpty {
+            shelfOnly = true
+            if panel.isKeyWindow { panel.orderOut(nil); panel.orderFrontRegardless() }
+            relayout(animated: false)
+            return
+        }
         isExpanded = false
         shelfVisible = false
         shelfOnly = false
@@ -462,11 +474,17 @@ final class NotchManager {
         shelf = ShelfViewController(store: shelfStore)
         browser.onOpenShelf = { [weak self] in self?.showShelf() }
         shelf.onClose = { [weak self] in self?.controllers.values.filter(\.shelfVisible).forEach { $0.hideShelf() } }
+        shelf.onSizeChange = { [weak self] in self?.controllers.values.filter(\.shelfOnly).forEach { $0.relayout(animated: false) } }
         shelf.onDrop = { [weak self] in self?.shelfDropReceived = true }
         shelf.onDrag = { [weak self] active in
             self?.shelfDragOutgoing = active
             self?.dragActive = active
         }
+        shelf.store.$entries.receive(on: RunLoop.main).sink { [weak self] entries in
+            guard let self else { return }
+            if !entries.isEmpty && !self.controllers.values.contains(where: \.shelfVisible) { self.showShelf() }
+            if entries.isEmpty { self.controllers.values.forEach { $0.resumeHoverCloseIfNeeded() } }
+        }.store(in: &cancellables)
         dragMonitor.onChange = { [weak self] active in self?.dragChanged(active) }
         browser.onToggleKeepOpen = { [weak self] in self?.keepOpen.toggle() }
         browser.onModalChange = { [weak self] showing in
@@ -499,6 +517,7 @@ final class NotchManager {
         applyWindowSettings()
         calendar.start()
         dragMonitor.start()
+        if !shelf.store.entries.isEmpty { showShelf() }
     }
 
     private func settingsChanged() {
@@ -526,7 +545,7 @@ final class NotchManager {
         let ids = Set(enabled.map(\.displayUUID))
 
         for (id, controller) in controllers where !ids.contains(id) {
-            controller.collapse(animated: false)
+            controller.collapse(animated: false, preservingShelf: false)
             controller.close()
             controllers[id] = nil
         }
@@ -540,6 +559,7 @@ final class NotchManager {
                 controller.show()
             }
         }
+        if !shelf.store.entries.isEmpty && !controllers.values.contains(where: \.shelfVisible) { showShelf() }
     }
 
     private var orderedControllers: [NotchController] {
@@ -548,7 +568,7 @@ final class NotchManager {
 
     func willExpand(_ controller: NotchController) {
         for other in controllers.values where other !== controller && other.isExpanded {
-            other.collapse(animated: false)
+            other.collapse(animated: false, preservingShelf: false)
         }
         attachBrowser(to: controller)
         launcherWatcher.start()
@@ -602,7 +622,7 @@ final class NotchManager {
             dragWasActive = false
             let work = DispatchWorkItem { [weak self] in
                 guard let self, !self.dragActive else { return }
-                if !self.shelfDropReceived { self.automaticShelf?.hideShelf() }
+                if !self.shelfDropReceived && self.shelf.store.entries.isEmpty { self.automaticShelf?.hideShelf() }
                 self.automaticShelf = nil
                 if !self.shelfDropReceived { self.controllers.values.forEach { $0.resumeHoverCloseIfNeeded() } }
             }

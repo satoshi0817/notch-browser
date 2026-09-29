@@ -68,6 +68,7 @@ struct SettingsData: Codable {
     var glassTint = 0.5
     var shelfTrigger = ShelfTrigger.automatic
     var shelfDownloads = false
+    var shelfRemoveAfterDrag = true
 
     init() {}
 
@@ -86,6 +87,7 @@ struct SettingsData: Codable {
         grayscaleIcons = try c.decodeIfPresent(Bool.self, forKey: .grayscaleIcons) ?? fallback.grayscaleIcons
         colorSelectedIcon = try c.decodeIfPresent(Bool.self, forKey: .colorSelectedIcon) ?? fallback.colorSelectedIcon
         shelfTrigger = (try? c.decode(ShelfTrigger.self, forKey: .shelfTrigger)) ?? .automatic
+        shelfRemoveAfterDrag = (try? c.decode(Bool.self, forKey: .shelfRemoveAfterDrag)) ?? true
         shelfDownloads = (try? c.decode(Bool.self, forKey: .shelfDownloads)) ?? false
         let tint = (try? c.decode(Double.self, forKey: .glassTint)) ?? fallback.glassTint
         glassTint = tint.isFinite ? min(1, max(0, tint)) : fallback.glassTint

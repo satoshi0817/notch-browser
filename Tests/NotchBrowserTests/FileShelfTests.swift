@@ -63,7 +63,7 @@ final class FileShelfTests: XCTestCase {
         var data = SettingsData()
         data.pinnedTabs = []; data.countdownEnabled = false; data.motion.style = .none
         SettingsStore.shared.data = data
-        let manager = NotchManager()
+        let manager = NotchManager(shelfStore: ShelfStore(file: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("items.json")))
         let controller = NotchController(screen: screen, manager: manager)
         defer { controller.close() }
         controller.show()
@@ -83,4 +83,110 @@ final class FileShelfTests: XCTestCase {
         XCTAssertTrue(controller.isExpanded)
         XCTAssertEqual(manager.browser.view.frame.size, browserSize)
     }
+    func testDropBatchesFormSeparateStacksAndPartialClearCanBeRestored() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("items.json")
+        let store = ShelfStore(file: file)
+        let urls = (0..<4).map { directory.appendingPathComponent("file\($0).txt") }
+        XCTAssertTrue(store.add(Array(urls.prefix(2))))
+        XCTAssertTrue(store.add(Array(urls.suffix(2))))
+        let rows = ShelfRow.make(from: store.entries)
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertTrue(rows.allSatisfy(\.isStack))
+        XCTAssertNotEqual(rows[0].id, rows[1].id)
+        XCTAssertEqual(ShelfRow.make(from: ShelfStore(file: file).entries).map(\.id), rows.map(\.id))
+        let expanded = ShelfRow.make(from: store.entries, expanded: [rows[0].id])
+        XCTAssertEqual(expanded.count, 4)
+        XCTAssertEqual(ShelfRow.files(in: expanded, at: IndexSet([0, 1, 2])).count, 2, "A selected parent and its children must not duplicate outgoing files")
+        let removed = rows[0].items[0].id
+        store.remove([removed])
+        XCTAssertEqual(store.entries.count, 3)
+        XCTAssertEqual(ShelfRow.make(from: store.entries)[0].items.count, 1)
+        store.restoreRemoved()
+        XCTAssertEqual(ShelfRow.make(from: store.entries)[0].items.map(\.url), Array(urls.prefix(2)))
+        store.splitGroups([rows[0].id])
+        XCTAssertEqual(ShelfRow.make(from: store.entries).count, 3)
+        store.combine(Set(store.entries.map(\.id)))
+        XCTAssertEqual(ShelfRow.make(from: store.entries).count, 1)
+        store.togglePin([removed])
+        store.clearAll()
+        XCTAssertTrue(store.entries.isEmpty, "Explicit clear all also clears pinned references")
+        store.restoreRemoved()
+        XCTAssertEqual(store.entries.count, 4)
+        XCTAssertTrue(store.entries.first { $0.id == removed }!.pinned)
+        store.finishDrag(Set(store.entries.map(\.id)))
+        XCTAssertEqual(store.entries.map(\.id), [removed], "Successful drag retains pinned files")
+    }
+
+    func testRedroppingExistingFileWithAnotherFileGroupsBothWithoutDuplicates() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ShelfStore(file: directory.appendingPathComponent("items.json"))
+        let first = directory.appendingPathComponent("a.txt"), second = directory.appendingPathComponent("b.txt")
+        store.add([first]); store.add([first, second])
+        XCTAssertEqual(store.entries.count, 2)
+        XCTAssertEqual(ShelfRow.make(from: store.entries).count, 1)
+        XCTAssertEqual(ShelfRow.make(from: store.entries)[0].items.count, 2)
+    }
+
+    func testOldShelfEntriesDecodeWithoutGroups() throws {
+        let entry = ShelfEntry(url: URL(fileURLWithPath: "/tmp/old.txt"))
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(entry)) as? [String: Any])
+        json.removeValue(forKey: "groupID")
+        let decoded = try JSONDecoder().decode(ShelfEntry.self, from: JSONSerialization.data(withJSONObject: json))
+        XCTAssertNil(decoded.groupID)
+        XCTAssertEqual(decoded.id, entry.id)
+    }
+
+    @MainActor func testStackDragWritesEveryFileAsAnIndependentURL() throws {
+        _ = NSApplication.shared
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let urls = (0..<2).map { directory.appendingPathComponent("file\($0).txt") }
+        for url in urls { try Data("fixture".utf8).write(to: url) }
+        let store = ShelfStore(file: directory.appendingPathComponent("items.json"))
+        store.add(urls)
+        let controller = ShelfViewController(store: store)
+        _ = controller.view
+        XCTAssertEqual(controller.numberOfRows(in: controller.table), 1)
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        XCTAssertTrue(pasteboard.writeObjects(controller.pasteboardItems(forRows: [0])))
+        XCTAssertEqual(ShelfViewController.urls(from: pasteboard), urls)
+        try FileManager.default.removeItem(at: urls[0])
+        XCTAssertTrue(controller.pasteboardItems(forRows: [0]).isEmpty, "Do not silently drag a partial stack")
+    }
+
+    @MainActor func testNonemptyShelfSurvivesMouseExitAndBrowserCollapse() throws {
+        _ = NSApplication.shared
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let shelfStore = ShelfStore(file: directory.appendingPathComponent("items.json"))
+        shelfStore.add([directory.appendingPathComponent("file.txt")])
+        let original = SettingsStore.shared.data
+        defer { SettingsStore.shared.data = original }
+        var data = SettingsData()
+        data.pinnedTabs = []; data.countdownEnabled = false
+        data.motion.style = .none; data.motion.closeDelay = 0
+        SettingsStore.shared.data = data
+        let manager = NotchManager(shelfStore: shelfStore)
+        let controller = NotchController(screen: try XCTUnwrap(NSScreen.screens.first), manager: manager)
+        defer { controller.close() }
+        controller.show()
+        controller.showShelf()
+        controller.root.onHoverChange?(false)
+        XCTAssertTrue(controller.shelfOnly)
+        XCTAssertTrue(controller.isExpanded)
+        controller.expand(focus: false)
+        XCTAssertTrue(controller.shelfVisible)
+        XCTAssertFalse(controller.shelfOnly)
+        controller.root.onHoverChange?(false)
+        XCTAssertTrue(controller.shelfOnly, "Only the browser collapses; the populated shelf stays open")
+        shelfStore.clearAll()
+        controller.root.onHoverChange?(false)
+        XCTAssertFalse(controller.isExpanded)
+    }
+
 }

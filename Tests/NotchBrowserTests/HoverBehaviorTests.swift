@@ -16,7 +16,7 @@ final class HoverBehaviorTests: XCTestCase {
         settings.motion.closeDelay = 0.15
         settings.motion.style = .none
         store.data = settings
-        let manager = NotchManager()
+        let manager = NotchManager(shelfStore: ShelfStore(file: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("items.json")))
         let controller = NotchController(screen: screen, manager: manager)
         defer { controller.close() }
         controller.show()
@@ -52,7 +52,7 @@ final class HoverBehaviorTests: XCTestCase {
         settings.motion.closeDelay = 0.15
         settings.motion.style = .none
         store.data = settings
-        let manager = NotchManager()
+        let manager = NotchManager(shelfStore: ShelfStore(file: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("items.json")))
         let controller = NotchController(screen: screen, manager: manager)
         defer { controller.close() }
 
@@ -96,7 +96,7 @@ final class HoverBehaviorTests: XCTestCase {
         settings.motion.closeDelay = 0
         settings.motion.style = .none
         store.data = settings
-        let manager = NotchManager()
+        let manager = NotchManager(shelfStore: ShelfStore(file: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("items.json")))
         let controller = NotchController(screen: screen, manager: manager)
         defer { controller.close() }
         controller.root.onHoverChange?(true)

@@ -45,7 +45,7 @@ struct DesignPreview {
         }
         app.mainMenu = menu
         manager.start()
-        manager.keepOpen = true
+        manager.keepOpen = !CommandLine.arguments.contains("--drag-preview")
         if !CommandLine.arguments.contains("--drag-preview") { manager.toggle() }
         if CommandLine.arguments.contains("--shelf") { manager.showShelf() }
         if CommandLine.arguments.contains("--settings") {
@@ -64,7 +64,7 @@ struct DesignPreview {
         if CommandLine.arguments.contains("--drag-preview") {
             let window = NSWindow(contentRect: NSRect(x: 400, y: 200, width: 600, height: 320), styleMask: [.titled, .closable], backing: .buffered, defer: false)
             window.title = "Shelf Drag Fixture"
-            window.contentView = FileDragFixture(url: fixture)
+            window.contentView = FileDragFixture(url: fixture, grouped: CommandLine.arguments.contains("--stack-preview"))
             window.makeKeyAndOrderFront(nil)
             dragFixture = window
         }
@@ -81,19 +81,26 @@ struct DesignPreview {
 /// Real AppKit drag source for repeatable offline verification without touching user files.
 final class FileDragFixture: NSView, NSDraggingSource {
     let url: URL
-    init(url: URL) {
+    let urls: [URL]
+    init(url: URL, grouped: Bool) {
         self.url = url
+        let second = url.deletingLastPathComponent().appendingPathComponent("preview-second.txt")
+        if grouped { try? Data("Second stack fixture".utf8).write(to: second) }
+        urls = grouped ? [url, second] : [url]
         super.init(frame: .zero)
         registerForDraggedTypes([.fileURL])
-        let label = NSTextField(labelWithString: "Drag preview-page.html from here")
+        let label = NSTextField(labelWithString: grouped ? "Drag two files as one stack" : "Drag preview-page.html from here")
         label.frame = NSRect(x: 40, y: 140, width: 420, height: 30)
         addSubview(label)
     }
     required init?(coder: NSCoder) { fatalError() }
     override func mouseDown(with event: NSEvent) {
-        let item = NSDraggingItem(pasteboardWriter: url as NSURL)
-        item.setDraggingFrame(NSRect(origin: convert(event.locationInWindow, from: nil), size: NSSize(width: 32, height: 32)), contents: NSImage(systemSymbolName: "doc", accessibilityDescription: nil))
-        beginDraggingSession(with: [item], event: event, source: self)
+        let items = urls.map { url in
+            let item = NSDraggingItem(pasteboardWriter: url as NSURL)
+            item.setDraggingFrame(NSRect(origin: convert(event.locationInWindow, from: nil), size: NSSize(width: 32, height: 32)), contents: NSImage(systemSymbolName: "doc", accessibilityDescription: nil))
+            return item
+        }
+        beginDraggingSession(with: items, event: event, source: self)
     }
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { .copy }
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
