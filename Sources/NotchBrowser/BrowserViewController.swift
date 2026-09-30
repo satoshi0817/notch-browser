@@ -57,6 +57,7 @@ final class BrowserViewController: NSViewController {
     var onOpenShelf: (() -> Void)?
     var onOpenSettings: (() -> Void)?
     var onOpenNotionSettings: (() -> Void)?
+    var onExternalTabOpened: (() -> Void)?
     var keepOpen = false { didSet { updateChrome() } }
     var hideFromScreenCapture = true
 
@@ -73,7 +74,20 @@ final class BrowserViewController: NSViewController {
     private let tabScroll = NSScrollView()
     private var needsTabReveal = true
     private lazy var addTabButton = iconButton("plus", "新規タブ (⌘T)", #selector(newTab))
-    private lazy var notionTabButton = iconButton("sparkles.rectangle.stack", "Notionエージェント", #selector(toggleNotion))
+    private lazy var notionTabButton: TabButton = {
+        let button = TabButton(title: "Notion", image: symbol("sparkles.rectangle.stack") ?? NSImage(),
+                               target: self, action: #selector(toggleNotion))
+        button.bezelStyle = .recessed
+        button.setButtonType(.pushOnPushOff)
+        button.imagePosition = .imageLeading
+        button.contentTintColor = .white
+        button.font = .systemFont(ofSize: 12)
+        button.setAccessibilityLabel("Notionエージェント")
+        button.toolTip = "Notionエージェント"
+        button.onDragBegan = { [weak self] _ in self?.isDraggingTab = true }
+        button.onDragEnded = { [weak self] button in self?.tabDragEnded(button) }
+        return button
+    }()
     private let tabStack = NSStackView()
     private let findBar = NSStackView()
     private let findField = NSSearchField()
@@ -241,8 +255,7 @@ final class BrowserViewController: NSViewController {
         findBar.addArrangedSubview(iconButton("chevron.down", "次の一致 (↩)", #selector(findNext)))
         findBar.addArrangedSubview(iconButton("xmark", "検索を閉じる", #selector(closeFind)))
         findBar.isHidden = true
-        notionTabButton.setButtonType(.pushOnPushOff)
-        for sub in [tabScroll, notionTabButton, addTabButton, controlStack, findBar, webContainer] as [NSView] {
+        for sub in [tabScroll, addTabButton, controlStack, findBar, webContainer] as [NSView] {
             sub.translatesAutoresizingMaskIntoConstraints = false
             chrome.addSubview(sub)
         }
@@ -256,10 +269,7 @@ final class BrowserViewController: NSViewController {
             tabScroll.topAnchor.constraint(equalTo: chrome.topAnchor),
             tabScroll.leadingAnchor.constraint(equalTo: chrome.leadingAnchor, constant: 14),
             tabTrailingConstraint, tabHeight,
-            tabScroll.trailingAnchor.constraint(equalTo: notionTabButton.leadingAnchor, constant: -4),
-            notionTabButton.trailingAnchor.constraint(equalTo: addTabButton.leadingAnchor, constant: -4),
-            notionTabButton.centerYAnchor.constraint(equalTo: tabScroll.centerYAnchor),
-            notionTabButton.widthAnchor.constraint(equalToConstant: 28),
+            tabScroll.trailingAnchor.constraint(equalTo: addTabButton.leadingAnchor, constant: -4),
             addTabButton.centerYAnchor.constraint(equalTo: tabScroll.centerYAnchor),
             controlStack.topAnchor.constraint(equalTo: chrome.topAnchor),
             controlStack.trailingAnchor.constraint(equalTo: chrome.trailingAnchor, constant: -12),
@@ -290,8 +300,7 @@ final class BrowserViewController: NSViewController {
         let notion = NSHostingView(rootView: NotionAgentsPanel(onOpenSettings: { [weak self] in
             if let openNotion = self?.onOpenNotionSettings { openNotion() }
             else { self?.onOpenSettings?() }
-        },
-                                                    onClose: { [weak self] in self?.hideNotion() }))
+        }))
         notion.isHidden = true
         notion.translatesAutoresizingMaskIntoConstraints = false
         chrome.addSubview(notion)
@@ -637,6 +646,11 @@ final class BrowserViewController: NSViewController {
     /// Drops the dragged tab where it was released, within its own group (pinned or not).
     private func tabDragEnded(_ button: TabButton) {
         isDraggingTab = false
+        button.alphaValue = 1
+        if button === notionTabButton || (tabs.indices.contains(button.tag) && tabs[button.tag].pinnedID != nil) {
+            reorderPinnedButtons(afterDragging: button)
+            return
+        }
         let from = button.tag
         guard tabs.indices.contains(from) else { return updateChrome() }
         let tab = tabs[from]
@@ -656,6 +670,28 @@ final class BrowserViewController: NSViewController {
             let order = tabs.compactMap(\.pinnedID)
             store.data.pinnedTabs.sort { (order.firstIndex(of: $0.id) ?? .max) < (order.firstIndex(of: $1.id) ?? .max) }
         }
+        updateChrome()
+    }
+
+    private func reorderPinnedButtons(afterDragging button: TabButton) {
+        let dragged = button === notionTabButton ? "notion" : tabs[button.tag].pinnedID!.uuidString
+        var order = store.data.pinnedTabs.map { $0.id.uuidString }
+        order.insert("notion", at: min(store.data.notionTabPosition, order.count))
+        order.removeAll { $0 == dragged }
+        let otherButtons = tabStack.arrangedSubviews.compactMap { $0 as? TabButton }
+            .filter { candidate in
+                candidate !== button && (candidate === notionTabButton ||
+                    (tabs.indices.contains(candidate.tag) && tabs[candidate.tag].pinnedID != nil))
+            }
+        let destination = otherButtons.filter { $0.frame.midX < button.frame.midX }.count
+        order.insert(dragged, at: min(destination, order.count))
+        var data = store.data
+        data.notionTabPosition = order.firstIndex(of: "notion") ?? data.pinnedTabs.count
+        data.pinnedTabs.sort { left, right in
+            (order.firstIndex(of: left.id.uuidString) ?? .max) <
+            (order.firstIndex(of: right.id.uuidString) ?? .max)
+        }
+        store.data = data
         updateChrome()
     }
 
@@ -688,7 +724,13 @@ final class BrowserViewController: NSViewController {
 
     @objc private func openTabExternally(_ sender: NSMenuItem) {
         guard tabs.indices.contains(sender.tag), let url = tabs[sender.tag].webView.url else { return }
-        ExternalBrowserLauncher.open(url, bundleID: store.data.externalBrowserBundleID)
+        let tab = tabs[sender.tag]
+        ExternalBrowserLauncher.open(url, bundleID: store.data.externalBrowserBundleID) { [weak self, weak tab] opened in
+            guard opened, let self, let tab,
+                  let index = self.tabs.firstIndex(where: { $0 === tab }) else { return }
+            self.closeTab(at: index)
+            self.onExternalTabOpened?()
+        }
     }
 
     @objc private func toggleIconOnly(_ sender: NSMenuItem) {
@@ -753,8 +795,16 @@ final class BrowserViewController: NSViewController {
         tabStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         tabButtons = []
         let grayscale = store.data.grayscaleIcons
+        let notionPosition = min(store.data.notionTabPosition, firstUnpinnedIndex)
+        func addNotion() {
+            notionTabButton.state = notionPanel?.isHidden == false ? .on : .off
+            notionTabButton.showsBorderOnlyWhileMouseInside = notionPanel?.isHidden != false
+            notionTabButton.alphaValue = 1
+            tabStack.addArrangedSubview(notionTabButton)
+        }
         for (i, tab) in tabs.enumerated() {
-            if i == firstUnpinnedIndex, i > 0 {
+            if i == notionPosition { addNotion() }
+            if i == firstUnpinnedIndex {
                 let divider = NSBox()
                 divider.boxType = .separator
                 divider.heightAnchor.constraint(equalToConstant: 16).isActive = true
@@ -788,6 +838,7 @@ final class BrowserViewController: NSViewController {
             tabStack.addArrangedSubview(button)
             tabButtons.append(button)
         }
+        if notionPosition == tabs.count { addNotion() }
         tabStack.frame = NSRect(origin: .zero, size: NSSize(width: tabStack.fittingSize.width, height: stripHeightConstraints.first?.constant ?? 32))
     }
 
@@ -1191,20 +1242,21 @@ final class BrowserViewController: NSViewController {
         switcher.isHidden = true
         notionPanel?.isHidden = !willShow
         updateNotionTabSelection()
-        if willShow { NotionAgentsStore.shared.start() }
-        else { focusContent() }
+        NotionAgentsStore.shared.setPanelVisible(willShow)
+        if !willShow { focusContent() }
     }
     func showNotion() {
         _ = view
         notionPanel?.isHidden = false
         updateNotionTabSelection()
         notes.isHidden = true
-        NotionAgentsStore.shared.start()
+        NotionAgentsStore.shared.setPanelVisible(true)
     }
     func hideNotion() {
         guard notionPanel?.isHidden == false else { return }
         notionPanel?.isHidden = true
         updateNotionTabSelection()
+        NotionAgentsStore.shared.setPanelVisible(false)
     }
 
     private func updateNotionTabSelection() {

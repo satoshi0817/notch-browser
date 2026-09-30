@@ -23,22 +23,25 @@ enum ExternalBrowserLauncher {
         }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 
-    static func open(_ url: URL, bundleID: String?, workspace: NSWorkspace = .shared) {
-        guard let bundleID else { workspace.open(url); return }
+    static func open(_ url: URL, bundleID: String?, workspace: NSWorkspace = .shared,
+                     completion: ((Bool) -> Void)? = nil) {
+        guard let bundleID else { completion?(workspace.open(url)); return }
         guard let appURL = workspace.urlForApplication(withBundleIdentifier: bundleID) else {
             let alert = NSAlert()
             alert.messageText = "設定したブラウザが見つかりません"
             alert.informativeText = "設定 › 一般でブラウザを選び直してください。"
             alert.runModal()
+            completion?(false)
             return
         }
         workspace.open([url], withApplicationAt: appURL, configuration: .init()) { _, error in
-            guard let error else { return }
             DispatchQueue.main.async {
+                guard let error else { completion?(true); return }
                 let alert = NSAlert()
                 alert.messageText = "ブラウザで開けませんでした"
                 alert.informativeText = error.localizedDescription
                 alert.runModal()
+                completion?(false)
             }
         }
     }

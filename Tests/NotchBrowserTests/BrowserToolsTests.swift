@@ -53,7 +53,7 @@ final class BrowserToolsTests: XCTestCase {
         browser.newTab(nil)
         let webView = try XCTUnwrap(descendants(browser.view).compactMap { $0 as? WKWebView }.first)
         XCTAssertTrue(webView.configuration.userContentController.userScripts.contains { $0.source.contains("notchBrowserLinkMenu") })
-        let button = try XCTUnwrap(descendants(browser.view).compactMap { $0 as? TabButton }.first)
+        let button = try XCTUnwrap(descendants(browser.view).compactMap { $0 as? TabButton }.first { $0.menu != nil })
         let menu = try XCTUnwrap(button.menu)
         XCTAssertTrue(menu.items.contains { $0.title == "ブラウザで開く" })
         XCTAssertFalse(try XCTUnwrap(menu.items.first { $0.title == "ブラウザで開く" }).isEnabled)

@@ -1,4 +1,6 @@
 import Foundation
+import AppKit
+import SwiftUI
 import XCTest
 @testable import NotchBrowser
 
@@ -23,13 +25,38 @@ final class NotionAgentsTests: XCTestCase {
         XCTAssertTrue(settings.notionHiddenAgentIDs.isEmpty)
         XCTAssertTrue(settings.notionSavedAgents.isEmpty)
         XCTAssertTrue(settings.notionNotificationsEnabled)
+        XCTAssertEqual(settings.notionNotificationDuration, 10)
+        XCTAssertEqual(settings.notionTabPosition, settings.pinnedTabs.count)
         settings.notionHiddenAgentIDs.insert("agent-1")
         settings.notionNotificationsEnabled = false
+        settings.notionNotificationDuration = 30
+        settings.notionTabPosition = 1
         settings.notionSavedAgents = [SavedNotionAgent(id: "agent-1", name: "Writer")]
         let restored = try JSONDecoder().decode(SettingsData.self, from: JSONEncoder().encode(settings))
         XCTAssertEqual(restored.notionHiddenAgentIDs, ["agent-1"])
         XCTAssertFalse(restored.notionNotificationsEnabled)
+        XCTAssertEqual(restored.notionNotificationDuration, 30)
+        XCTAssertEqual(restored.notionTabPosition, 1)
         XCTAssertEqual(restored.notionSavedAgents, [SavedNotionAgent(id: "agent-1", name: "Writer")])
+    }
+
+    func testPollingAndNotificationOnlyFollowLocallyPendingThreads() {
+        XCTAssertFalse(NotionReplyTracking.shouldPoll(hasToken: true, panelVisible: false, pendingCount: 0))
+        XCTAssertTrue(NotionReplyTracking.shouldPoll(hasToken: true, panelVisible: true, pendingCount: 0))
+        XCTAssertTrue(NotionReplyTracking.shouldPoll(hasToken: true, panelVisible: false, pendingCount: 1))
+        XCTAssertFalse(NotionReplyTracking.shouldPoll(hasToken: false, panelVisible: true, pendingCount: 1))
+        XCTAssertNil(NotionReplyTracking.notificationTitle(status: "completed", baselineSignature: nil,
+            currentSignature: "completed:new", isPending: false))
+        XCTAssertNil(NotionReplyTracking.notificationTitle(status: "completed", baselineSignature: "completed:old",
+            currentSignature: "completed:old", isPending: true))
+        XCTAssertNil(NotionReplyTracking.notificationTitle(status: "in_progress", baselineSignature: "completed:old",
+            currentSignature: "in_progress:new", isPending: true))
+        XCTAssertEqual(NotionReplyTracking.notificationTitle(status: "completed", baselineSignature: "completed:old",
+            currentSignature: "completed:new", isPending: true), "返信が届きました")
+        XCTAssertEqual(NotionReplyTracking.notificationTitle(status: "requires_action", baselineSignature: nil,
+            currentSignature: "requires_action:new", isPending: true), "確認が必要です")
+        XCTAssertTrue(NotionReplyTracking.hasStoppedWithoutReply(status: "failed"))
+        XCTAssertFalse(NotionReplyTracking.hasStoppedWithoutReply(status: "in_progress"))
     }
 
     func testReplyAlertCoversNewAndCompletedThreadsWithoutRealertingOnSameState() throws {
@@ -63,6 +90,28 @@ final class NotionAgentsTests: XCTestCase {
         XCTAssertFalse(copied.contains("<mention"))
         XCTAssertFalse(copied.contains("<data_artifact"))
         XCTAssertTrue(copied.contains("表データ（Notionで確認）"))
+        let preview = NotionReplyFormatter.preview(raw)
+        XCTAssertTrue(preview.contains("Business → Demo"))
+        XCTAssertFalse(preview.contains("https://"))
+        XCTAssertFalse(preview.contains("<data_artifact"))
+    }
+
+    @MainActor
+    func testReplyLinkIsRenderedAsAnInteractiveTextLink() throws {
+        _ = NSApplication.shared
+        let message = try JSONDecoder().decode(NotionMessage.self, from: Data("""
+        {"id":"reply","role":"assistant","content":"[デモを見る](https://example.com/demo)","created_time":"2026-09-30T00:00:00Z"}
+        """.utf8))
+        let view = NSHostingView(rootView: NotionMessageView(message: message,
+            agent: SavedNotionAgent(id: "agent", name: "Demo")))
+        view.frame = NSRect(x: 0, y: 0, width: 600, height: 160)
+        view.layoutSubtreeIfNeeded()
+        func textViews(in root: NSView) -> [NSTextView] {
+            (root as? NSTextView).map { [$0] } ?? root.subviews.flatMap(textViews)
+        }
+        let linkView = try XCTUnwrap(textViews(in: view).first { $0.string.contains("デモを見る") })
+        XCTAssertTrue(linkView.isSelectable)
+        XCTAssertNotNil(linkView.textStorage?.attribute(.link, at: 0, effectiveRange: nil))
     }
 
     func testCustomAgentAvatarURLIsDecoded() throws {

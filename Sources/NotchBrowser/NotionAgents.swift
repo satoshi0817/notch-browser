@@ -96,6 +96,26 @@ enum NotionThreadAlertPolicy {
     }
 }
 
+enum NotionReplyTracking {
+    static func shouldPoll(hasToken: Bool, panelVisible: Bool, pendingCount: Int) -> Bool {
+        hasToken && (panelVisible || pendingCount > 0)
+    }
+
+    static func notificationTitle(status: String, baselineSignature: String?, currentSignature: String,
+                                  isPending: Bool) -> String? {
+        guard isPending, baselineSignature != currentSignature else { return nil }
+        switch status {
+        case "requires_action": return "確認が必要です"
+        case "completed": return "返信が届きました"
+        default: return nil
+        }
+    }
+
+    static func hasStoppedWithoutReply(status: String) -> Bool {
+        ["failed", "cancelled", "canceled", "expired"].contains(status)
+    }
+}
+
 struct NotionMessage: Decodable, Identifiable {
     let id: String
     let role: String
@@ -297,11 +317,17 @@ struct NotionAgentsAPI {
 }
 
 final class NotionAgentsStore: ObservableObject {
+    private struct PendingReply: Codable {
+        let agentID: String
+        let threadID: String
+        let baselineSignature: String?
+    }
+    private static let pendingRepliesKey = "notionPendingReplies"
     static let shared = NotionAgentsStore()
     @Published private(set) var threads: [NotionThread] = []
     @Published private(set) var messages: [NotionMessage] = []
     @Published private(set) var busyAgentIDs: Set<String> = []
-    @Published private(set) var alert: (agentID: String, threadID: String, title: String)?
+    @Published private(set) var alert: (agentID: String, threadID: String, title: String, preview: String)?
     @Published private(set) var noticeText: String?
     @Published var selectedAgentID: String?
     @Published var selectedThreadID: String?
@@ -311,13 +337,21 @@ final class NotionAgentsStore: ObservableObject {
     @Published private(set) var isRefreshing = false
     @Published private(set) var isLoadingMessages = false
     @Published private(set) var activityText: String?
+    @Published private(set) var lastUpdatedAt: Date?
     @Published private(set) var hasToken = NotionTokenStore.read() != nil
     private var timer: Timer?
+    private var timerInterval: TimeInterval?
+    private var isPanelVisible = false
+    private var pendingReplies: [String: PendingReply] = {
+        guard let data = UserDefaults.standard.data(forKey: pendingRepliesKey) else { return [:] }
+        return (try? JSONDecoder().decode([String: PendingReply].self, from: data)) ?? [:]
+    }()
     private var observed: [String: String] = [:]
     private var metadataChecked: Set<String> = []
     private var baselinedAgentIDs: Set<String> = []
     private var refreshInProgress = false
     private var refreshQueued = false
+    private var refreshQueuedFull = false
 
     var visibleAgents: [SavedNotionAgent] { SettingsStore.shared.data.notionSavedAgents }
 
@@ -327,13 +361,16 @@ final class NotionAgentsStore: ObservableObject {
         }
         hasToken = NotionTokenStore.read() != nil
         threads = []; messages = []; busyAgentIDs = []; observed = [:]; metadataChecked = []; baselinedAgentIDs = []; error = nil
+        pendingReplies = [:]; savePendingReplies()
         selectedAgentID = nil; selectedThreadID = nil
-        if hasToken { start() }
-        else { timer?.invalidate(); timer = nil }
+        start()
     }
 
     func registrationChanged() {
         let ids = Set(visibleAgents.map(\.id))
+        pendingReplies = pendingReplies.filter { ids.contains($0.value.agentID) }
+        savePendingReplies()
+        updatePolling()
         busyAgentIDs.formIntersection(ids)
         metadataChecked.formIntersection(ids)
         baselinedAgentIDs.formIntersection(ids)
@@ -343,30 +380,65 @@ final class NotionAgentsStore: ObservableObject {
             selectedThreadID = nil; threads = []; messages = []
         }
         if hasToken {
-            if refreshInProgress { refreshQueued = true }
-            else { Task { @MainActor in await refresh() } }
+            if refreshInProgress { refreshQueued = true; refreshQueuedFull = true }
+            else { Task { @MainActor in await refresh(forceFull: true) } }
         }
     }
 
     func start() {
-        guard hasToken else { return }
-        if timer == nil {
-            timer = .scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
-                Task { @MainActor in await self?.refresh() }
-            }
-        }
-        Task { @MainActor in await refresh() }
+        let ids = Set(visibleAgents.map(\.id))
+        let valid = pendingReplies.filter { ids.contains($0.value.agentID) }
+        if valid.count != pendingReplies.count { pendingReplies = valid; savePendingReplies() }
+        updatePolling()
     }
 
-    func refresh() async {
-        guard hasToken, !refreshInProgress, let token = NotionTokenStore.read() else { return }
+    func setPanelVisible(_ visible: Bool) {
+        guard isPanelVisible != visible else { return }
+        let wasPolling = timer != nil
+        isPanelVisible = visible
+        updatePolling()
+        if visible && wasPolling { Task { @MainActor in await refresh(forceFull: true) } }
+    }
+
+    private func updatePolling() {
+        guard NotionReplyTracking.shouldPoll(hasToken: hasToken, panelVisible: isPanelVisible,
+                                             pendingCount: pendingReplies.count) else {
+            timer?.invalidate(); timer = nil; timerInterval = nil
+            return
+        }
+        let interval: TimeInterval = pendingReplies.isEmpty ? 90 : 20
+        guard timerInterval != interval else { return }
+        let wasPolling = timer != nil
+        timer?.invalidate()
+        timerInterval = interval
+        timer = .scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            Task { @MainActor in await self?.refresh() }
+        }
+        if !wasPolling {
+            Task { @MainActor in await refresh() }
+        }
+    }
+
+    private func savePendingReplies() {
+        UserDefaults.standard.set(try? JSONEncoder().encode(pendingReplies), forKey: Self.pendingRepliesKey)
+    }
+
+    func refresh(forceFull: Bool = false) async {
+        guard hasToken, let token = NotionTokenStore.read() else { return }
+        if refreshInProgress {
+            if forceFull { refreshQueued = true; refreshQueuedFull = true }
+            return
+        }
         refreshInProgress = true
         isRefreshing = true
         defer {
             refreshInProgress = false; isRefreshing = false; activityText = nil
+            updatePolling()
             if refreshQueued {
+                let full = refreshQueuedFull
                 refreshQueued = false
-                Task { @MainActor in await refresh() }
+                refreshQueuedFull = false
+                Task { @MainActor in await refresh(forceFull: full) }
             }
         }
         let registered = visibleAgents
@@ -382,9 +454,12 @@ final class NotionAgentsStore: ObservableObject {
         do {
             var running = Set<String>()
             var failures: [String] = []
-            for (index, agent) in registered.enumerated() {
+            let targets = registered.filter { agent in
+                isPanelVisible || forceFull || pendingReplies.values.contains(where: { $0.agentID == agent.id })
+            }
+            for (index, agent) in targets.enumerated() {
                 guard visibleAgents.contains(where: { $0.id == agent.id }) else { continue }
-                activityText = "エージェントを確認中（\(index + 1)/\(registered.count)）"
+                if isPanelVisible { activityText = "エージェントを確認中（\(index + 1)/\(targets.count)）" }
                 let placeholder = "エージェント \(agent.id.prefix(8))"
                 if !metadataChecked.contains(agent.id) {
                     do {
@@ -407,27 +482,45 @@ final class NotionAgentsStore: ObservableObject {
                 catch { failures.append("\(agent.name): \(error.localizedDescription)"); continue }
                 if agent.id == selectedAgentID { threads = list }
                 for thread in list {
-                    if thread.isRunning { running.insert(agent.id) }
                     let key = "\(agent.id):\(thread.id)"
+                    if thread.isRunning && (isPanelVisible || pendingReplies[key] != nil) { running.insert(agent.id) }
                     let signature = "\(thread.status):\(thread.last_edited_time)"
-                    if SettingsStore.shared.data.notionNotificationsEnabled,
-                       let title = NotionThreadAlertPolicy.title(for: thread,
-                           previousSignature: observed[key], hasBaseline: baselinedAgentIDs.contains(agent.id)) {
-                        let name = visibleAgents.first(where: { $0.id == agent.id })?.name ?? agent.name
-                        noticeText = "\(name): \(title)"
-                        alert = (agent.id, thread.id, title)
+                    if let pending = pendingReplies[key],
+                       let title = NotionReplyTracking.notificationTitle(status: thread.status,
+                           baselineSignature: pending.baselineSignature, currentSignature: signature,
+                           isPending: true) {
+                        pendingReplies.removeValue(forKey: key)
+                        savePendingReplies()
+                        if SettingsStore.shared.data.notionNotificationsEnabled {
+                            let name = visibleAgents.first(where: { $0.id == agent.id })?.name ?? agent.name
+                            let preview: String
+                            if let fetched = try? await api.messages(threadID: thread.id),
+                               let reply = fetched.last(where: { $0.role != "user" }) {
+                                preview = NotionReplyFormatter.preview(reply.content)
+                            } else {
+                                preview = thread.title
+                            }
+                            noticeText = "\(name): \(title)"
+                            alert = (agent.id, thread.id, title, preview.isEmpty ? thread.title : preview)
+                        }
+                    } else if pendingReplies[key] != nil,
+                              NotionReplyTracking.hasStoppedWithoutReply(status: thread.status) {
+                        pendingReplies.removeValue(forKey: key)
+                        savePendingReplies()
                     }
                     observed[key] = signature
                 }
                 baselinedAgentIDs.insert(agent.id)
             }
-            busyAgentIDs = running.intersection(Set(visibleAgents.map(\.id)))
-            if let selectedThreadID {
+            busyAgentIDs = running.union(pendingReplies.values.map(\.agentID))
+                .intersection(Set(visibleAgents.map(\.id)))
+            if isPanelVisible || forceFull, let selectedThreadID {
                 activityText = "会話を読み込み中…"
                 let fetched = try await api.messages(threadID: selectedThreadID)
                 if self.selectedThreadID == selectedThreadID { messages = fetched }
             }
             error = failures.first.map { failures.count == 1 ? $0 : "\($0) ほか\(failures.count - 1)件" }
+            lastUpdatedAt = Date()
         } catch { self.error = error.localizedDescription }
     }
 
@@ -439,6 +532,7 @@ final class NotionAgentsStore: ObservableObject {
         do {
             let fetched = try await NotionAgentsAPI(token: token).threads(agentID: id, allPages: false)
             if selectedAgentID == id { threads = fetched }
+            lastUpdatedAt = Date()
             error = nil
         }
         catch { self.error = error.localizedDescription }
@@ -453,6 +547,7 @@ final class NotionAgentsStore: ObservableObject {
         do {
             let fetched = try await NotionAgentsAPI(token: token).messages(threadID: id)
             if selectedThreadID == id { messages = fetched }
+            lastUpdatedAt = Date()
             error = nil
         }
         catch { self.error = error.localizedDescription }
@@ -466,9 +561,16 @@ final class NotionAgentsStore: ObservableObject {
         defer { isSending = false; activityText = nil }
         do {
             let invocation = try await NotionAgentsAPI(token: token).send(text, agentID: agentID, threadID: selectedThreadID)
+            let key = "\(agentID):\(invocation.thread_id)"
+            let baseline = observed[key] ?? threads.first(where: { $0.id == invocation.thread_id })
+                .map { "\($0.status):\($0.last_edited_time)" }
+            pendingReplies[key] = PendingReply(agentID: agentID, threadID: invocation.thread_id,
+                                               baselineSignature: baseline)
+            savePendingReplies()
+            updatePolling()
             selectedThreadID = invocation.thread_id
             busyAgentIDs.insert(agentID)
-            await refresh()
+            await refresh(forceFull: true)
         } catch { self.error = error.localizedDescription }
     }
 
@@ -478,6 +580,13 @@ final class NotionAgentsStore: ObservableObject {
         defer { isResponding = false; activityText = nil }
         do {
             _ = try await NotionAgentsAPI(token: token).respond(actionID: action.id, optionID: option.id, threadID: threadID)
+            if let agentID = selectedAgentID {
+                let key = "\(agentID):\(threadID)"
+                pendingReplies[key] = PendingReply(agentID: agentID, threadID: threadID,
+                                                   baselineSignature: observed[key])
+                savePendingReplies()
+                updatePolling()
+            }
             alert = nil
             await refresh()
         } catch { self.error = error.localizedDescription }
@@ -499,7 +608,6 @@ struct NotionAgentsPanel: View {
     @State private var tokenDraft = ""
     @State private var showJumpToBottom = false
     let onOpenSettings: () -> Void
-    let onClose: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -507,12 +615,6 @@ struct NotionAgentsPanel: View {
                 Image(systemName: "sparkles.rectangle.stack").foregroundStyle(.purple)
                 Text("Notionエージェント").font(.headline)
                 Spacer()
-                Button { Task { @MainActor in await store.refresh() } } label: {
-                    if store.isRefreshing { ProgressView().controlSize(.small) }
-                    else { Image(systemName: "arrow.clockwise") }
-                }.help("登録したエージェントを更新")
-                    .disabled(!store.hasToken || store.visibleAgents.isEmpty || store.isRefreshing)
-                Button(action: onClose) { Image(systemName: "xmark") }.help("閉じる")
             }.buttonStyle(.plain).padding(14)
             if let notice = store.noticeText {
                 HStack { Image(systemName: "bell.badge.fill"); Text(notice); Spacer() }
@@ -658,15 +760,6 @@ struct NotionAgentsPanel: View {
                                 }
                                 }
                             }
-                            HStack(spacing: 7) {
-                                if let activity = store.activityText {
-                                    ProgressView().controlSize(.mini)
-                                    Text(activity)
-                                }
-                                Spacer()
-                            }
-                            .font(.caption2).foregroundStyle(.secondary)
-                            .frame(height: 24).padding(.horizontal, 20)
                             HStack(alignment: .bottom, spacing: 12) {
                                 TextField("エージェントにメッセージ", text: $draft, axis: .vertical)
                                     .lineLimit(1...5).textFieldStyle(.plain)
@@ -700,6 +793,25 @@ struct NotionAgentsPanel: View {
                 }
             }
             if let error = store.error { Text(error).font(.caption).foregroundStyle(.red).padding(8) }
+            Divider()
+            HStack(spacing: 8) {
+                if store.activityText != nil || store.isRefreshing {
+                    ProgressView().controlSize(.mini)
+                    Text(store.activityText ?? "更新中…")
+                } else if let updated = store.lastUpdatedAt {
+                    Text("最終更新 \(updated.formatted(date: .numeric, time: .shortened))")
+                } else {
+                    Text("まだ更新していません")
+                }
+                Spacer()
+                Button { Task { @MainActor in await store.refresh(forceFull: true) } } label: {
+                    Label("今すぐ更新", systemImage: "arrow.clockwise")
+                }
+                .disabled(!store.hasToken || store.visibleAgents.isEmpty || store.isRefreshing)
+                .help("エージェントと会話を強制取得")
+            }
+            .buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)
+            .frame(height: 38).padding(.horizontal, 16)
         }
         .background(.ultraThickMaterial, in: RoundedRectangle(cornerRadius: 16))
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.12)))
@@ -847,6 +959,12 @@ struct NotionAgentsSettings: View {
             }
             Section("通知") {
                 Toggle("返信・確認待ちでノッチを開く", isOn: $settings.data.notionNotificationsEnabled)
+                Picker("通知を閉じるまで", selection: $settings.data.notionNotificationDuration) {
+                    ForEach([5, 10, 15, 30, 60], id: \.self) { seconds in
+                        Text("\(seconds)秒").tag(seconds)
+                    }
+                }
+                .disabled(!settings.data.notionNotificationsEnabled)
             }
             if let error = agents.error { Text(error).foregroundStyle(.red) }
         }

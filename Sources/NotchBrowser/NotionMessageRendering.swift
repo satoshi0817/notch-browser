@@ -36,6 +36,7 @@ enum NotionReplyFormatter {
     private static let citation = try! NSRegularExpression(pattern: #"\[\^(https?://[^\]]+)\]"#)
     private static let artifact = try! NSRegularExpression(pattern: #"<data_artifact\b[^>]*/>"#)
     private static let numbered = try! NSRegularExpression(pattern: #"^(\d+)\.\s+(.+)$"#)
+    private static let markdownLink = try! NSRegularExpression(pattern: #"\[([^\]]+)\]\(https?://[^)]+\)"#)
 
     static func markdown(_ raw: String) -> String {
         var value = replace(mention, in: raw) { match, source in
@@ -71,6 +72,13 @@ enum NotionReplyFormatter {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    static func preview(_ raw: String) -> String {
+        var value = markdown(raw).replacingOccurrences(of: ":::notion-artifact:::", with: "")
+        value = replace(markdownLink, in: value) { match, source in source.substring(with: match.range(at: 1)) }
+        value = value.replacingOccurrences(of: "**", with: "")
+        return String(value.split(whereSeparator: \.isWhitespace).joined(separator: " ").prefix(140))
+    }
+
     private static func replace(_ expression: NSRegularExpression, in text: String,
                                 using transform: (NSTextCheckingResult, NSString) -> String) -> String {
         let source = text as NSString
@@ -83,12 +91,74 @@ enum NotionReplyFormatter {
     }
 }
 
-private struct NotionReplyText: View {
+private final class NotionLinkTextView: NSTextView {
+    private var hoverTrackingArea: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverTrackingArea { removeTrackingArea(hoverTrackingArea) }
+        let area = NSTrackingArea(rect: .zero,
+            options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self)
+        addTrackingArea(area)
+        hoverTrackingArea = area
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        guard let layoutManager, let textContainer, let textStorage else { return }
+        let location = convert(event.locationInWindow, from: nil)
+        let origin = textContainerOrigin
+        let point = NSPoint(x: location.x - origin.x, y: location.y - origin.y)
+        let index = layoutManager.characterIndex(for: point, in: textContainer,
+                                                  fractionOfDistanceBetweenInsertionPoints: nil)
+        guard index < textStorage.length else { NSCursor.iBeam.set(); return }
+        let glyph = layoutManager.glyphIndexForCharacter(at: index)
+        let glyphRect = layoutManager.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1),
+                                                   in: textContainer)
+        let isLink = glyphRect.contains(point) && textStorage.attribute(.link, at: index, effectiveRange: nil) != nil
+        (isLink ? NSCursor.pointingHand : NSCursor.iBeam).set()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        NSCursor.arrow.set()
+    }
+}
+
+private struct NotionReplyText: NSViewRepresentable {
     let source: String
-    var body: some View {
+
+    func makeNSView(context: Context) -> NotionLinkTextView {
+        let view = NotionLinkTextView()
+        view.isEditable = false
+        view.isSelectable = true
+        view.drawsBackground = false
+        view.textContainerInset = .zero
+        view.isHorizontallyResizable = false
+        view.isVerticallyResizable = true
+        view.textContainer?.widthTracksTextView = true
+        view.linkTextAttributes = [.foregroundColor: NSColor.systemCyan,
+                                   .underlineStyle: NSUnderlineStyle.single.rawValue]
+        return view
+    }
+
+    func updateNSView(_ view: NotionLinkTextView, context: Context) {
         let value = (try? AttributedString(markdown: source,
                                            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(source)
-        Text(value).textSelection(.enabled).tint(.cyan)
+        let text = NSMutableAttributedString(attributedString: NSAttributedString(value))
+        text.addAttributes([.font: NSFont.systemFont(ofSize: 14), .foregroundColor: NSColor.labelColor],
+                           range: NSRange(location: 0, length: text.length))
+        if view.attributedString() != text { view.textStorage?.setAttributedString(text) }
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView view: NotionLinkTextView, context: Context) -> CGSize? {
+        let width = max(1, proposal.width ?? 500)
+        view.textContainer?.containerSize = NSSize(width: width, height: .greatestFiniteMagnitude)
+        if let textContainer = view.textContainer, let layoutManager = view.layoutManager {
+            layoutManager.ensureLayout(for: textContainer)
+            return CGSize(width: width, height: max(18, ceil(layoutManager.usedRect(for: textContainer).height)))
+        }
+        return CGSize(width: width, height: 18)
     }
 }
 

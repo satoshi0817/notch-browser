@@ -137,29 +137,45 @@ struct SettingsView: View {
 struct PinnedTabsSettings: View {
     @EnvironmentObject var store: SettingsStore
     @State private var selection: UUID?
+    private static let notionID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+    private struct Row: Identifiable {
+        let id: UUID
+        let tab: PinnedTab?
+    }
+    private var rows: [Row] {
+        var result = store.data.pinnedTabs.map { Row(id: $0.id, tab: $0) }
+        result.insert(Row(id: Self.notionID, tab: nil),
+                      at: min(store.data.notionTabPosition, result.count))
+        return result
+    }
 
     var body: some View {
         HSplitView {
             VStack(spacing: 0) {
                 List(selection: $selection) {
-                    ForEach(store.data.pinnedTabs) { tab in
+                    ForEach(rows) { row in
                         HStack(spacing: 8) {
-                            Image(nsImage: TabIconRenderer.image(for: tab.icon, hosts: [tab.host]))
-                            Text(tab.name)
+                            if let tab = row.tab {
+                                Image(nsImage: TabIconRenderer.image(for: tab.icon, hosts: [tab.host]))
+                                Text(tab.name)
+                            } else {
+                                Image(systemName: "sparkles.rectangle.stack")
+                                Text("Notionエージェント")
+                            }
                             Spacer()
-                            if tab.iconOnly {
+                            if row.tab?.iconOnly == true {
                                 Image(systemName: "eye.slash").foregroundStyle(.secondary).help("アイコンのみ")
                             }
                         }
-                        .tag(tab.id)
+                        .tag(row.id)
                     }
-                    .onMove { store.data.pinnedTabs.move(fromOffsets: $0, toOffset: $1) }
+                    .onMove(perform: move)
                 }
                 Divider()
                 HStack(spacing: 0) {
                     Button { add() } label: { Image(systemName: "plus").frame(width: 24, height: 20) }.help("固定ページを追加")
                     Button { remove() } label: { Image(systemName: "minus").frame(width: 24, height: 20) }
-                        .disabled(selection == nil)
+                        .disabled(selection == nil || selection == Self.notionID)
                         .help("選択した固定ページを削除")
                     Spacer()
                 }
@@ -171,6 +187,10 @@ struct PinnedTabsSettings: View {
             Group {
                 if let id = selection, let binding = binding(for: id) {
                     PinnedTabEditor(tab: binding)
+                } else if selection == Self.notionID {
+                    Label("Notionエージェントは固定ページと一緒に並び替えられます。", systemImage: "sparkles.rectangle.stack")
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     Label("タブを選択するか、追加してください", systemImage: "plus.circle")
                         .foregroundStyle(.secondary)
@@ -198,8 +218,21 @@ struct PinnedTabsSettings: View {
 
     private func remove() {
         guard let id = selection else { return }
+        if let index = store.data.pinnedTabs.firstIndex(where: { $0.id == id }),
+           index < store.data.notionTabPosition {
+            store.data.notionTabPosition -= 1
+        }
         store.data.pinnedTabs.removeAll { $0.id == id }
         selection = store.data.pinnedTabs.first?.id
+    }
+
+    private func move(fromOffsets: IndexSet, toOffset: Int) {
+        var reordered = rows
+        reordered.move(fromOffsets: fromOffsets, toOffset: toOffset)
+        var data = store.data
+        data.notionTabPosition = reordered.firstIndex(where: { $0.id == Self.notionID }) ?? data.pinnedTabs.count
+        data.pinnedTabs = reordered.compactMap(\.tab)
+        store.data = data
     }
 }
 

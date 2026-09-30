@@ -120,6 +120,8 @@ struct SettingsData: Codable {
         PinnedTab(name: "メール", url: "https://mail.google.com/", icon: .symbol("envelope")),
         PinnedTab(name: "カレンダー", url: "https://calendar.google.com/", icon: .symbol("calendar")),
     ]
+    /// Insertion point among pinned pages for the Notion agent panel.
+    var notionTabPosition = 2
     var newTabProfileID = Profile.defaultID
     /// Keyed by display UUID.
     var displays: [String: DisplaySettings] = [:]
@@ -145,6 +147,7 @@ struct SettingsData: Codable {
     var notionHiddenAgentIDs: Set<String> = []
     var notionSavedAgents: [SavedNotionAgent] = []
     var notionNotificationsEnabled = true
+    var notionNotificationDuration = 10
 
     init() {}
 
@@ -154,6 +157,8 @@ struct SettingsData: Codable {
         let fallback = SettingsData()
         profiles = try c.decodeIfPresent([Profile].self, forKey: .profiles) ?? fallback.profiles
         pinnedTabs = try c.decodeIfPresent([PinnedTab].self, forKey: .pinnedTabs) ?? fallback.pinnedTabs
+        notionTabPosition = min(pinnedTabs.count, max(0,
+            (try? c.decode(Int.self, forKey: .notionTabPosition)) ?? pinnedTabs.count))
         newTabProfileID = try c.decodeIfPresent(UUID.self, forKey: .newTabProfileID) ?? fallback.newTabProfileID
         displays = try c.decodeIfPresent([String: DisplaySettings].self, forKey: .displays) ?? fallback.displays
         countdownEnabled = try c.decodeIfPresent(Bool.self, forKey: .countdownEnabled) ?? fallback.countdownEnabled
@@ -171,6 +176,8 @@ struct SettingsData: Codable {
         notionHiddenAgentIDs = (try? c.decode(Set<String>.self, forKey: .notionHiddenAgentIDs)) ?? []
         notionSavedAgents = (try? c.decode([SavedNotionAgent].self, forKey: .notionSavedAgents)) ?? []
         notionNotificationsEnabled = (try? c.decode(Bool.self, forKey: .notionNotificationsEnabled)) ?? true
+        notionNotificationDuration = min(60, max(5,
+            (try? c.decode(Int.self, forKey: .notionNotificationDuration)) ?? 10))
         toolbarActions = (try? c.decode([String].self, forKey: .toolbarActions))
             .map { raw in
                 var seen = Set<ToolbarAction>()
