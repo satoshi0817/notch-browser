@@ -33,6 +33,12 @@ struct DesignPreview {
             for file in files.dropFirst(2) { _ = manager.shelf.store.add([file]) }
         }
         let settings = SettingsWindowController()
+        var onboardingSettings = data
+        onboardingSettings.countdownEnabled = false
+        onboardingSettings.toolbarActions.removeAll { $0 == .notion }
+        onboardingSettings.hideFromScreenCapture = true
+        let onboarding: OnboardingWindowController? = CommandLine.arguments.contains("--onboarding")
+            ? OnboardingWindowController(settings: onboardingSettings, onFinish: { _, _ in }, onSkip: {}) : nil
         manager.browser.onOpenSettings = { settings.present() }
         let menu = NSMenu()
         let appMenu = NSMenu()
@@ -56,7 +62,9 @@ struct DesignPreview {
         manager.keepOpen = !CommandLine.arguments.contains("--drag-preview")
         if !CommandLine.arguments.contains("--drag-preview") { manager.toggle() }
         if CommandLine.arguments.contains("--shelf") { manager.showShelf() }
-        if CommandLine.arguments.contains("--settings") {
+        if let onboarding {
+            DispatchQueue.main.async { onboarding.present() }
+        } else if CommandLine.arguments.contains("--settings") {
             DispatchQueue.main.async { settings.present() }
         } else {
             manager.browser.newTab(nil)
@@ -80,7 +88,7 @@ struct DesignPreview {
             let release = GitHubRelease(tag_name: "v0.2.2", draft: false, prerelease: false, assets: [.init(name: "NotchBrowser-0.2.2.zip", state: "uploaded", size: 1)])
             updatePreview = UpdateWindowController(release: release, checker: UpdateChecker(currentVersion: "0.2.1"), manual: true)
         }
-        withExtendedLifetime((manager, settings, updatePreview, dragFixture, quitDelegate)) { app.run() }
+        withExtendedLifetime((manager, settings, onboarding, updatePreview, dragFixture, quitDelegate)) { app.run() }
     }
 }
 

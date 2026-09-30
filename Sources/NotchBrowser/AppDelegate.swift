@@ -8,8 +8,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotKey: HotKey?
     private var keepOpenItem: NSMenuItem!
     private var updateWindow: UpdateWindowController?
+    private var onboardingWindow: OnboardingWindowController?
+    private var updatesStarted = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let firstRun = OnboardingState.shouldPresent()
+        if firstRun {
+            OnboardingState.begin()
+            // Ask for calendar access only after the user opts in during setup.
+            SettingsStore.shared.data.countdownEnabled = false
+            SettingsStore.shared.data.toolbarActions.removeAll { $0 == .notion }
+        }
         notch = NotchManager()
         notch.browser.onOpenSettings = { [weak self] in self?.openSettings() }
         NSApp.mainMenu = buildMainMenu()
@@ -28,12 +37,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.activate()
             alert.runModal()
         }
-        UpdateChecker.shared.start()
+        if !firstRun { startUpdatesIfNeeded() }
 
         // ⌃⌥N toggles the browser from anywhere.
         hotKey = HotKey(keyCode: kVK_ANSI_N, modifiers: controlKey | optionKey) { [weak self] in
             self?.notch.toggle()
         }
+        NotificationCenter.default.addObserver(self, selector: #selector(onboardingRequested(_:)),
+                                               name: .showNotchBrowserOnboarding, object: nil)
+        if firstRun { DispatchQueue.main.async { [weak self] in self?.presentOnboarding() } }
+    }
+
+    private func startUpdatesIfNeeded() {
+        guard !updatesStarted else { return }
+        updatesStarted = true
+        Task { @MainActor in UpdateChecker.shared.start() }
     }
 
     private var isConfirmingQuit = false
@@ -76,6 +94,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(keepOpenItem)
         menu.addItem(item("ファイル棚", #selector(openShelf), target: self))
         menu.addItem(item("Notionエージェント", #selector(openNotion), target: self))
+        menu.addItem(item("使い方ガイド…", #selector(openOnboarding), target: self))
         menu.addItem(item("設定…", #selector(openSettings), ",", target: self))
         menu.addItem(item("アップデートを確認…", #selector(checkForUpdates), target: self))
         menu.addItem(.separator())
@@ -94,8 +113,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func toggleKeepOpen() { notch.keepOpen.toggle() }
 
     @objc private func openSettings() {
+        presentSettings()
+    }
+
+    private func presentSettings(section: SettingsSection? = nil) {
         if settingsWindow == nil { settingsWindow = SettingsWindowController() }
-        settingsWindow?.present()
+        settingsWindow?.present(section: section)
+    }
+
+    @objc private func openOnboarding() { presentOnboarding() }
+    @objc private func onboardingRequested(_ notification: Notification) { presentOnboarding() }
+
+    private func presentOnboarding() {
+        if onboardingWindow?.window?.isVisible == true { onboardingWindow?.present(); return }
+        onboardingWindow = OnboardingWindowController(settings: SettingsStore.shared.data,
+            onFinish: { [weak self] choices, destination in
+                guard let self else { return }
+                var settings = SettingsStore.shared.data
+                choices.apply(to: &settings)
+                self.onboardingWindow?.close()
+                SettingsStore.shared.data = settings
+                OnboardingState.complete()
+                self.startUpdatesIfNeeded()
+                switch destination {
+                case .notch: self.notch.toggle()
+                case .settings: self.presentSettings()
+                case .notionSettings: self.presentSettings(section: .notion)
+                }
+            }, onSkip: { [weak self] in
+                OnboardingState.complete()
+                self?.onboardingWindow?.close()
+                self?.startUpdatesIfNeeded()
+            })
+        onboardingWindow?.present()
     }
 
     // MARK: Main menu (key equivalents work while the panel is focused)
@@ -106,6 +156,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let appMenu = NSMenu()
         appMenu.addItem(item("設定…", #selector(openSettings), ",", target: self))
+        appMenu.addItem(item("使い方ガイド…", #selector(openOnboarding), target: self))
         appMenu.addItem(item("アップデートを確認…", #selector(checkForUpdates), target: self))
         appMenu.addItem(.separator())
         appMenu.addItem(item("NotchBrowser を終了", #selector(NSApplication.terminate(_:)), "q", target: NSApp))

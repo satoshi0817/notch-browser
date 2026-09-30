@@ -20,8 +20,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         window.delegate = self
     }
 
-    func present() {
+    func present(section: SettingsSection? = nil) {
         guard let window else { return }
+        if let section {
+            window.contentViewController = NSHostingController(rootView: SettingsView(initialSection: section).environmentObject(SettingsStore.shared))
+        }
         if !window.isVisible { center(on: screenUnderMouse) }
         window.level = Self.frontLevel
         NSApp.activate()
@@ -57,7 +60,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 }
 
-private enum SettingsSection: String, CaseIterable, Identifiable {
+enum SettingsSection: String, CaseIterable, Identifiable {
     case tabs = "固定ページ", profiles = "プロファイル", displays = "ディスプレイ", motion = "動き", shelf = "ファイル棚", notion = "Notionエージェント", toolbar = "ボタン配置", general = "一般"
     var id: Self { self }
     var symbol: String {
@@ -76,7 +79,11 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
 }
 
 struct SettingsView: View {
-    @State private var section = SettingsSection.tabs
+    @State private var section: SettingsSection
+
+    init(initialSection: SettingsSection = .tabs) {
+        _section = State(initialValue: initialSection)
+    }
     var body: some View {
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 24) {
@@ -317,6 +324,13 @@ struct GeneralSettings: View {
 
     var body: some View {
         Form {
+            Section("使い方") {
+                Button("使い方ガイドをもう一度見る") {
+                    NotificationCenter.default.post(name: .showNotchBrowserOnboarding, object: nil)
+                }
+                Text("基本操作とよく使う機能をいつでも見直せます。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section {
                 PrecisionSlider(title: "ガラスの濃度", value: Binding(get: { store.data.glassTint * 100 }, set: { store.data.glassTint = $0 / 100 }), range: 0...100, step: 1, unit: "%")
                 Text("透明感と読みやすさのバランスを調整します。macOSの「透明度を下げる」「コントラストを上げる」が有効なときは、不透明な背景で表示します。")
