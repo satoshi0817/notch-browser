@@ -206,7 +206,6 @@ final class ShelfTilesView: NSCollectionView {
     var pasteFiles: (() -> Void)?
     var undoClear: (() -> Void)?
     var open: (() -> Void)?
-    var addFiles: (([URL]) -> Bool)?
     var selectionChanged: (() -> Void)?
 
     override func mouseDown(with event: NSEvent) {
@@ -249,16 +248,6 @@ final class ShelfTilesView: NSCollectionView {
         context == .outsideApplication ? [.copy, .move] : .copy
     }
     override func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) { dragEnded?(screenPoint, operation) }
-    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard sender.draggingSource as? ShelfTilesView !== self,
-              sender.draggingSourceOperationMask.contains(.copy),
-              !ShelfViewController.urls(from: sender.draggingPasteboard).isEmpty else { return [] }
-        return .copy
-    }
-    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool { draggingEntered(sender) == .copy }
-    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        addFiles?(ShelfViewController.urls(from: sender.draggingPasteboard)) ?? false
-    }
     override func keyDown(with event: NSEvent) {
         if event.modifierFlags.contains(.command) {
             switch event.charactersIgnoringModifiers?.lowercased() {
@@ -447,12 +436,6 @@ final class ShelfViewController: NSViewController, NSCollectionViewDataSource, N
         tiles.undoClear = { [weak self] in self?.undoClear() }
         tiles.open = { [weak self] in self?.openSelection() }
         tiles.selectionChanged = { [weak self] in self?.updateButtons() }
-        tiles.addFiles = { [weak self] urls in
-            guard let self else { return false }
-            let result = self.store.add(urls)
-            if result { self.onDrop?() }
-            return result
-        }
         let menu = NSMenu()
         menu.delegate = self
         tiles.menu = menu
@@ -520,6 +503,21 @@ final class ShelfViewController: NSViewController, NSCollectionViewDataSource, N
     }
     func collectionView(_ collectionView: NSCollectionView, didSelectItemsAt indexPaths: Set<IndexPath>) { updateButtons() }
     func collectionView(_ collectionView: NSCollectionView, didDeselectItemsAt indexPaths: Set<IndexPath>) { updateButtons() }
+    func collectionView(_ collectionView: NSCollectionView, validateDrop info: NSDraggingInfo,
+                        proposedIndexPath indexPath: AutoreleasingUnsafeMutablePointer<NSIndexPath>,
+                        dropOperation: UnsafeMutablePointer<NSCollectionView.DropOperation>) -> NSDragOperation {
+        guard info.draggingSource as? ShelfTilesView !== tiles,
+              info.draggingSourceOperationMask.contains(.copy),
+              !Self.urls(from: info.draggingPasteboard).isEmpty else { return [] }
+        dropOperation.pointee = .before
+        return .copy
+    }
+    func collectionView(_ collectionView: NSCollectionView, acceptDrop info: NSDraggingInfo,
+                        indexPath: IndexPath, dropOperation: NSCollectionView.DropOperation) -> Bool {
+        let accepted = store.add(Self.urls(from: info.draggingPasteboard))
+        if accepted { onDrop?() }
+        return accepted
+    }
     func collectionView(_ collectionView: NSCollectionView, numberOfItemsInSection section: Int) -> Int { displayed.count }
     func collectionView(_ collectionView: NSCollectionView, itemForRepresentedObjectAt indexPath: IndexPath) -> NSCollectionViewItem {
         let item = collectionView.makeItem(withIdentifier: ShelfTileItem.identifier, for: indexPath) as! ShelfTileItem
