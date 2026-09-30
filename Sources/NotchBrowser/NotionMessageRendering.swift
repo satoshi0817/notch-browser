@@ -94,26 +94,24 @@ private struct NotionReplyText: View {
 
 struct NotionMessageView: View {
     let message: NotionMessage
-    let agentName: String
+    let agent: SavedNotionAgent
     @State private var copied = false
+    private var isUser: Bool { message.role == "user" }
+
+    private var timestamp: String {
+        let parser = ISO8601DateFormatter()
+        parser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let date = parser.date(from: message.created_time) ?? ISO8601DateFormatter().date(from: message.created_time)
+        guard let date else { return "" }
+        return date.formatted(Date.FormatStyle().month(.abbreviated).day().hour().minute())
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack {
-                Text(message.role == "user" ? "あなた" : agentName)
-                    .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                Spacer()
-                Button {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(NotionReplyFormatter.copyText(message.content), forType: .string)
-                    copied = true
-                } label: {
-                    Label(copied ? "コピーしました" : "コピー", systemImage: copied ? "checkmark" : "doc.on.doc")
-                }
-                .buttonStyle(.borderless).font(.caption).foregroundStyle(.secondary)
-                .help("返信をコピー")
-            }
-            VStack(alignment: .leading, spacing: 9) {
+        HStack(alignment: .top, spacing: 10) {
+            if isUser { Spacer(minLength: 45) }
+            else { NotionAgentAvatar(agent: agent, size: 28) }
+            VStack(alignment: isUser ? .trailing : .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 9) {
                 ForEach(Array(NotionReplyFormatter.blocks(message.content).enumerated()), id: \.offset) { _, block in
                     switch block {
                     case .paragraph(let text): NotionReplyText(source: text)
@@ -134,12 +132,31 @@ struct NotionMessageView: View {
                             .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
                     }
                 }
+                }
+                .padding(.horizontal, 15)
+                .padding(.vertical, 11)
+                .background(isUser ? Color.accentColor.opacity(0.24) : Color.white.opacity(0.075),
+                            in: RoundedRectangle(cornerRadius: 17))
+                .overlay(RoundedRectangle(cornerRadius: 17)
+                    .stroke(.white.opacity(isUser ? 0.12 : 0.06)))
+                HStack(spacing: 8) {
+                    Text(timestamp).font(.caption2).foregroundStyle(.tertiary)
+                    if !isUser {
+                        Button {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(NotionReplyFormatter.copyText(message.content), forType: .string)
+                            copied = true
+                        } label: {
+                            Label(copied ? "コピーしました" : "コピー", systemImage: copied ? "checkmark" : "doc.on.doc")
+                        }
+                        .buttonStyle(.plain).font(.caption2).foregroundStyle(.secondary)
+                        .help("返信をコピー")
+                    }
+                }.padding(.horizontal, 3)
             }
-            .padding(message.role == "user" ? 12 : 0)
-            .background(message.role == "user" ? Color.blue.opacity(0.2) : .clear,
-                        in: RoundedRectangle(cornerRadius: 12))
+            if !isUser { Spacer(minLength: 45) }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 5)
     }
 }

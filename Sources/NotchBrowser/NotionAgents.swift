@@ -102,6 +102,18 @@ struct NotionMessage: Decodable, Identifiable {
     let content: String
     let created_time: String
     let pending_user_actions: [NotionAction]?
+
+    static func oldestFirst(_ messages: [NotionMessage]) -> [NotionMessage] {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let standard = ISO8601DateFormatter()
+        return messages.enumerated().sorted { left, right in
+            let a = fractional.date(from: left.element.created_time) ?? standard.date(from: left.element.created_time)
+            let b = fractional.date(from: right.element.created_time) ?? standard.date(from: right.element.created_time)
+            guard let a, let b, a != b else { return left.offset < right.offset }
+            return a < b
+        }.map(\.element)
+    }
 }
 
 private struct NotionSessionEvent: Decodable {
@@ -257,7 +269,7 @@ struct NotionAgentsAPI {
             // Older threads can be available through sessions even without message listing.
         }
         if all.contains(where: { !$0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
-            return all.sorted { $0.created_time < $1.created_time }
+            return NotionMessage.oldestFirst(all)
         }
         // Some existing chats expose their content only through session events.
         var events: [NotionSessionEvent] = []
@@ -485,6 +497,7 @@ struct NotionAgentsPanel: View {
     @ObservedObject private var settings = SettingsStore.shared
     @State private var draft = ""
     @State private var tokenDraft = ""
+    @State private var showJumpToBottom = false
     let onOpenSettings: () -> Void
     let onClose: () -> Void
 
@@ -507,10 +520,6 @@ struct NotionAgentsPanel: View {
                     .padding(.horizontal, 14).padding(.bottom, 8)
             }
             Divider()
-            if let activity = store.activityText {
-                HStack(spacing: 8) { ProgressView().controlSize(.small); Text(activity); Spacer() }
-                    .font(.caption).foregroundStyle(.secondary).padding(.horizontal, 14).padding(.vertical, 8)
-            }
             if !store.hasToken {
                 VStack(alignment: .leading, spacing: 12) {
                     Label("Notionを接続", systemImage: "key").font(.headline)
@@ -574,8 +583,10 @@ struct NotionAgentsPanel: View {
                                     }
                                 }
                             } else {
+                                ScrollViewReader { proxy in
+                                GeometryReader { geometry in
                                 ScrollView {
-                                    LazyVStack(alignment: .leading, spacing: 11) {
+                                    LazyVStack(alignment: .leading, spacing: 17) {
                                         Button("‹ 履歴に戻る") { store.showHistory() }.font(.caption)
                                         if store.messages.isEmpty {
                                             if store.isLoadingMessages {
@@ -587,7 +598,10 @@ struct NotionAgentsPanel: View {
                                             }
                                         }
                                         ForEach(store.messages) { message in
-                                            NotionMessageView(message: message, agentName: agent.name)
+                                            NotionMessageView(message: message, agent: agent)
+                                        }
+                                        if store.busyAgentIDs.contains(agent.id) {
+                                            NotionThinkingView(agent: agent)
                                         }
                                         ForEach(store.threads.first(where: { $0.id == store.selectedThreadID })?.pending_user_actions ?? []) { action in
                                             VStack(alignment: .leading, spacing: 8) {
@@ -606,20 +620,76 @@ struct NotionAgentsPanel: View {
                                                 }
                                             }.padding(11).background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
                                         }
-                                    }.padding(12)
+                                        Color.clear.frame(height: 1).id("conversation-bottom")
+                                            .background(GeometryReader { marker in
+                                                Color.clear.preference(key: ConversationBottomKey.self,
+                                                    value: marker.frame(in: .named("conversation")).maxY)
+                                            })
+                                    }
+                                    .frame(maxWidth: 720)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.horizontal, 24).padding(.vertical, 18)
+                                }
+                                .coordinateSpace(name: "conversation")
+                                .onPreferenceChange(ConversationBottomKey.self) { bottom in
+                                    showJumpToBottom = bottom > geometry.size.height + 80
+                                }
+                                .onAppear { DispatchQueue.main.async { proxy.scrollTo("conversation-bottom", anchor: .bottom) } }
+                                .onChange(of: store.selectedThreadID) { _, _ in
+                                    showJumpToBottom = false
+                                    DispatchQueue.main.async { proxy.scrollTo("conversation-bottom", anchor: .bottom) }
+                                }
+                                .onChange(of: store.messages.count) { _, _ in
+                                    if !showJumpToBottom { withAnimation { proxy.scrollTo("conversation-bottom", anchor: .bottom) } }
+                                }
+                                .overlay(alignment: .bottom) {
+                                    if showJumpToBottom {
+                                        Button {
+                                            withAnimation { proxy.scrollTo("conversation-bottom", anchor: .bottom) }
+                                        } label: {
+                                            Label("最新のメッセージへ", systemImage: "arrow.down")
+                                                .font(.caption.weight(.medium))
+                                        }
+                                        .buttonStyle(.borderedProminent)
+                                        .controlSize(.small)
+                                        .padding(.bottom, 12)
+                                    }
+                                }
+                                }
                                 }
                             }
-                            Divider()
-                            HStack(alignment: .bottom) {
+                            HStack(spacing: 7) {
+                                if let activity = store.activityText {
+                                    ProgressView().controlSize(.mini)
+                                    Text(activity)
+                                }
+                                Spacer()
+                            }
+                            .font(.caption2).foregroundStyle(.secondary)
+                            .frame(height: 24).padding(.horizontal, 20)
+                            HStack(alignment: .bottom, spacing: 12) {
                                 TextField("エージェントにメッセージ", text: $draft, axis: .vertical)
-                                    .lineLimit(1...4).textFieldStyle(.plain)
-                                    .onSubmit(send)
+                                    .lineLimit(1...5).textFieldStyle(.plain)
+                                    .onKeyPress(.return, phases: .down) { key in
+                                        if key.modifiers.contains(.command) { send(); return .handled }
+                                        return .ignored
+                                    }
                                 Button(action: send) {
                                     if store.isSending { ProgressView().controlSize(.small) }
-                                    else { Image(systemName: "arrow.up.circle.fill").font(.title3) }
+                                    else { Image(systemName: "arrow.up").font(.system(size: 13, weight: .bold)) }
                                 }
+                                    .buttonStyle(.borderedProminent)
+                                    .clipShape(Circle())
                                     .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.isSending)
-                            }.padding(11)
+                            }
+                            .padding(.horizontal, 16).padding(.vertical, 12)
+                            .background(Color.white.opacity(0.075), in: RoundedRectangle(cornerRadius: 20))
+                            .overlay(RoundedRectangle(cornerRadius: 20).stroke(.white.opacity(0.11)))
+                            .padding(.horizontal, 20)
+                            Text("⌘↩ で送信")
+                                .font(.caption2).foregroundStyle(.tertiary)
+                                .frame(maxWidth: .infinity, alignment: .trailing)
+                                .padding(.horizontal, 24).padding(.bottom, 12)
                         } else {
                             VStack(spacing: 10) {
                                 ContentUnavailableView("エージェントが未登録です", systemImage: "sparkles", description: Text("URL・IDまたは名前検索で追加してください。"))
@@ -647,6 +717,36 @@ struct NotionAgentsPanel: View {
         guard !message.isEmpty else { return }
         draft = ""
         Task { @MainActor in await store.send(message) }
+    }
+}
+
+private struct ConversationBottomKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
+private struct NotionThinkingView: View {
+    let agent: SavedNotionAgent
+    @State private var phraseIndex = 0
+    private let phrases = ["考えています…", "情報を確認しています…", "返信をまとめています…"]
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            NotionAgentAvatar(agent: agent, size: 28)
+            HStack(spacing: 9) {
+                ProgressView().controlSize(.small)
+                Text(phrases[phraseIndex]).font(.callout).foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 15).padding(.vertical, 12)
+            .background(Color.white.opacity(0.075), in: RoundedRectangle(cornerRadius: 17))
+            Spacer()
+        }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(3))
+                if !Task.isCancelled { phraseIndex = (phraseIndex + 1) % phrases.count }
+            }
+        }
     }
 }
 

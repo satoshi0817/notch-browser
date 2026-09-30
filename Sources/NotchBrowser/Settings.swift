@@ -111,7 +111,7 @@ enum ToolbarAction: String, Codable, CaseIterable, Identifiable {
         case .spacer: "arrow.left.and.right"
         }
     }
-    static let defaults: [Self] = [.back, .forward, .home, .reload, .address, .keepOpen, .notion, .settings, .quit]
+    static let defaults: [Self] = [.back, .forward, .home, .reload, .address, .keepOpen, .settings, .quit]
 }
 
 struct SettingsData: Codable {

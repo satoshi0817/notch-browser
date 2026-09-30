@@ -415,8 +415,8 @@ struct GeneralSettings: View {
 struct ToolbarSettingsView: View {
     @EnvironmentObject var store: SettingsStore
 
-    private var placed: [ToolbarAction] { store.data.toolbarActions }
-    private var available: [ToolbarAction] { ToolbarAction.allCases.filter { !placed.contains($0) } }
+    private var placed: [ToolbarAction] { store.data.toolbarActions.filter { $0 != .notion } }
+    private var available: [ToolbarAction] { ToolbarAction.allCases.filter { $0 != .notion && !placed.contains($0) } }
     private var previewActions: [ToolbarAction] { Array(placed.filter { $0 != .spacer }.prefix(10)) }
 
     var body: some View {

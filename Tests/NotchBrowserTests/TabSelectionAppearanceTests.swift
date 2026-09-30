@@ -4,6 +4,27 @@ import XCTest
 
 final class TabSelectionAppearanceTests: XCTestCase {
     @MainActor
+    func testNotionSelectionReplacesPinnedTabHighlightAndRestoresItOnClose() throws {
+        _ = NSApplication.shared
+        let browser = BrowserViewController()
+        _ = browser.view
+        func button(_ label: String) throws -> NSButton {
+            let views = sequence(first: [browser.view], next: { level in
+                let children = level.flatMap(\.subviews)
+                return children.isEmpty ? nil : children
+            }).flatMap { $0 }
+            return try XCTUnwrap(views.compactMap { $0 as? NSButton }
+                .first(where: { $0.accessibilityLabel() == label }))
+        }
+        let notion = try button("Notionエージェント")
+        XCTAssertEqual(notion.state, .off)
+        browser.showNotion()
+        XCTAssertEqual(notion.state, .on)
+        browser.hideNotion()
+        XCTAssertEqual(notion.state, .off)
+    }
+
+    @MainActor
     func testSelectedTabStaysBlueBeforeFocusAndAfterReopening() throws {
         _ = NSApplication.shared
         let panel = NotchPanel(contentRect: NSRect(x: 0, y: 0, width: 100, height: 40),

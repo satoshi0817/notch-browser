@@ -3,6 +3,17 @@ import XCTest
 @testable import NotchBrowser
 
 final class NotionAgentsTests: XCTestCase {
+    func testMessagesSortByActualTimeAcrossFractionalAndWholeSecondTimestamps() throws {
+        func message(_ id: String, _ time: String) throws -> NotionMessage {
+            try JSONDecoder().decode(NotionMessage.self, from: Data("""
+            {"id":"\(id)","role":"assistant","content":"text","created_time":"\(time)"}
+            """.utf8))
+        }
+        let later = try message("later", "2026-09-30T12:00:01Z")
+        let earlier = try message("earlier", "2026-09-30T12:00:00.900Z")
+        XCTAssertEqual(NotionMessage.oldestFirst([later, earlier]).map(\.id), ["earlier", "later"])
+    }
+
     private func response(_ request: URLRequest, _ status: Int = 200) -> HTTPURLResponse {
         HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!
     }

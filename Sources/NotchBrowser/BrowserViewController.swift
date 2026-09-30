@@ -73,6 +73,7 @@ final class BrowserViewController: NSViewController {
     private let tabScroll = NSScrollView()
     private var needsTabReveal = true
     private lazy var addTabButton = iconButton("plus", "新規タブ (⌘T)", #selector(newTab))
+    private lazy var notionTabButton = iconButton("sparkles.rectangle.stack", "Notionエージェント", #selector(toggleNotion))
     private let tabStack = NSStackView()
     private let findBar = NSStackView()
     private let findField = NSSearchField()
@@ -127,7 +128,6 @@ final class BrowserViewController: NSViewController {
             (.closeTab, "xmark", #selector(closeCurrentTab)),
             (.shelf, "tray", #selector(openShelf)),
             (.notes, "square.and.pencil", #selector(toggleNotes)),
-            (.notion, "sparkles.rectangle.stack", #selector(toggleNotion)),
             (.external, "safari", #selector(openExternally)),
             (.settings, "gearshape", #selector(openSettings)),
             (.quit, "power", #selector(quitApplication))
@@ -241,7 +241,8 @@ final class BrowserViewController: NSViewController {
         findBar.addArrangedSubview(iconButton("chevron.down", "次の一致 (↩)", #selector(findNext)))
         findBar.addArrangedSubview(iconButton("xmark", "検索を閉じる", #selector(closeFind)))
         findBar.isHidden = true
-        for sub in [tabScroll, addTabButton, controlStack, findBar, webContainer] as [NSView] {
+        notionTabButton.setButtonType(.pushOnPushOff)
+        for sub in [tabScroll, notionTabButton, addTabButton, controlStack, findBar, webContainer] as [NSView] {
             sub.translatesAutoresizingMaskIntoConstraints = false
             chrome.addSubview(sub)
         }
@@ -255,7 +256,10 @@ final class BrowserViewController: NSViewController {
             tabScroll.topAnchor.constraint(equalTo: chrome.topAnchor),
             tabScroll.leadingAnchor.constraint(equalTo: chrome.leadingAnchor, constant: 14),
             tabTrailingConstraint, tabHeight,
-            tabScroll.trailingAnchor.constraint(equalTo: addTabButton.leadingAnchor, constant: -4),
+            tabScroll.trailingAnchor.constraint(equalTo: notionTabButton.leadingAnchor, constant: -4),
+            notionTabButton.trailingAnchor.constraint(equalTo: addTabButton.leadingAnchor, constant: -4),
+            notionTabButton.centerYAnchor.constraint(equalTo: tabScroll.centerYAnchor),
+            notionTabButton.widthAnchor.constraint(equalToConstant: 28),
             addTabButton.centerYAnchor.constraint(equalTo: tabScroll.centerYAnchor),
             controlStack.topAnchor.constraint(equalTo: chrome.topAnchor),
             controlStack.trailingAnchor.constraint(equalTo: chrome.trailingAnchor, constant: -12),
@@ -316,7 +320,7 @@ final class BrowserViewController: NSViewController {
     private func updateCompactControls() {
         let available = view.bounds.width / 2 - controlLeadingConstraint.constant - 12
         let capacity = max(0, Int((available - 32) / 32))
-        let requested = store.data.toolbarActions
+        let requested = store.data.toolbarActions.filter { $0 != .notion }
         let visible = Set(requested.filter { $0 != .spacer }.prefix(capacity))
         var changed = arrangeToolbar(ifNeeded: requested)
         for (action, button) in toolbarButtons {
@@ -331,7 +335,7 @@ final class BrowserViewController: NSViewController {
         guard arrangedToolbarActions != requested else { return false }
         arrangedToolbarActions = requested
         controlStack.arrangedSubviews.forEach { controlStack.removeArrangedSubview($0); $0.removeFromSuperview() }
-        let ordered = requested + ToolbarAction.allCases.filter { !requested.contains($0) && $0 != .spacer }
+        let ordered = requested + ToolbarAction.allCases.filter { !requested.contains($0) && $0 != .spacer && $0 != .notion }
         for action in ordered {
             if action == .spacer {
                 placedToolbarSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -565,6 +569,7 @@ final class BrowserViewController: NSViewController {
     }
 
     private func select(_ index: Int?) {
+        hideNotion()
         if !notes.isHidden { notes.isHidden = true }
         findGeneration += 1
         findStatus.stringValue = ""
@@ -762,12 +767,13 @@ final class BrowserViewController: NSViewController {
             button.onDragEnded = { [weak self] button in self?.tabDragEnded(button) }
             button.bezelStyle = .recessed
             button.setButtonType(.pushOnPushOff)
-            button.state = i == selectedIndex ? .on : .off
-            button.showsBorderOnlyWhileMouseInside = i != selectedIndex
+            let active = i == selectedIndex && notionPanel?.isHidden != false
+            button.state = active ? .on : .off
+            button.showsBorderOnlyWhileMouseInside = !active
             button.imagePosition = iconOnly ? .imageOnly : .imageLeading
             button.contentTintColor = .white
             button.setAccessibilityLabel(tab.displayName)
-            button.setAccessibilityValue(i == selectedIndex ? "選択中" : "")
+            button.setAccessibilityValue(active ? "選択中" : "")
             button.font = .systemFont(ofSize: 12, weight: i == selectedIndex ? .semibold : .regular)
             button.lineBreakMode = .byTruncatingTail
             button.tag = i
@@ -1184,16 +1190,34 @@ final class BrowserViewController: NSViewController {
         notes.isHidden = true
         switcher.isHidden = true
         notionPanel?.isHidden = !willShow
+        updateNotionTabSelection()
         if willShow { NotionAgentsStore.shared.start() }
         else { focusContent() }
     }
     func showNotion() {
         _ = view
         notionPanel?.isHidden = false
+        updateNotionTabSelection()
         notes.isHidden = true
         NotionAgentsStore.shared.start()
     }
-    private func hideNotion() { notionPanel?.isHidden = true }
+    func hideNotion() {
+        guard notionPanel?.isHidden == false else { return }
+        notionPanel?.isHidden = true
+        updateNotionTabSelection()
+    }
+
+    private func updateNotionTabSelection() {
+        let active = notionPanel?.isHidden == false
+        notionTabButton.state = active ? .on : .off
+        notionTabButton.setAccessibilityValue(active ? "選択中" : "")
+        for (index, button) in tabButtons.enumerated() {
+            let selected = !active && index == selectedIndex
+            button.state = selected ? .on : .off
+            button.showsBorderOnlyWhileMouseInside = !selected
+            button.setAccessibilityValue(selected ? "選択中" : "")
+        }
+    }
     func dismissOverlay() -> Bool {
         if addressPopover.isShown { addressPopover.close(); focusContent(); return true }
         if notionPanel?.isHidden == false { hideNotion(); focusContent(); return true }

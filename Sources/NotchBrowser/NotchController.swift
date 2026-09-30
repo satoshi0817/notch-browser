@@ -9,7 +9,7 @@ private struct RunningAgentBadge: View {
     var body: some View {
         ZStack {
             if let agent {
-                NotionAgentAvatar(agent: agent, size: 22)
+                NotionAgentAvatar(agent: agent, size: 18)
                 Circle().trim(from: 0.08, to: 0.82)
                     .stroke(AngularGradient(colors: [.purple.opacity(0.2), .purple, .cyan], center: .center),
                             style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
@@ -17,12 +17,36 @@ private struct RunningAgentBadge: View {
                     .animation(.linear(duration: 1.1).repeatForever(autoreverses: false), value: rotating)
             }
         }
-        .frame(width: 30, height: 30)
+        .frame(width: 25, height: 25)
         .onAppear { rotating = agent != nil }
         .onChange(of: agent?.id) { _, id in
             rotating = false
             if id != nil { DispatchQueue.main.async { rotating = true } }
         }
+    }
+}
+
+private struct NotionNotificationBanner: View {
+    let agent: SavedNotionAgent
+    let title: String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            NotionAgentAvatar(agent: agent, size: 32)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(agent.name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                Text(title).font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            Text("マウスを合わせて開く")
+                .font(.system(size: 10)).foregroundStyle(.tertiary)
+            Image(systemName: "arrow.up.right")
+                .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 18)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.15)))
     }
 }
 
@@ -76,6 +100,7 @@ final class NotchRootView: NSView {
     private let badgeIcon = NSImageView()
     private let badgeLabel = NSTextField(labelWithString: "")
     private let agentBadge = NSHostingView(rootView: RunningAgentBadge(agent: nil))
+    private var notificationBanner: NSHostingView<NotionNotificationBanner>?
     private var hasRunningAgent = false
 
     override init(frame: NSRect) {
@@ -127,6 +152,16 @@ final class NotchRootView: NSView {
         badgeIcon.alphaValue = agent == nil && badgeLabel.alphaValue > 0 ? 1 : 0
     }
 
+    func setNotification(agent: SavedNotionAgent?, title: String = "") {
+        notificationBanner?.removeFromSuperview()
+        notificationBanner = nil
+        guard let agent else { return }
+        let banner = NSHostingView(rootView: NotionNotificationBanner(agent: agent, title: title))
+        addSubview(banner)
+        notificationBanner = banner
+        positionContent()
+    }
+
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let trackingArea { removeTrackingArea(trackingArea) }
@@ -165,7 +200,7 @@ final class NotchRootView: NSView {
         let wing = Self.wingWidth
         let labelHeight = badgeLabel.intrinsicContentSize.height
         badgeIcon.frame = NSRect(x: 4, y: ((bounds.height - 18) / 2).rounded(), width: wing - 4, height: 18)
-        agentBadge.frame = NSRect(x: 4, y: ((bounds.height - 30) / 2).rounded(), width: 30, height: 30)
+        agentBadge.frame = NSRect(x: 7, y: ((bounds.height - 25) / 2).rounded(), width: 25, height: 25)
         badgeLabel.frame = NSRect(x: bounds.width - wing, y: ((bounds.height - labelHeight) / 2).rounded(), width: wing - 4, height: labelHeight)
         content.frame = NSRect(
             x: ((bounds.width - contentSize.width) / 2).rounded(),
@@ -173,6 +208,8 @@ final class NotchRootView: NSView {
             width: contentSize.width,
             height: contentSize.height
         )
+        notificationBanner?.frame = NSRect(x: 8, y: 8, width: max(0, bounds.width - 16),
+                                           height: max(0, bounds.height - 8 - min(bounds.height, 34)))
     }
 }
 
@@ -184,8 +221,8 @@ final class NotchController: NSObject, NSWindowDelegate {
     private unowned let manager: NotchManager
     private(set) var isExpanded = false
     private var hoverTimer: Timer?
-    private var notificationHoldTimer: Timer?
-    private var notificationHoldUntil: Date?
+    private var notificationDismissTimer: Timer?
+    private var notification: (agentID: String, threadID: String, title: String)?
     private let transition = NotchTransition()
     private var pointerInside = false
     private(set) var shelfVisible = false
@@ -226,7 +263,11 @@ final class NotchController: NSObject, NSWindowDelegate {
         }
 
         root.onHoverChange = { [weak self] inside in self?.hoverChanged(inside) }
-        root.onClick = { [weak self] in self?.expand(focus: true) }
+        root.onClick = { [weak self] in
+            guard let self else { return }
+            if self.notification != nil { self.openNotificationChat() }
+            else { self.expand(focus: true) }
+        }
         root.onFileDrag = { [weak self] in
             guard let self, SettingsStore.shared.data.shelfTrigger != .manual || self.shelfVisible else { return false }
             if !self.shelfVisible { self.manager.showShelf(on: self) }
@@ -273,6 +314,7 @@ final class NotchController: NSObject, NSWindowDelegate {
     func close() {
         transition.cancel()
         hoverTimer?.invalidate()
+        notificationDismissTimer?.invalidate()
         panel.orderOut(nil)
     }
 
@@ -310,6 +352,9 @@ final class NotchController: NSObject, NSWindowDelegate {
     }
 
     private var expandedFrame: NSRect { topCenteredFrame(expandedSize) }
+    private var notificationFrame: NSRect {
+        topCenteredFrame(NSSize(width: min(480, screen.frame.width - 40), height: stripHeight + 76))
+    }
 
     private func topCenteredFrame(_ size: NSSize) -> NSRect {
         let frame = screen.frame
@@ -323,19 +368,27 @@ final class NotchController: NSObject, NSWindowDelegate {
     func relayout(animated: Bool = true) {
         root.contentSize = expandedSize
         layoutContent()
-        root.setBadge(minutes: manager.minutesToNextEvent, visible: !isExpanded)
-        root.setRunningAgent(isExpanded ? nil : manager.runningAgent)
-        animate(to: isExpanded ? expandedFrame : collapsedFrame,
-                radius: isExpanded ? 18 : 10, contentAlpha: isExpanded ? 1 : 0, animated: animated)
+        root.setBadge(minutes: manager.minutesToNextEvent, visible: !isExpanded && notification == nil)
+        root.setRunningAgent(isExpanded || notification != nil ? nil : manager.runningAgent)
+        animate(to: isExpanded ? expandedFrame : notification != nil ? notificationFrame : collapsedFrame,
+                radius: isExpanded || notification != nil ? 18 : 10,
+                contentAlpha: isExpanded ? 1 : 0, animated: animated)
     }
 
     // MARK: Expand / collapse
 
     func expand(focus: Bool) {
         if shelfOnly { hideShelf() }
+        if notification != nil {
+            notification = nil
+            notificationDismissTimer?.invalidate()
+            notificationDismissTimer = nil
+            root.setNotification(agent: nil)
+        }
         hoverTimer?.invalidate()
         if !isExpanded {
             root.contentSize = expandedSize
+            manager.browser.hideNotion()
             manager.browser.prepareForOpen()
             manager.willExpand(self)
             isExpanded = true
@@ -376,18 +429,35 @@ final class NotchController: NSObject, NSWindowDelegate {
         manager.didCollapse()
     }
 
-    func holdForNotification() {
-        notificationHoldUntil = Date().addingTimeInterval(10)
-        notificationHoldTimer?.invalidate()
-        notificationHoldTimer = .scheduledTimer(withTimeInterval: 10, repeats: false) { [weak self] _ in
-            self?.notificationHoldUntil = nil
-            self?.resumeHoverCloseIfNeeded()
+    func showNotification(agentID: String, threadID: String, title: String) {
+        guard let agent = manager.notion.visibleAgents.first(where: { $0.id == agentID }) else { return }
+        guard !isExpanded else { return }
+        notification = (agentID, threadID, title)
+        root.setNotification(agent: agent, title: title)
+        notificationDismissTimer?.invalidate()
+        notificationDismissTimer = .scheduledTimer(withTimeInterval: 10, repeats: false) { [weak self] _ in
+            self?.clearNotification(animated: true)
         }
+        relayout()
+        panel.orderFrontRegardless()
     }
 
-    private var isHoldingNotification: Bool {
-        guard let notificationHoldUntil else { return false }
-        return notificationHoldUntil > Date()
+    private func clearNotification(animated: Bool) {
+        guard notification != nil else { return }
+        notification = nil
+        notificationDismissTimer?.invalidate()
+        notificationDismissTimer = nil
+        root.setNotification(agent: nil)
+        relayout(animated: animated)
+    }
+
+    private func openNotificationChat() {
+        guard let notice = notification else { return }
+        manager.showNotion(on: self, focus: true)
+        Task { @MainActor in
+            await manager.notion.selectAgent(notice.agentID)
+            await manager.notion.selectThread(notice.threadID)
+        }
     }
 
     func showShelf() {
@@ -426,7 +496,7 @@ final class NotchController: NSObject, NSWindowDelegate {
     }
 
     private func animate(to frame: NSRect, radius: CGFloat, contentAlpha: CGFloat, animated: Bool = true) {
-        let opening = isExpanded
+        let opening = isExpanded || notification != nil
         let windowAlpha = opening ? 1 : idleOpacity
         let motion = SettingsStore.shared.data.motion
         let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
@@ -462,18 +532,17 @@ final class NotchController: NSObject, NSWindowDelegate {
         let motion = SettingsStore.shared.data.motion
         guard !manager.dragActive else { return }
         if inside {
+            if notification != nil { openNotificationChat(); return }
             guard !isExpanded else { return }
             scheduleHover(after: motion.openDelay) { [weak self] in
                 guard let self, self.pointerInside else { return }
                 self.expand(focus: false)
             }
         } else {
-            guard isExpanded, !manager.keepOpen, !manager.isShowingModal, !manager.dragActive,
-                  !isHoldingNotification else { return }
+            guard isExpanded, !manager.keepOpen, !manager.isShowingModal, !manager.dragActive else { return }
             scheduleHover(after: motion.closeDelay) { [weak self] in
                 guard let self, !self.pointerInside, !self.manager.keepOpen,
-                      !self.manager.isShowingModal, !self.manager.dragActive,
-                      !self.isHoldingNotification else { return }
+                      !self.manager.isShowingModal, !self.manager.dragActive else { return }
                 self.collapse()
             }
         }
@@ -489,7 +558,7 @@ final class NotchController: NSObject, NSWindowDelegate {
 
     func windowDidResignKey(_ notification: Notification) {
         guard !manager.keepOpen, !manager.isShowingModal, !manager.dragActive,
-              !isHoldingNotification, !shelfVisible, !panel.frame.contains(NSEvent.mouseLocation) else { return }
+              !shelfVisible, !panel.frame.contains(NSEvent.mouseLocation) else { return }
         // Preserve the timer already started by mouseExited instead of closing early.
         if hoverTimer?.isValid != true { hoverChanged(false) }
     }
@@ -556,10 +625,10 @@ final class NotchManager {
         }.store(in: &cancellables)
         notion.$alert.receive(on: RunLoop.main).sink { [weak self] notice in
             guard let self, let notice else { return }
-            self.showNotion(focus: false, notification: true)
+            let target = self.orderedControllers.first { $0.screen.frame.contains(NSEvent.mouseLocation) }
+                ?? self.orderedControllers.first
+            target?.showNotification(agentID: notice.agentID, threadID: notice.threadID, title: notice.title)
             Task { @MainActor in
-                await self.notion.selectAgent(notice.agentID)
-                await self.notion.selectThread(notice.threadID)
                 self.notion.clearAlert()
             }
         }.store(in: &cancellables)
@@ -672,11 +741,10 @@ final class NotchManager {
         notion.visibleAgents.first(where: { notion.busyAgentIDs.contains($0.id) })
     }
 
-    func showNotion(on target: NotchController? = nil, focus: Bool = true, notification: Bool = false) {
+    func showNotion(on target: NotchController? = nil, focus: Bool = true) {
         let target = target ?? orderedControllers.first { $0.screen.frame.contains(NSEvent.mouseLocation) } ?? orderedControllers.first
         guard let target else { return }
         target.expand(focus: focus)
-        if notification { target.holdForNotification() }
         browser.showNotion()
         target.panel.orderFrontRegardless()
     }
