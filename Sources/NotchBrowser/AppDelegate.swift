@@ -75,6 +75,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         keepOpenItem = item("開いたままにする", #selector(toggleKeepOpen), target: self)
         menu.addItem(keepOpenItem)
         menu.addItem(item("ファイル棚", #selector(openShelf), target: self))
+        menu.addItem(item("Notionエージェント", #selector(openNotion), target: self))
         menu.addItem(item("設定…", #selector(openSettings), ",", target: self))
         menu.addItem(item("アップデートを確認…", #selector(checkForUpdates), target: self))
         menu.addItem(.separator())
@@ -85,6 +86,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 
     @objc private func openShelf() { notch.showShelf() }
+    @objc private func openNotion() { notch.showNotion() }
 
     @objc private func checkForUpdates() { Task { await UpdateChecker.shared.check() } }
 

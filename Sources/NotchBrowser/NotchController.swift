@@ -50,6 +50,8 @@ final class NotchRootView: NSView {
     static let wingWidth: CGFloat = 40
     private let badgeIcon = NSImageView()
     private let badgeLabel = NSTextField(labelWithString: "")
+    private let agentLabel = NSTextField(labelWithString: "")
+    private var hasRunningAgent = false
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -65,6 +67,10 @@ final class NotchRootView: NSView {
             .withSymbolConfiguration(.init(pointSize: 13, weight: .semibold))
         badgeLabel.font = .monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
         badgeLabel.alignment = .center
+        agentLabel.font = .systemFont(ofSize: 17)
+        agentLabel.alignment = .center
+        agentLabel.textColor = .systemPurple
+        addSubview(agentLabel)
         for view in [badgeIcon, badgeLabel] as [NSView] {
             view.alphaValue = 0
             addSubview(view)
@@ -87,8 +93,15 @@ final class NotchRootView: NSView {
             badgeIcon.contentTintColor = tint
         }
         let alpha: CGFloat = minutes != nil && visible ? 1 : 0
-        badgeIcon.alphaValue = alpha
+        badgeIcon.alphaValue = hasRunningAgent ? 0 : alpha
         badgeLabel.alphaValue = alpha
+    }
+
+    func setRunningAgent(_ glyph: String?) {
+        hasRunningAgent = glyph != nil
+        agentLabel.stringValue = glyph ?? ""
+        agentLabel.isHidden = glyph == nil
+        badgeIcon.alphaValue = glyph == nil && badgeLabel.alphaValue > 0 ? 1 : 0
     }
 
     override func updateTrackingAreas() {
@@ -129,6 +142,7 @@ final class NotchRootView: NSView {
         let wing = Self.wingWidth
         let labelHeight = badgeLabel.intrinsicContentSize.height
         badgeIcon.frame = NSRect(x: 4, y: ((bounds.height - 18) / 2).rounded(), width: wing - 4, height: 18)
+        agentLabel.frame = NSRect(x: 3, y: ((bounds.height - 24) / 2).rounded(), width: wing - 4, height: 24)
         badgeLabel.frame = NSRect(x: bounds.width - wing, y: ((bounds.height - labelHeight) / 2).rounded(), width: wing - 4, height: labelHeight)
         content.frame = NSRect(
             x: ((bounds.width - contentSize.width) / 2).rounded(),
@@ -214,11 +228,15 @@ final class NotchController: NSObject, NSWindowDelegate {
         let quit = NSMenuItem(title: "NotchBrowser を終了", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
         quit.target = NSApp
         quit.image = NSImage(systemSymbolName: "power", accessibilityDescription: nil)
-        menu.items = [open, shelf, settings, .separator(), quit]
+        let notion = NSMenuItem(title: "Notionエージェント", action: #selector(openNotionFromMenu), keyEquivalent: "")
+        notion.target = self
+        notion.image = NSImage(systemSymbolName: "sparkles.rectangle.stack", accessibilityDescription: nil)
+        menu.items = [open, notion, shelf, settings, .separator(), quit]
         return menu
     }
 
     @objc private func openShelfFromMenu() { manager.showShelf(on: self) }
+    @objc private func openNotionFromMenu() { manager.showNotion(on: self) }
     @objc private func openFromMenu() { expand(focus: true) }
     @objc private func openSettingsFromMenu() { manager.browser.onOpenSettings?() }
 
@@ -262,7 +280,7 @@ final class NotchController: NSObject, NSWindowDelegate {
 
     private var collapsedFrame: NSRect {
         var size = notchSize
-        if manager.minutesToNextEvent != nil { size.width += NotchRootView.wingWidth * 2 }
+        if manager.minutesToNextEvent != nil || !manager.notion.busyAgentIDs.isEmpty { size.width += NotchRootView.wingWidth * 2 }
         return topCenteredFrame(size)
     }
 
@@ -281,6 +299,7 @@ final class NotchController: NSObject, NSWindowDelegate {
         root.contentSize = expandedSize
         layoutContent()
         root.setBadge(minutes: manager.minutesToNextEvent, visible: !isExpanded)
+        root.setRunningAgent(isExpanded ? nil : manager.runningAgentGlyph)
         animate(to: isExpanded ? expandedFrame : collapsedFrame,
                 radius: isExpanded ? 18 : 10, contentAlpha: isExpanded ? 1 : 0, animated: animated)
     }
@@ -298,6 +317,7 @@ final class NotchController: NSObject, NSWindowDelegate {
             if !manager.shelf.store.entries.isEmpty { manager.showShelf(on: self) }
             panel.hasShadow = true
             root.setBadge(minutes: manager.minutesToNextEvent, visible: false)
+            root.setRunningAgent(nil)
             animate(to: expandedFrame, radius: 18, contentAlpha: 1)
         }
         if focus {
@@ -326,6 +346,7 @@ final class NotchController: NSObject, NSWindowDelegate {
         }
         panel.hasShadow = false
         root.setBadge(minutes: manager.minutesToNextEvent, visible: true)
+        root.setRunningAgent(manager.runningAgentGlyph)
         animate(to: collapsedFrame, radius: 10, contentAlpha: 0, animated: animated)
         manager.didCollapse()
     }
@@ -440,6 +461,7 @@ final class NotchController: NSObject, NSWindowDelegate {
 final class NotchManager {
     let browser = BrowserViewController()
     let shelf: ShelfViewController
+    let notion = NotionAgentsStore.shared
     private let dragMonitor = ShelfDragMonitor()
     private(set) var dragActive = false
     private var dragWasActive = false
@@ -486,6 +508,19 @@ final class NotchManager {
             self?.minutesToNextEvent = minutes
             self?.controllers.values.forEach { $0.relayout() }
         }
+        notion.$busyAgentIDs.receive(on: RunLoop.main).sink { [weak self] _ in
+            guard let self else { return }
+            self.controllers.values.forEach { $0.relayout() }
+        }.store(in: &cancellables)
+        notion.$alert.receive(on: RunLoop.main).sink { [weak self] notice in
+            guard let self, let notice else { return }
+            self.showNotion()
+            Task { @MainActor in
+                await self.notion.selectAgent(notice.agentID)
+                await self.notion.selectThread(notice.threadID)
+                self.notion.clearAlert()
+            }
+        }.store(in: &cancellables)
 
         launcherWatcher.onChange = { [weak self] level in
             self?.controllers.values.forEach { $0.setBelowLauncher(level: level) }
@@ -507,6 +542,7 @@ final class NotchManager {
         rebuild()
         applyWindowSettings()
         calendar.start()
+        notion.start()
         dragMonitor.start()
         if !shelf.store.entries.isEmpty { showShelf() }
     }
@@ -588,6 +624,18 @@ final class NotchManager {
         guard let target else { return }
         for other in controllers.values where other !== target && other.shelfVisible { other.hideShelf() }
         target.showShelf()
+    }
+
+    var runningAgentGlyph: String? {
+        notion.visibleAgents.first(where: { notion.busyAgentIDs.contains($0.id) })?.glyph
+    }
+
+    func showNotion(on target: NotchController? = nil) {
+        let target = target ?? orderedControllers.first { $0.screen.frame.contains(NSEvent.mouseLocation) } ?? orderedControllers.first
+        guard let target else { return }
+        target.expand(focus: false)
+        browser.showNotion()
+        target.panel.orderFrontRegardless()
     }
 
     private func dragChanged(_ active: Bool) {

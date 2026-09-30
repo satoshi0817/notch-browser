@@ -49,7 +49,7 @@ struct DisplaySettings: Codable, Hashable {
 
 enum ToolbarAction: String, Codable, CaseIterable, Identifiable {
     case back, forward, home, reload, address, keepOpen, find, copyURL
-    case zoomIn, zoomOut, resetZoom, autoRefresh, restore, tabSearch, closeTab, shelf, notes, external, settings, quit
+    case zoomIn, zoomOut, resetZoom, autoRefresh, restore, tabSearch, closeTab, shelf, notes, notion, external, settings, quit
     case spacer
     var id: Self { self }
     var title: String {
@@ -71,6 +71,7 @@ enum ToolbarAction: String, Codable, CaseIterable, Identifiable {
         case .closeTab: "タブを閉じる"
         case .shelf: "ファイル棚"
         case .notes: "クイックメモ"
+        case .notion: "Notionエージェント"
         case .external: "ブラウザで開く"
         case .settings: "設定"
         case .quit: "終了"
@@ -95,13 +96,14 @@ enum ToolbarAction: String, Codable, CaseIterable, Identifiable {
         case .closeTab: "xmark"
         case .shelf: "tray"
         case .notes: "square.and.pencil"
+        case .notion: "sparkles.rectangle.stack"
         case .external: "safari"
         case .settings: "gearshape"
         case .quit: "power"
         case .spacer: "arrow.left.and.right"
         }
     }
-    static let defaults: [Self] = [.back, .forward, .home, .reload, .address, .keepOpen, .settings, .quit]
+    static let defaults: [Self] = [.back, .forward, .home, .reload, .address, .keepOpen, .notion, .settings, .quit]
 }
 
 struct SettingsData: Codable {
@@ -132,6 +134,8 @@ struct SettingsData: Codable {
     var confirmBeforeQuit = true
     var shelfDownloads = false
     var shelfRemoveAfterDrag = true
+    var notionHiddenAgentIDs: Set<String> = []
+    var notionNotificationsEnabled = true
 
     init() {}
 
@@ -155,6 +159,8 @@ struct SettingsData: Codable {
         externalBrowserBundleID = try? c.decodeIfPresent(String.self, forKey: .externalBrowserBundleID)
         shelfRemoveAfterDrag = (try? c.decode(Bool.self, forKey: .shelfRemoveAfterDrag)) ?? true
         shelfDownloads = (try? c.decode(Bool.self, forKey: .shelfDownloads)) ?? false
+        notionHiddenAgentIDs = (try? c.decode(Set<String>.self, forKey: .notionHiddenAgentIDs)) ?? []
+        notionNotificationsEnabled = (try? c.decode(Bool.self, forKey: .notionNotificationsEnabled)) ?? true
         toolbarActions = (try? c.decode([String].self, forKey: .toolbarActions))
             .map { raw in
                 var seen = Set<ToolbarAction>()

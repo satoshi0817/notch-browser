@@ -79,6 +79,7 @@ final class BrowserViewController: NSViewController {
     private var findHeight: NSLayoutConstraint!
     private var findGeneration = 0
     private let notes = ScratchpadView()
+    private var notionPanel: NSHostingView<NotionAgentsPanel>?
     private let switcher = NSView()
     private let tabSearch = NSSearchField()
     private let switchResults = TopAlignedStackView()
@@ -125,6 +126,7 @@ final class BrowserViewController: NSViewController {
             (.closeTab, "xmark", #selector(closeCurrentTab)),
             (.shelf, "tray", #selector(openShelf)),
             (.notes, "square.and.pencil", #selector(toggleNotes)),
+            (.notion, "sparkles.rectangle.stack", #selector(toggleNotion)),
             (.external, "safari", #selector(openExternally)),
             (.settings, "gearshape", #selector(openSettings)),
             (.quit, "power", #selector(quitApplication))
@@ -280,6 +282,17 @@ final class BrowserViewController: NSViewController {
             guard let tab = self?.selectedTab, let url = tab.webView.url else { return nil }
             return (tab.displayName, url)
         }
+        let notion = NSHostingView(rootView: NotionAgentsPanel { [weak self] in self?.hideNotion() })
+        notion.isHidden = true
+        notion.translatesAutoresizingMaskIntoConstraints = false
+        chrome.addSubview(notion)
+        NSLayoutConstraint.activate([
+            notion.trailingAnchor.constraint(equalTo: chrome.trailingAnchor, constant: -18),
+            notion.topAnchor.constraint(equalTo: controlStack.bottomAnchor, constant: 10),
+            notion.bottomAnchor.constraint(equalTo: chrome.bottomAnchor, constant: -18),
+            notion.widthAnchor.constraint(equalToConstant: 510)
+        ])
+        notionPanel = notion
         syncPinnedTabs()
         selectInitialTab()
     }
@@ -1155,12 +1168,30 @@ final class BrowserViewController: NSViewController {
     }
     @objc func toggleNotes(_ sender: Any?) {
         addressPopover.close()
+        hideNotion()
         if !notes.isHidden { notes.isHidden = true; focusContent(); return }
         switcher.isHidden = true
         notes.show(profile: store.profile(selectedTab?.profileID ?? store.data.newTabProfileID))
     }
+    @objc func toggleNotion(_ sender: Any?) {
+        addressPopover.close()
+        let willShow = notionPanel?.isHidden == true
+        notes.isHidden = true
+        switcher.isHidden = true
+        notionPanel?.isHidden = !willShow
+        if willShow { NotionAgentsStore.shared.start() }
+        else { focusContent() }
+    }
+    func showNotion() {
+        _ = view
+        notionPanel?.isHidden = false
+        notes.isHidden = true
+        NotionAgentsStore.shared.start()
+    }
+    private func hideNotion() { notionPanel?.isHidden = true }
     func dismissOverlay() -> Bool {
         if addressPopover.isShown { addressPopover.close(); focusContent(); return true }
+        if notionPanel?.isHidden == false { hideNotion(); focusContent(); return true }
         if !notes.isHidden { notes.isHidden = true; focusContent(); return true }
         if !switcher.isHidden { closeSwitcher(nil); return true }
         if !findBar.isHidden { closeFind(nil); return true }

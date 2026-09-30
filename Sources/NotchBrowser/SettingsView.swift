@@ -58,7 +58,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 }
 
 private enum SettingsSection: String, CaseIterable, Identifiable {
-    case tabs = "固定ページ", profiles = "プロファイル", displays = "ディスプレイ", motion = "動き", shelf = "ファイル棚", toolbar = "ボタン配置", general = "一般"
+    case tabs = "固定ページ", profiles = "プロファイル", displays = "ディスプレイ", motion = "動き", shelf = "ファイル棚", notion = "Notionエージェント", toolbar = "ボタン配置", general = "一般"
     var id: Self { self }
     var symbol: String {
         switch self {
@@ -68,6 +68,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
         case .motion: "waveform.path"
         case .general: "slider.horizontal.3"
         case .shelf: "tray"
+        case .notion: "sparkles.rectangle.stack"
         case .toolbar: "rectangle.topthird.inset.filled"
         }
     }
@@ -114,6 +115,7 @@ struct SettingsView: View {
                     case .motion: MotionSettingsView()
                     case .general: GeneralSettings()
                     case .shelf: ShelfSettingsView()
+                    case .notion: NotionAgentsSettings()
                     case .toolbar: ToolbarSettingsView()
                     }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
