@@ -77,6 +77,42 @@ struct NotionMessage: Decodable, Identifiable {
     let pending_user_actions: [NotionAction]?
 }
 
+private struct NotionSessionEvent: Decodable {
+    let id: String
+    let type: String
+    let sequence: Int
+    let created_at: String
+    let content: [ContentBlock]?
+
+    struct ContentBlock: Decodable {
+        let type: String
+        let text: String?
+        let name: String?
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, type, sequence, created_at, content }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        type = try values.decode(String.self, forKey: .type)
+        sequence = try values.decode(Int.self, forKey: .sequence)
+        created_at = try values.decode(String.self, forKey: .created_at)
+        content = try? values.decode([ContentBlock].self, forKey: .content)
+    }
+
+    var message: NotionMessage? {
+        guard type == "user.message" || type == "agent.message" else { return nil }
+        let text = (content ?? []).compactMap { part -> String? in
+            if part.type == "text" { return part.text }
+            if part.type == "file" { return part.name.map { "添付: \($0)" } }
+            return nil
+        }.joined(separator: "\n")
+        return NotionMessage(id: id, role: type == "user.message" ? "user" : "agent",
+                             content: text, created_time: created_at, pending_user_actions: nil)
+    }
+}
+
 struct NotionInvocation: Decodable { let thread_id: String; let status: String }
 
 enum NotionAgentInput {
@@ -118,7 +154,7 @@ struct NotionAgentsAPI {
     var token: String
     var fetch: (URLRequest) async throws -> (Data, URLResponse) = { try await URLSession.shared.data(for: $0) }
 
-    private func request<T: Decodable>(_ path: String, query: [URLQueryItem] = [], body: [String: String]? = nil) async throws -> T {
+    private func request<T: Decodable>(_ path: String, query: [URLQueryItem] = [], body: [String: Any]? = nil) async throws -> T {
         guard !token.isEmpty else { throw NotionAPIError.missingToken }
         var components = URLComponents(string: "https://api.notion.com/v1/\(path)")!
         components.queryItems = query.isEmpty ? nil : query
@@ -140,13 +176,20 @@ struct NotionAgentsAPI {
 
     private struct NotionServerError: Decodable { let message: String }
 
+    func agent(id: String) async throws -> NotionAgent? {
+        let page: NotionPage<NotionAgent> = try await request("agents", query: [
+            .init(name: "agent_ids", value: id), .init(name: "page_size", value: "1")
+        ])
+        return page.results.first { $0.id == id }
+    }
+
     func searchAgents(named name: String, cursor: String? = nil) async throws -> NotionPage<NotionAgent> {
-        var query = [URLQueryItem(name: "page_size", value: "50"), URLQueryItem(name: "query", value: name)]
+        var query = [URLQueryItem(name: "page_size", value: "50"), URLQueryItem(name: "name", value: name)]
         if let cursor { query.append(.init(name: "start_cursor", value: cursor)) }
         let page: NotionPage<NotionAgent>
         do { page = try await request("agents", query: query) }
         catch NotionAPIError.server(let status, _) where status == 400 {
-            // Older agent APIs can reject the server-side query; scan one page locally instead.
+            // Older agent APIs can reject the server-side name filter; scan one page locally instead.
             var fallback = [URLQueryItem(name: "page_size", value: "50")]
             if let cursor { fallback.append(.init(name: "start_cursor", value: cursor)) }
             page = try await request("agents", query: fallback)
@@ -173,14 +216,35 @@ struct NotionAgentsAPI {
 
     func messages(threadID: String) async throws -> [NotionMessage] {
         var all: [NotionMessage] = [], cursor: String?
+        do {
+            repeat {
+                var query = [URLQueryItem(name: "page_size", value: "100"), URLQueryItem(name: "verbose", value: "false")]
+                if let cursor { query.append(.init(name: "start_cursor", value: cursor)) }
+                let page: NotionPage<NotionMessage> = try await request("threads/\(threadID)/messages", query: query)
+                all += page.results
+                cursor = page.has_more ? page.next_cursor : nil
+            } while cursor != nil
+        } catch NotionAPIError.invalidResponse {
+            // A session may have a newer message representation; try committed events.
+        } catch NotionAPIError.server(404, _) {
+            // Older threads can be available through sessions even without message listing.
+        }
+        if all.contains(where: { !$0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+            return all.sorted { $0.created_time < $1.created_time }
+        }
+        // Some existing chats expose their content only through session events.
+        var events: [NotionSessionEvent] = []
+        cursor = nil
         repeat {
-            var query = [URLQueryItem(name: "page_size", value: "100"), URLQueryItem(name: "verbose", value: "false")]
-            if let cursor { query.append(.init(name: "start_cursor", value: cursor)) }
-            let page: NotionPage<NotionMessage> = try await request("threads/\(threadID)/messages", query: query)
-            all += page.results
+            var body: [String: Any] = ["page_size": 100,
+                                       "sorts": [["property": "sequence", "direction": "ascending"]]]
+            if let cursor { body["start_cursor"] = cursor }
+            let page: NotionPage<NotionSessionEvent> = try await request("sessions/\(threadID)/events/query", body: body)
+            events += page.results
             cursor = page.has_more ? page.next_cursor : nil
         } while cursor != nil
-        return all.sorted { $0.created_time < $1.created_time }
+        let eventMessages = events.sorted { $0.sequence < $1.sequence }.compactMap(\.message)
+        return eventMessages.isEmpty ? all : eventMessages
     }
 
     func send(_ message: String, agentID: String, threadID: String?) async throws -> NotionInvocation {
@@ -206,6 +270,7 @@ final class NotionAgentsStore: ObservableObject {
     @Published var isSending = false
     @Published private(set) var isResponding = false
     @Published private(set) var isRefreshing = false
+    @Published private(set) var isLoadingMessages = false
     @Published private(set) var activityText: String?
     @Published private(set) var hasToken = NotionTokenStore.read() != nil
     private var timer: Timer?
@@ -278,6 +343,20 @@ final class NotionAgentsStore: ObservableObject {
             for (index, agent) in registered.enumerated() {
                 guard visibleAgents.contains(where: { $0.id == agent.id }) else { continue }
                 activityText = "エージェントを確認中（\(index + 1)/\(registered.count)）"
+                let placeholder = "エージェント \(agent.id.prefix(8))"
+                if agent.name == placeholder {
+                    do {
+                        if let metadata = try await api.agent(id: agent.id) {
+                            if let savedIndex = SettingsStore.shared.data.notionSavedAgents.firstIndex(where: { $0.id == agent.id }),
+                               SettingsStore.shared.data.notionSavedAgents[savedIndex].name == placeholder {
+                                SettingsStore.shared.data.notionSavedAgents[savedIndex].name = metadata.name
+                                SettingsStore.shared.data.notionSavedAgents[savedIndex].glyph = metadata.glyph
+                            }
+                        } else {
+                            failures.append("\(agent.name): NotionでIDが見つかりません。IDと共有権限を確認してください。")
+                        }
+                    } catch { failures.append("\(agent.name): 名前の取得に失敗しました（\(error.localizedDescription)）") }
+                }
                 let list: [NotionThread]
                 do { list = try await api.threads(agentID: agent.id, allPages: false) }
                 catch { failures.append("\(agent.name): \(error.localizedDescription)"); continue }
@@ -329,8 +408,9 @@ final class NotionAgentsStore: ObservableObject {
     func selectThread(_ id: String) async {
         selectedThreadID = id; messages = []
         guard let token = NotionTokenStore.read() else { return }
+        isLoadingMessages = true
         activityText = "会話を読み込み中…"
-        defer { activityText = nil }
+        defer { isLoadingMessages = false; activityText = nil }
         do {
             let fetched = try await NotionAgentsAPI(token: token).messages(threadID: id)
             if selectedThreadID == id { messages = fetched }
@@ -438,7 +518,7 @@ struct NotionAgentsPanel: View {
                                 }
                             }
                         }
-                    }.frame(width: 170).padding(8)
+                    }.frame(width: 210).padding(8)
                     Divider()
                     VStack(spacing: 0) {
                         if let agent = store.visibleAgents.first(where: { $0.id == store.selectedAgentID }) {
@@ -470,6 +550,15 @@ struct NotionAgentsPanel: View {
                                 ScrollView {
                                     LazyVStack(alignment: .leading, spacing: 11) {
                                         Button("‹ 履歴に戻る") { store.showHistory() }.font(.caption)
+                                        if store.messages.isEmpty {
+                                            if store.isLoadingMessages {
+                                                HStack(spacing: 8) { ProgressView().controlSize(.small); Text("会話を読み込み中…") }
+                                                    .foregroundStyle(.secondary).padding(.top, 20)
+                                            } else {
+                                                ContentUnavailableView("メッセージがありません", systemImage: "bubble.left",
+                                                                       description: Text("このチャットには表示できるメッセージがありません。"))
+                                            }
+                                        }
                                         ForEach(store.messages) { message in
                                             VStack(alignment: message.role == "user" ? .trailing : .leading, spacing: 3) {
                                                 Text(message.role == "user" ? "あなた" : agent.name).font(.caption2).foregroundStyle(.secondary)

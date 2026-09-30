@@ -292,10 +292,10 @@ final class BrowserViewController: NSViewController {
         notion.translatesAutoresizingMaskIntoConstraints = false
         chrome.addSubview(notion)
         NSLayoutConstraint.activate([
-            notion.trailingAnchor.constraint(equalTo: chrome.trailingAnchor, constant: -18),
-            notion.topAnchor.constraint(equalTo: controlStack.bottomAnchor, constant: 10),
-            notion.bottomAnchor.constraint(equalTo: chrome.bottomAnchor, constant: -18),
-            notion.widthAnchor.constraint(equalToConstant: 510)
+            notion.leadingAnchor.constraint(equalTo: webContainer.leadingAnchor),
+            notion.trailingAnchor.constraint(equalTo: webContainer.trailingAnchor),
+            notion.topAnchor.constraint(equalTo: webContainer.topAnchor),
+            notion.bottomAnchor.constraint(equalTo: webContainer.bottomAnchor)
         ])
         notionPanel = notion
         syncPinnedTabs()

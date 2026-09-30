@@ -53,7 +53,7 @@ final class NotionAgentsTests: XCTestCase {
         XCTAssertEqual(second.results.map(\.id), ["c"])
         XCTAssertEqual(requests.count, 2)
         let query = URLComponents(url: requests[0].url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
-        XCTAssertEqual(query.first(where: { $0.name == "query" })?.value, "wri")
+        XCTAssertEqual(query.first(where: { $0.name == "name" })?.value, "wri")
         XCTAssertEqual(query.first(where: { $0.name == "page_size" })?.value, "50")
         XCTAssertEqual(requests[0].value(forHTTPHeaderField: "Authorization"), "Bearer test-token")
         XCTAssertEqual(requests[0].value(forHTTPHeaderField: "Notion-Version"), "2025-09-03")
@@ -64,14 +64,49 @@ final class NotionAgentsTests: XCTestCase {
         var requests: [URLRequest] = []
         let api = NotionAgentsAPI(token: "test-token") { request in
             requests.append(request)
-            let hasQuery = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.contains(where: { $0.name == "query" }) == true
+            let hasQuery = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.contains(where: { $0.name == "name" }) == true
             let body = hasQuery ? "{\"message\":\"unsupported query\"}" : "{\"results\":[{\"id\":\"a\",\"name\":\"Morning helper\",\"agent_type\":\"custom\",\"status\":\"active\"}],\"has_more\":false,\"next_cursor\":null}"
             return (Data(body.utf8), self.response(request, hasQuery ? 400 : 200))
         }
         let page = try await api.searchAgents(named: "morn")
         XCTAssertEqual(page.results.map(\.id), ["a"])
         XCTAssertEqual(requests.count, 2)
-        XCTAssertFalse(URLComponents(url: requests[1].url!, resolvingAgainstBaseURL: false)!.queryItems!.contains(where: { $0.name == "query" }))
+        XCTAssertFalse(URLComponents(url: requests[1].url!, resolvingAgainstBaseURL: false)!.queryItems!.contains(where: { $0.name == "name" }))
+    }
+
+    func testAgentMetadataLookupOnlyRequestsRegisteredID() async throws {
+        var urls: [URL] = []
+        let api = NotionAgentsAPI(token: "test-token") { request in
+            urls.append(request.url!)
+            let json = """
+            {"results":[{"id":"saved-agent","name":"Real Name","agent_type":"custom_agent","status":"active","icon":{"type":"emoji","emoji":"✨"}}],"has_more":false,"next_cursor":null}
+            """
+            return (Data(json.utf8), self.response(request))
+        }
+        let agent = try await api.agent(id: "saved-agent")
+        XCTAssertEqual(agent?.name, "Real Name")
+        XCTAssertEqual(agent?.glyph, "✨")
+        XCTAssertEqual(urls.count, 1)
+        let items = URLComponents(url: urls[0], resolvingAgainstBaseURL: false)?.queryItems ?? []
+        XCTAssertEqual(items.first(where: { $0.name == "agent_ids" })?.value, "saved-agent")
+        XCTAssertEqual(items.first(where: { $0.name == "page_size" })?.value, "1")
+    }
+
+    func testSessionEventsProvideMessagesWhenThreadListingIsEmpty() async throws {
+        var paths: [String] = []
+        let api = NotionAgentsAPI(token: "test-token") { request in
+            paths.append(request.url!.path)
+            let json: String
+            if request.url!.path.hasSuffix("/events/query") {
+                json = """
+                {"results":[{"id":"event-2","type":"agent.message","sequence":2,"created_at":"2026-09-30T00:00:02Z","content":[{"type":"text","text":"答えです"}]},{"id":"event-1","type":"user.message","sequence":1,"created_at":"2026-09-30T00:00:01Z","content":[{"type":"text","text":"質問です"}]}],"has_more":false,"next_cursor":null}
+                """
+            } else { json = "{\"results\":[],\"has_more\":false,\"next_cursor\":null}" }
+            return (Data(json.utf8), self.response(request))
+        }
+        let messages = try await api.messages(threadID: "thread-1")
+        XCTAssertEqual(messages.map(\.content), ["質問です", "答えです"])
+        XCTAssertEqual(paths, ["/v1/threads/thread-1/messages", "/v1/sessions/thread-1/events/query"])
     }
 
     func testRegisteredAgentPollCanStopAtFirstHistoryPage() async throws {
