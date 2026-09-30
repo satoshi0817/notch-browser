@@ -299,6 +299,7 @@ struct NotionAgentsPanel: View {
     @ObservedObject private var store = NotionAgentsStore.shared
     @ObservedObject private var settings = SettingsStore.shared
     @State private var draft = ""
+    @State private var tokenDraft = ""
     let onClose: () -> Void
 
     var body: some View {
@@ -317,7 +318,21 @@ struct NotionAgentsPanel: View {
             }
             Divider()
             if !store.hasToken {
-                ContentUnavailableView("Notionを接続", systemImage: "key", description: Text("設定で内部インテグレーションのトークンを保存してください。"))
+                VStack(alignment: .leading, spacing: 12) {
+                    Label("Notionを接続", systemImage: "key").font(.headline)
+                    Text("内部インテグレーションのトークンを入力してください。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    SecureField("トークンを貼り付け", text: $tokenDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityLabel("Notionのトークン")
+                        .onSubmit(saveToken)
+                    Button("トークンを保存", action: saveToken)
+                        .disabled(tokenDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    Text("トークンはMacのキーチェーンに保存します。")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                .padding(28)
             } else {
                 HStack(spacing: 0) {
                     VStack(alignment: .leading, spacing: 5) {
@@ -422,6 +437,12 @@ struct NotionAgentsPanel: View {
         }
     }
 
+    private func saveToken() {
+        guard !tokenDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        store.saveToken(tokenDraft)
+        if store.hasToken { tokenDraft = "" }
+    }
+
     private func send() {
         let message = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty else { return }
@@ -438,9 +459,16 @@ struct NotionAgentsSettings: View {
     var body: some View {
         Form {
             Section("接続") {
-                SecureField("内部インテグレーションのトークン", text: $token)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("内部インテグレーションのトークン").font(.subheadline.weight(.medium))
+                    SecureField("トークンを貼り付け", text: $token)
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityLabel("Notionのトークン")
+                        .onSubmit { saveToken() }
+                }
                 HStack {
-                    Button("トークンを保存") { agents.saveToken(token); token = "" }.disabled(token.isEmpty)
+                    Button("トークンを保存", action: saveToken)
+                        .disabled(token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     if agents.hasToken { Button("接続を解除", role: .destructive) { agents.saveToken("") } }
                     Spacer()
                     Text(agents.hasToken ? "接続済み" : "未接続").foregroundStyle(agents.hasToken ? .green : .secondary)
@@ -469,5 +497,11 @@ struct NotionAgentsSettings: View {
         }
         .formStyle(.grouped)
         .onAppear { agents.start() }
+    }
+
+    private func saveToken() {
+        guard !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        agents.saveToken(token)
+        if agents.hasToken { token = "" }
     }
 }

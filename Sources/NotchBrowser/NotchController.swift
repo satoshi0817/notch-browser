@@ -514,7 +514,7 @@ final class NotchManager {
         }.store(in: &cancellables)
         notion.$alert.receive(on: RunLoop.main).sink { [weak self] notice in
             guard let self, let notice else { return }
-            self.showNotion()
+            self.showNotion(focus: false)
             Task { @MainActor in
                 await self.notion.selectAgent(notice.agentID)
                 await self.notion.selectThread(notice.threadID)
@@ -630,10 +630,10 @@ final class NotchManager {
         notion.visibleAgents.first(where: { notion.busyAgentIDs.contains($0.id) })?.glyph
     }
 
-    func showNotion(on target: NotchController? = nil) {
+    func showNotion(on target: NotchController? = nil, focus: Bool = true) {
         let target = target ?? orderedControllers.first { $0.screen.frame.contains(NSEvent.mouseLocation) } ?? orderedControllers.first
         guard let target else { return }
-        target.expand(focus: false)
+        target.expand(focus: focus)
         browser.showNotion()
         target.panel.orderFrontRegardless()
     }

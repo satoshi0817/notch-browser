@@ -60,12 +60,14 @@ struct DesignPreview {
         app.mainMenu = menu
         manager.start()
         manager.keepOpen = !CommandLine.arguments.contains("--drag-preview")
-        if !CommandLine.arguments.contains("--drag-preview") { manager.toggle() }
+        if !CommandLine.arguments.contains("--drag-preview") && !CommandLine.arguments.contains("--notion-settings") { manager.toggle() }
         if CommandLine.arguments.contains("--shelf") { manager.showShelf() }
         if let onboarding {
             DispatchQueue.main.async { onboarding.present() }
-        } else if CommandLine.arguments.contains("--settings") {
-            DispatchQueue.main.async { settings.present() }
+        } else if CommandLine.arguments.contains("--notion-panel") {
+            DispatchQueue.main.async { manager.showNotion() }
+        } else if CommandLine.arguments.contains("--settings") || CommandLine.arguments.contains("--notion-settings") {
+            DispatchQueue.main.async { settings.present(section: CommandLine.arguments.contains("--notion-settings") ? .notion : nil) }
         } else {
             manager.browser.newTab(nil)
         }

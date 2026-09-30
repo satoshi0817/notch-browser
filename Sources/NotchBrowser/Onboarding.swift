@@ -355,7 +355,7 @@ private struct OnboardingView: View {
             if let pageError { Text(pageError).font(.caption).foregroundStyle(.red) }
             HStack(spacing: 8) {
                 Text("おすすめ").font(.caption).foregroundStyle(.secondary)
-                quickPage("Notion", url: "https://www.notion.so/")
+                quickPage("Claude", url: "https://claude.ai/")
                 quickPage("ChatGPT", url: "https://chatgpt.com/")
             }
         }
