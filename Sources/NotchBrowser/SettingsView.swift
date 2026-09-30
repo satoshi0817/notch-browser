@@ -311,6 +311,8 @@ struct ProfilesSettings: View {
 struct GeneralSettings: View {
     @EnvironmentObject var store: SettingsStore
 
+    private var browsers: [ExternalBrowser] { ExternalBrowserLauncher.installed() }
+
     var body: some View {
         Form {
             Section {
@@ -334,6 +336,21 @@ struct GeneralSettings: View {
                 Text("タブ")
             } footer: {
                 Text("タブはノッチ上でドラッグして並べ替えられます（固定タブと通常タブはそれぞれのグループ内で移動します）。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section("外部ブラウザ") {
+                Picker("ブラウザで開く先", selection: $store.data.externalBrowserBundleID) {
+                    Text("システムのデフォルト").tag(nil as String?)
+                    ForEach(browsers) { browser in
+                        Text(browser.name).tag(Optional(browser.id))
+                    }
+                    if let selected = store.data.externalBrowserBundleID,
+                       !browsers.contains(where: { $0.id == selected }) {
+                        Text("見つからないブラウザ（\(selected)）").tag(Optional(selected))
+                    }
+                }
+                Text("リンクやタブの右クリックメニューと、ボタン配置の「ブラウザで開く」に適用します。")
                     .font(.caption).foregroundStyle(.secondary)
             }
 

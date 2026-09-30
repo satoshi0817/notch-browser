@@ -71,7 +71,7 @@ enum ToolbarAction: String, Codable, CaseIterable, Identifiable {
         case .closeTab: "タブを閉じる"
         case .shelf: "ファイル棚"
         case .notes: "クイックメモ"
-        case .external: "デフォルトブラウザで開く"
+        case .external: "ブラウザで開く"
         case .settings: "設定"
         case .quit: "終了"
         case .spacer: "可変スペーサー"
@@ -126,6 +126,8 @@ struct SettingsData: Codable {
     var shelfTrigger = ShelfTrigger.automatic
     var shelfTileSize = ShelfTileSize.medium
     var shelfHoverDetails = true
+    /// nil follows the macOS default browser; otherwise use the selected app bundle ID.
+    var externalBrowserBundleID: String? = nil
     var toolbarActions = ToolbarAction.defaults
     var confirmBeforeQuit = true
     var shelfDownloads = false
@@ -150,6 +152,7 @@ struct SettingsData: Codable {
         shelfTrigger = (try? c.decode(ShelfTrigger.self, forKey: .shelfTrigger)) ?? .automatic
         shelfTileSize = (try? c.decode(ShelfTileSize.self, forKey: .shelfTileSize)) ?? .medium
         shelfHoverDetails = (try? c.decode(Bool.self, forKey: .shelfHoverDetails)) ?? true
+        externalBrowserBundleID = try? c.decodeIfPresent(String.self, forKey: .externalBrowserBundleID)
         shelfRemoveAfterDrag = (try? c.decode(Bool.self, forKey: .shelfRemoveAfterDrag)) ?? true
         shelfDownloads = (try? c.decode(Bool.self, forKey: .shelfDownloads)) ?? false
         toolbarActions = (try? c.decode([String].self, forKey: .toolbarActions))

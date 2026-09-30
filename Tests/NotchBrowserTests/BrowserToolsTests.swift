@@ -28,6 +28,37 @@ final class BrowserToolsTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(SettingsData.self, from: Data("{\"glassTint\":-1}".utf8)).glassTint, 0)
     }
 
+    func testExternalBrowserPreferenceKeepsLegacySettingsAndRoundTrips() throws {
+        let old = try JSONDecoder().decode(SettingsData.self, from: Data("{}".utf8))
+        XCTAssertNil(old.externalBrowserBundleID)
+        var selected = old
+        selected.externalBrowserBundleID = "com.apple.Safari"
+        let restored = try JSONDecoder().decode(SettingsData.self, from: JSONEncoder().encode(selected))
+        XCTAssertEqual(restored.externalBrowserBundleID, "com.apple.Safari")
+    }
+
+    @MainActor func testLinkAndTabExternalBrowserMenusAreInstalled() throws {
+        _ = NSApplication.shared
+        let store = SettingsStore.shared
+        let saved = store.data
+        defer { store.data = saved }
+        var settings = SettingsData()
+        settings.pinnedTabs = []
+        store.data = settings
+        let browser = BrowserViewController()
+        let panel = NotchPanel(contentRect: NSRect(x: 100, y: 100, width: 960, height: 660), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.contentView = browser.view
+        panel.orderFrontRegardless()
+        defer { panel.orderOut(nil) }
+        browser.newTab(nil)
+        let webView = try XCTUnwrap(descendants(browser.view).compactMap { $0 as? WKWebView }.first)
+        XCTAssertTrue(webView.configuration.userContentController.userScripts.contains { $0.source.contains("notchBrowserLinkMenu") })
+        let button = try XCTUnwrap(descendants(browser.view).compactMap { $0 as? TabButton }.first)
+        let menu = try XCTUnwrap(button.menu)
+        XCTAssertTrue(menu.items.contains { $0.title == "ブラウザで開く" })
+        XCTAssertFalse(try XCTUnwrap(menu.items.first { $0.title == "ブラウザで開く" }).isEnabled)
+    }
+
     @MainActor
     func testLegacyIconsUseOnlyValidSFSymbols() {
         for icon in [TabIcon.emoji("legacy"), .image("custom.png"), .favicon, .symbol("missing-symbol")] {

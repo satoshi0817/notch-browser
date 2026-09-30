@@ -2,6 +2,20 @@ import AppKit
 import WebKit
 import SwiftUI
 
+private final class LinkMenuMessageHandler: NSObject, WKScriptMessageHandler {
+    weak var owner: BrowserViewController?
+    init(owner: BrowserViewController) { self.owner = owner }
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        owner?.showLinkMenu(for: message)
+    }
+}
+
+private final class LinkMenuContext: NSObject {
+    let url: URL
+    weak var opener: Tab?
+    init(url: URL, opener: Tab?) { self.url = url; self.opener = opener }
+}
+
 final class Tab {
     /// Set when the tab is pinned; its name, icon and profile come from settings.
     var pinnedID: UUID?
@@ -51,6 +65,7 @@ final class BrowserViewController: NSViewController {
     private var selectedIndex: Int?
     private var selectedTab: Tab? { selectedIndex.map { tabs[$0] } }
     private var downloadDestinations: [ObjectIdentifier: URL] = [:]
+    private let linkMenuControllers = NSHashTable<WKUserContentController>.weakObjects()
     private var store: SettingsStore { .shared }
 
     private let glass = GlassSurface()
@@ -353,7 +368,9 @@ final class BrowserViewController: NSViewController {
     }
 
     private func makeWebView(profileID: UUID, configuration: WKWebViewConfiguration? = nil) -> WKWebView {
-        let webView = WKWebView(frame: .zero, configuration: configuration ?? Self.makeConfiguration(profileID: profileID))
+        let configuration = configuration ?? Self.makeConfiguration(profileID: profileID)
+        installLinkMenu(in: configuration.userContentController)
+        let webView = WKWebView(frame: .zero, configuration: configuration)
         // Google refuses sign-in from "embedded" browsers; present as Safari.
         webView.customUserAgent = Self.userAgent
         webView.allowsBackForwardNavigationGestures = true
@@ -361,6 +378,68 @@ final class BrowserViewController: NSViewController {
         webView.navigationDelegate = self
         webView.uiDelegate = self
         return webView
+    }
+
+    private func installLinkMenu(in controller: WKUserContentController) {
+        guard !linkMenuControllers.contains(controller) else { return }
+        let script = """
+        (() => {
+          if (window.__notchBrowserLinkMenuInstalled) return;
+          window.__notchBrowserLinkMenuInstalled = true;
+          document.addEventListener('contextmenu', event => {
+            const link = event.composedPath().map(node =>
+              node instanceof Element ? node.closest('a[href]') : null).find(Boolean);
+            if (!link) return;
+            let url;
+            try { url = new URL(link.href, document.baseURI); } catch (_) { return; }
+            if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            window.webkit.messageHandlers.notchBrowserLinkMenu.postMessage(url.href);
+          }, true);
+        })();
+        """
+        controller.addUserScript(WKUserScript(source: script, injectionTime: .atDocumentStart, forMainFrameOnly: false))
+        controller.add(LinkMenuMessageHandler(owner: self), name: "notchBrowserLinkMenu")
+        linkMenuControllers.add(controller)
+    }
+
+    fileprivate func showLinkMenu(for message: WKScriptMessage) {
+        guard let rawURL = message.body as? String, let url = URL(string: rawURL),
+              ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+              let webView = message.webView, let window = webView.window,
+              let index = index(of: webView) else { return }
+        let context = LinkMenuContext(url: url, opener: tabs[index])
+        let menu = NSMenu()
+        for (title, action, symbolName) in [
+            ("新規タブで開く", #selector(openLinkInNewTab(_:)), "plus.square.on.square"),
+            ("ブラウザで開く", #selector(openLinkExternally(_:)), "safari"),
+            ("リンクをコピー", #selector(copyLink(_:)), "link")
+        ] {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = self
+            item.representedObject = context
+            item.image = symbol(symbolName)
+            menu.addItem(item)
+        }
+        let point = webView.convert(window.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)
+        menu.popUp(positioning: nil, at: point, in: webView)
+    }
+
+    @objc private func openLinkInNewTab(_ sender: NSMenuItem) {
+        guard let context = sender.representedObject as? LinkMenuContext else { return }
+        openInNewTab(context.url, from: context.opener)
+    }
+
+    @objc private func openLinkExternally(_ sender: NSMenuItem) {
+        guard let context = sender.representedObject as? LinkMenuContext else { return }
+        ExternalBrowserLauncher.open(context.url, bundleID: store.data.externalBrowserBundleID)
+    }
+
+    @objc private func copyLink(_ sender: NSMenuItem) {
+        guard let context = sender.representedObject as? LinkMenuContext else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(context.url.absoluteString, forType: .string)
     }
 
     /// Pinned tabs come first, in settings order; other tabs follow.
@@ -584,6 +663,11 @@ final class BrowserViewController: NSViewController {
         store.updatePinnedTab(id) { $0.url = url.absoluteString }
     }
 
+    @objc private func openTabExternally(_ sender: NSMenuItem) {
+        guard tabs.indices.contains(sender.tag), let url = tabs[sender.tag].webView.url else { return }
+        ExternalBrowserLauncher.open(url, bundleID: store.data.externalBrowserBundleID)
+    }
+
     @objc private func toggleIconOnly(_ sender: NSMenuItem) {
         guard let id = tabs[sender.tag].pinnedID else { return }
         store.updatePinnedTab(id) { $0.iconOnly.toggle() }
@@ -689,7 +773,7 @@ final class BrowserViewController: NSViewController {
         func add(_ title: String, _ action: Selector, to menu: NSMenu = menu) -> NSMenuItem {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
             item.target = self
-            let icons: [Selector: String] = [#selector(toggleIconOnly): "eye", #selector(setPinnedHome): "house", #selector(openSettings): "slider.horizontal.3", #selector(pinTab): "pin", #selector(unpinTab): "pin.slash", #selector(closeTabFromMenu): "xmark", #selector(changeProfile): "person.crop.circle"]
+            let icons: [Selector: String] = [#selector(toggleIconOnly): "eye", #selector(setPinnedHome): "house", #selector(openSettings): "slider.horizontal.3", #selector(pinTab): "pin", #selector(unpinTab): "pin.slash", #selector(closeTabFromMenu): "xmark", #selector(changeProfile): "person.crop.circle", #selector(openTabExternally): "safari"]
             item.image = symbol(icons[action] ?? "circle")
             item.tag = index
             menu.addItem(item)
@@ -704,6 +788,8 @@ final class BrowserViewController: NSViewController {
         } else {
             add("固定タブにする", #selector(pinTab))
         }
+
+        add("ブラウザで開く", #selector(openTabExternally)).isEnabled = tab.webView.url != nil
 
         let profiles = NSMenu()
         for profile in store.data.profiles {
@@ -811,7 +897,7 @@ final class BrowserViewController: NSViewController {
     @objc private func toggleKeepOpen() { onToggleKeepOpen?() }
 
     @objc private func openExternally() {
-        if let url = selectedTab?.webView.url { NSWorkspace.shared.open(url) }
+        if let url = selectedTab?.webView.url { ExternalBrowserLauncher.open(url, bundleID: store.data.externalBrowserBundleID) }
     }
 
     // MARK: Page tools
