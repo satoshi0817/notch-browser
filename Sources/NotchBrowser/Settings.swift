@@ -50,6 +50,7 @@ struct DisplaySettings: Codable, Hashable {
 enum ToolbarAction: String, Codable, CaseIterable, Identifiable {
     case back, forward, home, reload, address, keepOpen, find, copyURL
     case zoomIn, zoomOut, resetZoom, autoRefresh, restore, tabSearch, closeTab, shelf, notes, external, settings, quit
+    case spacer
     var id: Self { self }
     var title: String {
         switch self {
@@ -73,6 +74,31 @@ enum ToolbarAction: String, Codable, CaseIterable, Identifiable {
         case .external: "デフォルトブラウザで開く"
         case .settings: "設定"
         case .quit: "終了"
+        case .spacer: "可変スペーサー"
+        }
+    }
+    var symbolName: String {
+        switch self {
+        case .back: "chevron.left"
+        case .forward: "chevron.right"
+        case .home: "house"
+        case .reload: "arrow.clockwise"
+        case .address, .find: "magnifyingglass"
+        case .keepOpen: "pin"
+        case .copyURL: "link"
+        case .zoomIn: "plus.magnifyingglass"
+        case .zoomOut: "minus.magnifyingglass"
+        case .resetZoom: "arrow.up.left.and.arrow.down.right"
+        case .autoRefresh: "arrow.triangle.2.circlepath"
+        case .restore: "arrow.uturn.backward"
+        case .tabSearch: "square.stack"
+        case .closeTab: "xmark"
+        case .shelf: "tray"
+        case .notes: "square.and.pencil"
+        case .external: "safari"
+        case .settings: "gearshape"
+        case .quit: "power"
+        case .spacer: "arrow.left.and.right"
         }
     }
     static let defaults: [Self] = [.back, .forward, .home, .reload, .address, .keepOpen, .settings, .quit]
@@ -123,7 +149,10 @@ struct SettingsData: Codable {
         shelfRemoveAfterDrag = (try? c.decode(Bool.self, forKey: .shelfRemoveAfterDrag)) ?? true
         shelfDownloads = (try? c.decode(Bool.self, forKey: .shelfDownloads)) ?? false
         toolbarActions = (try? c.decode([String].self, forKey: .toolbarActions))
-            .map { raw in ToolbarAction.allCases.filter { raw.contains($0.rawValue) } } ?? fallback.toolbarActions
+            .map { raw in
+                var seen = Set<ToolbarAction>()
+                return raw.compactMap(ToolbarAction.init(rawValue:)).filter { seen.insert($0).inserted }
+            } ?? fallback.toolbarActions
         confirmBeforeQuit = (try? c.decode(Bool.self, forKey: .confirmBeforeQuit)) ?? true
         let tint = (try? c.decode(Double.self, forKey: .glassTint)) ?? fallback.glassTint
         glassTint = tint.isFinite ? min(1, max(0, tint)) : fallback.glassTint

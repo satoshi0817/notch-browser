@@ -148,6 +148,54 @@ final class BrowserToolsTests: XCTestCase {
     }
 
     @MainActor
+    func testToolbarFollowsSavedOrderAndSpacerSeparatesButtons() throws {
+        _ = NSApplication.shared
+        let store = SettingsStore.shared
+        let saved = store.data
+        defer { store.data = saved }
+        var settings = SettingsData()
+        settings.pinnedTabs = []
+        settings.toolbarActions = [.quit, .spacer, .address, .settings]
+        store.data = settings
+        let browser = BrowserViewController()
+        let panel = NotchPanel(contentRect: NSRect(x: 100, y: 100, width: 960, height: 500), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.contentView = browser.view
+        panel.orderFrontRegardless()
+        defer { panel.orderOut(nil) }
+        browser.updateNotchMetrics(notchWidth: 200, stripHeight: 32)
+        browser.view.layoutSubtreeIfNeeded()
+        let buttons = descendants(browser.view).compactMap { $0 as? NSButton }
+        let quit = try XCTUnwrap(buttons.first { $0.accessibilityLabel() == "終了" })
+        let address = try XCTUnwrap(buttons.first { $0.accessibilityLabel() == "URLを表示・検索 (⌘L)" })
+        let preferences = try XCTUnwrap(buttons.first { $0.accessibilityLabel() == "設定" })
+        let quitFrame = quit.convert(quit.bounds, to: browser.view)
+        let addressFrame = address.convert(address.bounds, to: browser.view)
+        let settingsFrame = preferences.convert(preferences.bounds, to: browser.view)
+        XCTAssertLessThan(quitFrame.maxX + 40, addressFrame.minX)
+        XCTAssertLessThan(addressFrame.maxX, settingsFrame.minX)
+        XCTAssertFalse(quit.isHidden)
+        XCTAssertFalse(address.isHidden)
+    }
+
+    @MainActor
+    func testNewTabKeepsSearchInsideTheStartPage() throws {
+        _ = NSApplication.shared
+        let store = SettingsStore.shared
+        let saved = store.data
+        defer { store.data = saved }
+        var settings = SettingsData()
+        settings.pinnedTabs = []
+        store.data = settings
+        let browser = BrowserViewController()
+        let panel = NotchPanel(contentRect: NSRect(x: 100, y: 100, width: 960, height: 500), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.contentView = browser.view
+        panel.orderFrontRegardless()
+        defer { panel.orderOut(nil) }
+        browser.newTab(nil)
+        XCTAssertFalse(browser.dismissOverlay(), "Creating a tab should not open the toolbar search popover")
+    }
+
+    @MainActor
     func testCompactLayoutKeepsTheOriginalSingleStripAndCameraGap() throws {
         _ = NSApplication.shared
         let store = SettingsStore.shared

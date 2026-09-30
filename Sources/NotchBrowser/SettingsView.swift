@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     convenience init() {
@@ -381,26 +382,165 @@ struct GeneralSettings: View {
 struct ToolbarSettingsView: View {
     @EnvironmentObject var store: SettingsStore
 
+    private var placed: [ToolbarAction] { store.data.toolbarActions }
+    private var available: [ToolbarAction] { ToolbarAction.allCases.filter { !placed.contains($0) } }
+    private var previewActions: [ToolbarAction] { Array(placed.filter { $0 != .spacer }.prefix(10)) }
+
     var body: some View {
-        Form {
-            Section("ノッチのボタン配置") {
-                ForEach(ToolbarAction.allCases) { action in
-                    Picker(action.title, selection: Binding(
-                        get: { store.data.toolbarActions.contains(action) },
-                        set: { visible in
-                            store.data.toolbarActions.removeAll { $0 == action }
-                            if visible { store.data.toolbarActions.append(action) }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("ボタン配置").font(.title2.weight(.semibold))
+                    Text("並びをドラッグして変更できます。追加・削除すると上のプレビューにも反映されます。")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+                VStack(alignment: .leading, spacing: 9) {
+                    Text("ノッチでの見え方").font(.headline)
+                    GeometryReader { geometry in
+                        preview
+                            .frame(width: 960, height: 108)
+                            .scaleEffect(geometry.size.width / 960, anchor: .topLeading)
+                    }
+                    .frame(height: 76)
+                    Text("右側の操作エリアを実寸比で表示。幅を超えたボタンは「•••」メニューに入ります。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("ノッチに表示").font(.headline)
+                        Spacer()
+                        Text("上から左→右の順").font(.caption).foregroundStyle(.secondary)
+                    }
+                    VStack(spacing: 5) {
+                        ForEach(placed) { action in
+                            placementRow(action)
+                                .onDrag { NSItemProvider(object: action.rawValue as NSString) }
+                                .onDrop(of: [UTType.text.identifier], isTargeted: nil) { drop($0, before: action) }
                         }
-                    )) {
-                        Text("ノッチに表示").tag(true)
-                        Text("メニュー内").tag(false)
+                        if placed.isEmpty {
+                            Text("下のボタンをここへドラッグするか、追加してください。")
+                                .font(.callout).foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, minHeight: 52)
+                        }
+                        Color.clear.frame(height: 14)
+                            .contentShape(Rectangle())
+                            .onDrop(of: [UTType.text.identifier], isTargeted: nil) { drop($0, before: nil) }
+                    }
+                    .padding(8)
+                    .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 16))
+                    Text("可変スペーサーを先頭に置くと右寄せ、末尾に置くと左寄せ、途中に置くと左右に分けられます。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("追加できるボタン").font(.headline)
+                    if available.isEmpty {
+                        Text("すべて配置済みです。")
+                            .font(.callout).foregroundStyle(.secondary)
+                    } else {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 155), spacing: 8)], alignment: .leading, spacing: 8) {
+                            ForEach(available) { action in
+                                Button { insert(action, before: nil) } label: {
+                                    Label(action.title, systemImage: action.symbolName)
+                                        .font(.system(size: 12))
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(10)
+                                        .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
+                                }
+                                .buttonStyle(.plain)
+                                .onDrag { NSItemProvider(object: action.rawValue as NSString) }
+                                .help("クリックで末尾に追加、または上へドラッグ")
+                            }
+                        }
                     }
                 }
-                Text("幅に収まらないボタンは自動的にメニューへ移動します。")
-                    .font(.caption).foregroundStyle(.secondary)
-                Button("配置を標準に戻す") { store.data.toolbarActions = ToolbarAction.defaults }
+                HStack {
+                    Spacer()
+                    Button("標準の配置に戻す") { store.data.toolbarActions = ToolbarAction.defaults }
+                }
             }
+            .padding(26)
+            .frame(maxWidth: 720)
+            .frame(maxWidth: .infinity)
+        }
+    }
 
-        }.formStyle(.grouped)
+    private var preview: some View {
+        HStack(spacing: 0) {
+            HStack(spacing: 5) {
+                Image(systemName: "envelope").frame(width: 64)
+                Image(systemName: "calendar").frame(width: 64)
+                Image(systemName: "plus").frame(width: 28)
+                Spacer()
+            }
+            .foregroundStyle(.white.opacity(0.7))
+            .frame(width: 366, height: 38)
+            .padding(.leading, 14)
+            Color.black.frame(width: 200, height: 52)
+                .clipShape(UnevenRoundedRectangle(bottomLeadingRadius: 16, bottomTrailingRadius: 16))
+            HStack(spacing: 4) {
+                ForEach(placed.filter { $0 == .spacer || previewActions.contains($0) }) { action in
+                    if action == .spacer {
+                        Spacer(minLength: 0)
+                    } else {
+                        Image(systemName: action.symbolName)
+                            .font(.system(size: 12, weight: .medium))
+                            .frame(width: 28, height: 28)
+                            .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
+                            .help(action.title)
+                    }
+                }
+                if !placed.contains(.spacer) { Spacer(minLength: 0) }
+                Image(systemName: "ellipsis.circle")
+                    .frame(width: 28, height: 28)
+                    .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
+            }
+            .foregroundStyle(.white)
+            .frame(width: 358, height: 38)
+            .padding(.leading, 10)
+            .padding(.trailing, 12)
+        }
+        .frame(width: 960, height: 108)
+        .background(Color(red: 0.08, green: 0.10, blue: 0.16), in: RoundedRectangle(cornerRadius: 24))
+        .overlay(RoundedRectangle(cornerRadius: 24).strokeBorder(.white.opacity(0.18)))
+    }
+
+    private func placementRow(_ action: ToolbarAction) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "line.3.horizontal").foregroundStyle(.tertiary)
+            Image(systemName: action.symbolName)
+                .frame(width: 26)
+                .foregroundStyle(action == .spacer ? .blue : .primary)
+            Text(action.title).font(.system(size: 13, weight: .medium))
+            if action == .spacer { Text("余白を広げる").font(.caption).foregroundStyle(.secondary) }
+            Spacer()
+            Button {
+                store.data.toolbarActions.removeAll { $0 == action }
+            } label: {
+                Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(action.title)を外す")
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 39)
+        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+        .contentShape(Rectangle())
+    }
+
+    private func insert(_ action: ToolbarAction, before target: ToolbarAction?) {
+        var actions = placed
+        actions.removeAll { $0 == action }
+        let index = target.flatMap { actions.firstIndex(of: $0) } ?? actions.endIndex
+        actions.insert(action, at: index)
+        store.data.toolbarActions = actions
+    }
+
+    private func drop(_ providers: [NSItemProvider], before target: ToolbarAction?) -> Bool {
+        guard let provider = providers.first(where: { $0.canLoadObject(ofClass: NSString.self) }) else { return false }
+        _ = provider.loadObject(ofClass: NSString.self) { object, _ in
+            guard let raw = object as? String, let action = ToolbarAction(rawValue: raw) else { return }
+            DispatchQueue.main.async { insert(action, before: target) }
+        }
+        return true
     }
 }

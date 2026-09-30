@@ -73,45 +73,92 @@ struct GlassCard: ViewModifier {
 }
 
 struct StartPage: View {
+    let tabID: ObjectIdentifier?
     let tabs: [PinnedTab]
     let open: (UUID) -> Void
-    let search: () -> Void
+    let navigate: (String) -> Void
+    @State private var query = ""
+    @FocusState private var queryFocused: Bool
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                Button(action: search) {
-                    HStack {
-                        Image(systemName: "magnifyingglass")
-                        Text("検索、またはURLを入力")
-                        Spacer()
-                        Text("⌘ L").font(.caption.monospaced()).foregroundStyle(.secondary)
-                    }.padding(16).background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10)).contentShape(Rectangle())
-                }.buttonStyle(.plain).accessibilityLabel("検索またはURLを入力")
-                VStack(alignment: .leading, spacing: 12) {
-                    if tabs.isEmpty {
-                        Text("タブのメニューからページを固定すると、ここに表示されます。")
-                            .font(.callout).foregroundStyle(.secondary)
+        GeometryReader { geometry in
+            ScrollView {
+                VStack(spacing: 44) {
+                    VStack(spacing: 22) {
+                        Image(systemName: "safari")
+                            .font(.system(size: 34, weight: .ultraLight))
+                            .foregroundStyle(.white.opacity(0.7))
+                        Text("どこへ行きますか？")
+                            .font(.system(size: 29, weight: .medium, design: .rounded))
+                        HStack(spacing: 14) {
+                            Image(systemName: "magnifyingglass")
+                                .font(.system(size: 18))
+                                .foregroundStyle(.secondary)
+                            TextField("URLを入力、または検索", text: $query)
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 17))
+                                .focused($queryFocused)
+                                .onSubmit(submitQuery)
+                                .accessibilityLabel("検索またはURLを入力")
+                            if !query.isEmpty {
+                                Button(action: submitQuery) {
+                                    Image(systemName: "arrow.up")
+                                        .font(.system(size: 15, weight: .semibold))
+                                        .frame(width: 30, height: 30)
+                                        .background(.white.opacity(0.14), in: Circle())
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("開く")
+                            }
+                        }
+                        .padding(.horizontal, 22)
+                        .frame(height: 64)
+                        .background(.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(.white.opacity(queryFocused ? 0.32 : 0.13)))
                     }
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
-                        ForEach(tabs) { tab in
-                            Button { open(tab.id) } label: {
-                                HStack(spacing: 12) {
-                                    Image(systemName: TabIconRenderer.symbolName(for: tab.icon, hosts: [tab.host]))
-                                        .font(.system(size: 20, weight: .medium)).foregroundStyle(.secondary).frame(width: 24)
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text(tab.name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                    VStack(alignment: .leading, spacing: 15) {
+                        Text("固定したページ")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                        if tabs.isEmpty {
+                            Text("タブのメニューからページを固定すると、ここに表示されます。")
+                                .font(.callout).foregroundStyle(.secondary)
+                        } else {
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 160), spacing: 12)], spacing: 12) {
+                                ForEach(tabs) { tab in
+                                    Button { open(tab.id) } label: {
+                                        HStack(spacing: 12) {
+                                            Image(systemName: TabIconRenderer.symbolName(for: tab.icon, hosts: [tab.host]))
+                                                .font(.system(size: 20, weight: .medium)).foregroundStyle(.secondary).frame(width: 26)
+                                            Text(tab.name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                                            Spacer(minLength: 0)
+                                        }
+                                        .padding(15)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                                     }
-                                    Spacer(minLength: 0)
-                                }.padding(12).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-                            }.buttonStyle(.plain).accessibilityLabel(tab.name)
+                                    .buttonStyle(.plain)
+                                    .accessibilityLabel(tab.name)
+                                }
+                            }
                         }
                     }
                 }
-            }.padding(.horizontal, 32).padding(.top, 64).padding(.bottom, 32).frame(maxWidth: 640)
+                .frame(maxWidth: 620)
+                .padding(.horizontal, 32)
+                .padding(.vertical, 48)
                 .frame(maxWidth: .infinity)
+                .frame(minHeight: geometry.size.height)
+            }
         }
         .background(Color.black)
         .preferredColorScheme(.dark)
+        .onChange(of: tabID) { _, _ in query = "" }
+    }
+
+    private func submitQuery() {
+        let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        navigate(text)
     }
 }

@@ -25,4 +25,11 @@ final class ToolbarSettingsTests: XCTestCase {
         XCTAssertFalse(settings.confirmBeforeQuit)
         XCTAssertEqual(settings.countdownMinutes, 55)
     }
+
+    func testSavedOrderAndSpacerSurviveRestart() throws {
+        let settings = try JSONDecoder().decode(SettingsData.self, from: Data(#"{"toolbarActions":["quit","spacer","address","settings","spacer"]}"#.utf8))
+        XCTAssertEqual(settings.toolbarActions, [.quit, .spacer, .address, .settings])
+        let restored = try JSONDecoder().decode(SettingsData.self, from: JSONEncoder().encode(settings))
+        XCTAssertEqual(restored.toolbarActions, settings.toolbarActions)
+    }
 }

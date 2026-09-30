@@ -80,6 +80,9 @@ final class BrowserViewController: NSViewController {
         return button
     }()
     private let controlStack = NSStackView()
+    private let defaultToolbarSpacer = NSView()
+    private let placedToolbarSpacer = NSView()
+    private var arrangedToolbarActions: [ToolbarAction] = []
     private let webContainer = NSView()
     private let addressField = NSTextField()
     private let addressPopover = NSPopover()
@@ -193,7 +196,7 @@ final class BrowserViewController: NSViewController {
         for action in ToolbarAction.allCases {
             if let button = toolbarButtons[action] { controlStack.addArrangedSubview(button) }
         }
-        controlStack.addArrangedSubview(NSView())
+        controlStack.addArrangedSubview(defaultToolbarSpacer)
         controlStack.addArrangedSubview(toolsButton)
         tabScroll.drawsBackground = false
         tabScroll.hasHorizontalScroller = true
@@ -280,16 +283,36 @@ final class BrowserViewController: NSViewController {
     private func updateCompactControls() {
         let available = view.bounds.width / 2 - controlLeadingConstraint.constant - 12
         let capacity = max(0, Int((available - 32) / 32))
-        let requested = Set(store.data.toolbarActions)
-        let priority: [ToolbarAction] = [.address, .settings, .quit, .back, .keepOpen]
-            + ToolbarAction.allCases.filter { ![.address, .settings, .quit, .back, .keepOpen].contains($0) }
-        let visible = Set(priority.filter { requested.contains($0) }.prefix(capacity))
-        var changed = false
+        let requested = store.data.toolbarActions
+        let visible = Set(requested.filter { $0 != .spacer }.prefix(capacity))
+        var changed = arrangeToolbar(ifNeeded: requested)
         for (action, button) in toolbarButtons {
             let hidden = !visible.contains(action)
             if button.isHidden != hidden { button.isHidden = hidden; changed = true }
         }
         if changed { rebuildToolsMenu() }
+    }
+
+    @discardableResult
+    private func arrangeToolbar(ifNeeded requested: [ToolbarAction]) -> Bool {
+        guard arrangedToolbarActions != requested else { return false }
+        arrangedToolbarActions = requested
+        controlStack.arrangedSubviews.forEach { controlStack.removeArrangedSubview($0); $0.removeFromSuperview() }
+        let ordered = requested + ToolbarAction.allCases.filter { !requested.contains($0) && $0 != .spacer }
+        for action in ordered {
+            if action == .spacer {
+                placedToolbarSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+                controlStack.addArrangedSubview(placedToolbarSpacer)
+            } else if let button = toolbarButtons[action] {
+                controlStack.addArrangedSubview(button)
+            }
+        }
+        if !requested.contains(.spacer) {
+            defaultToolbarSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            controlStack.addArrangedSubview(defaultToolbarSpacer)
+        }
+        controlStack.addArrangedSubview(toolsButton)
+        return true
     }
 
     override func viewDidLayout() {
@@ -481,7 +504,6 @@ final class BrowserViewController: NSViewController {
     @objc func newTab(_ sender: Any?) {
         let tab = insertTab(makeTab(pinnedID: nil, profileID: store.data.newTabProfileID), after: nil)
         select(tab)
-        focusAddressBar()
     }
 
     private func openInNewTab(_ url: URL, from opener: Tab? = nil) {
@@ -740,14 +762,18 @@ final class BrowserViewController: NSViewController {
     }
 
     @objc private func addressSubmitted(_ sender: NSTextField) {
-        guard let url = Self.url(from: sender.stringValue) else { return }
+        navigate(sender.stringValue)
+        addressPopover.close()
+    }
+
+    private func navigate(_ text: String) {
+        guard let url = Self.url(from: text) else { return }
         if let tab = selectedTab {
             if tab.homeURL == nil { tab.homeURL = url.absoluteString }
             tab.webView.load(URLRequest(url: url))
         } else {
             openInNewTab(url)
         }
-        addressPopover.close()
         if let webView = selectedTab?.webView { view.window?.makeFirstResponder(webView) }
     }
 
@@ -925,11 +951,11 @@ final class BrowserViewController: NSViewController {
     private func updateStartPage() {
         let show = selectedTab == nil || (selectedTab?.webView.url == nil && selectedTab?.webView.isLoading != true)
         guard show else { startPage?.isHidden = true; return }
-        let page = StartPage(tabs: store.data.pinnedTabs, open: { [weak self] id in
+        let page = StartPage(tabID: selectedTab.map(ObjectIdentifier.init), tabs: store.data.pinnedTabs, open: { [weak self] id in
             guard let self, let tab = self.tabs.first(where: { $0.pinnedID == id }) else { return }
             self.select(tab)
             self.focusContent()
-        }, search: { [weak self] in self?.focusAddressBar() })
+        }, navigate: { [weak self] text in self?.navigate(text) })
         if let startPage { startPage.rootView = page; startPage.isHidden = false }
         else {
             let host = NSHostingView(rootView: page)
