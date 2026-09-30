@@ -17,6 +17,7 @@ struct SavedNotionAgent: Codable, Identifiable, Hashable {
     var id: String
     var name: String
     var glyph: String = "✦"
+    var iconURL: String? = nil
 }
 
 enum TabIcon: Codable, Hashable {

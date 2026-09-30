@@ -47,8 +47,25 @@ struct NotionAgent: Decodable, Identifiable {
     let status: String
     let icon: Icon?
 
-    struct Icon: Decodable { let type: String; let emoji: String? }
+    struct Icon: Decodable {
+        let type: String
+        let emoji: String?
+        let file: URLValue?
+        let external: URLValue?
+        let custom_emoji: URLValue?
+        let custom_agent_avatar: Avatar?
+
+        struct URLValue: Decodable { let url: String }
+        struct Avatar: Decodable { let static_url: String; let animated_url: String? }
+
+        var imageURL: String? {
+            let value = custom_agent_avatar?.static_url ?? custom_emoji?.url ?? file?.url ?? external?.url
+            guard let value, URLComponents(string: value)?.scheme?.lowercased() == "https" else { return nil }
+            return value
+        }
+    }
     var glyph: String { icon?.emoji ?? "✦" }
+    var iconURL: String? { icon?.imageURL }
 }
 
 struct NotionAction: Decodable, Identifiable {
@@ -67,6 +84,16 @@ struct NotionThread: Decodable, Identifiable {
     let last_edited_time: String
     let pending_user_actions: [NotionAction]?
     var isRunning: Bool { status == "pending" || status == "queued" || status == "in_progress" }
+}
+
+enum NotionThreadAlertPolicy {
+    static func title(for thread: NotionThread, previousSignature: String?, hasBaseline: Bool) -> String? {
+        let signature = "\(thread.status):\(thread.last_edited_time)"
+        guard hasBaseline, previousSignature != signature else { return nil }
+        if thread.status == "requires_action" { return "確認が必要です" }
+        if thread.status == "completed" { return "返信が届きました" }
+        return nil
+    }
 }
 
 struct NotionMessage: Decodable, Identifiable {
@@ -275,7 +302,8 @@ final class NotionAgentsStore: ObservableObject {
     @Published private(set) var hasToken = NotionTokenStore.read() != nil
     private var timer: Timer?
     private var observed: [String: String] = [:]
-    private var hasBaseline = false
+    private var metadataChecked: Set<String> = []
+    private var baselinedAgentIDs: Set<String> = []
     private var refreshInProgress = false
     private var refreshQueued = false
 
@@ -286,7 +314,7 @@ final class NotionAgentsStore: ObservableObject {
             error = "トークンをキーチェーンに保存できませんでした。"; return
         }
         hasToken = NotionTokenStore.read() != nil
-        threads = []; messages = []; busyAgentIDs = []; observed = [:]; hasBaseline = false; error = nil
+        threads = []; messages = []; busyAgentIDs = []; observed = [:]; metadataChecked = []; baselinedAgentIDs = []; error = nil
         selectedAgentID = nil; selectedThreadID = nil
         if hasToken { start() }
         else { timer?.invalidate(); timer = nil }
@@ -295,6 +323,8 @@ final class NotionAgentsStore: ObservableObject {
     func registrationChanged() {
         let ids = Set(visibleAgents.map(\.id))
         busyAgentIDs.formIntersection(ids)
+        metadataChecked.formIntersection(ids)
+        baselinedAgentIDs.formIntersection(ids)
         observed = observed.filter { ids.contains(String($0.key.split(separator: ":").first ?? "")) }
         if !ids.contains(selectedAgentID ?? "") {
             selectedAgentID = visibleAgents.first?.id
@@ -344,13 +374,16 @@ final class NotionAgentsStore: ObservableObject {
                 guard visibleAgents.contains(where: { $0.id == agent.id }) else { continue }
                 activityText = "エージェントを確認中（\(index + 1)/\(registered.count)）"
                 let placeholder = "エージェント \(agent.id.prefix(8))"
-                if agent.name == placeholder {
+                if !metadataChecked.contains(agent.id) {
                     do {
                         if let metadata = try await api.agent(id: agent.id) {
-                            if let savedIndex = SettingsStore.shared.data.notionSavedAgents.firstIndex(where: { $0.id == agent.id }),
-                               SettingsStore.shared.data.notionSavedAgents[savedIndex].name == placeholder {
-                                SettingsStore.shared.data.notionSavedAgents[savedIndex].name = metadata.name
+                            metadataChecked.insert(agent.id)
+                            if let savedIndex = SettingsStore.shared.data.notionSavedAgents.firstIndex(where: { $0.id == agent.id }) {
+                                if SettingsStore.shared.data.notionSavedAgents[savedIndex].name == placeholder {
+                                    SettingsStore.shared.data.notionSavedAgents[savedIndex].name = metadata.name
+                                }
                                 SettingsStore.shared.data.notionSavedAgents[savedIndex].glyph = metadata.glyph
+                                SettingsStore.shared.data.notionSavedAgents[savedIndex].iconURL = metadata.iconURL
                             }
                         } else {
                             failures.append("\(agent.name): NotionでIDが見つかりません。IDと共有権限を確認してください。")
@@ -365,24 +398,18 @@ final class NotionAgentsStore: ObservableObject {
                     if thread.isRunning { running.insert(agent.id) }
                     let key = "\(agent.id):\(thread.id)"
                     let signature = "\(thread.status):\(thread.last_edited_time)"
-                    if hasBaseline, let old = observed[key], old != signature,
-                       SettingsStore.shared.data.notionNotificationsEnabled,
-                       thread.status == "requires_action" || thread.status == "completed" {
-                        var isReply = false
-                        if thread.status == "completed" {
-                            isReply = (try? await api.messages(threadID: thread.id).last?.role) == "agent"
-                        }
-                        if thread.status == "requires_action" || isReply {
-                            let title = thread.status == "requires_action" ? "確認が必要です" : "返信が届きました"
-                            noticeText = "\(agent.name): \(title)"
-                            alert = (agent.id, thread.id, title)
-                        }
+                    if SettingsStore.shared.data.notionNotificationsEnabled,
+                       let title = NotionThreadAlertPolicy.title(for: thread,
+                           previousSignature: observed[key], hasBaseline: baselinedAgentIDs.contains(agent.id)) {
+                        let name = visibleAgents.first(where: { $0.id == agent.id })?.name ?? agent.name
+                        noticeText = "\(name): \(title)"
+                        alert = (agent.id, thread.id, title)
                     }
                     observed[key] = signature
                 }
+                baselinedAgentIDs.insert(agent.id)
             }
             busyAgentIDs = running.intersection(Set(visibleAgents.map(\.id)))
-            hasBaseline = true
             if let selectedThreadID {
                 activityText = "会話を読み込み中…"
                 let fetched = try await api.messages(threadID: selectedThreadID)
@@ -509,7 +536,7 @@ struct NotionAgentsPanel: View {
                                 ForEach(store.visibleAgents) { agent in
                                     Button { Task { @MainActor in await store.selectAgent(agent.id) } } label: {
                                         HStack(spacing: 7) {
-                                            Text(agent.glyph).frame(width: 22)
+                                            NotionAgentAvatar(agent: agent, size: 22)
                                             Text(agent.name).lineLimit(1)
                                             Spacer(minLength: 0)
                                             if store.busyAgentIDs.contains(agent.id) { ProgressView().controlSize(.mini) }
@@ -560,12 +587,7 @@ struct NotionAgentsPanel: View {
                                             }
                                         }
                                         ForEach(store.messages) { message in
-                                            VStack(alignment: message.role == "user" ? .trailing : .leading, spacing: 3) {
-                                                Text(message.role == "user" ? "あなた" : agent.name).font(.caption2).foregroundStyle(.secondary)
-                                                Text(message.content).textSelection(.enabled)
-                                                    .padding(10)
-                                                    .background(message.role == "user" ? Color.blue.opacity(0.24) : Color.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 12))
-                                            }.frame(maxWidth: .infinity, alignment: message.role == "user" ? .trailing : .leading)
+                                            NotionMessageView(message: message, agentName: agent.name)
                                         }
                                         ForEach(store.threads.first(where: { $0.id == store.selectedThreadID })?.pending_user_actions ?? []) { action in
                                             VStack(alignment: .leading, spacing: 8) {
@@ -752,7 +774,7 @@ struct NotionAgentsSettings: View {
 
     private func save(_ result: NotionAgent) {
         guard !settings.data.notionSavedAgents.contains(where: { $0.id == result.id }) else { return }
-        settings.data.notionSavedAgents.append(SavedNotionAgent(id: result.id, name: result.name, glyph: result.glyph))
+        settings.data.notionSavedAgents.append(SavedNotionAgent(id: result.id, name: result.name, glyph: result.glyph, iconURL: result.iconURL))
         agents.registrationChanged()
     }
 

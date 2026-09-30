@@ -1,5 +1,30 @@
 import AppKit
 import Combine
+import SwiftUI
+
+private struct RunningAgentBadge: View {
+    let agent: SavedNotionAgent?
+    @State private var rotating = false
+
+    var body: some View {
+        ZStack {
+            if let agent {
+                NotionAgentAvatar(agent: agent, size: 22)
+                Circle().trim(from: 0.08, to: 0.82)
+                    .stroke(AngularGradient(colors: [.purple.opacity(0.2), .purple, .cyan], center: .center),
+                            style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                    .rotationEffect(.degrees(rotating ? 360 : 0))
+                    .animation(.linear(duration: 1.1).repeatForever(autoreverses: false), value: rotating)
+            }
+        }
+        .frame(width: 30, height: 30)
+        .onAppear { rotating = agent != nil }
+        .onChange(of: agent?.id) { _, id in
+            rotating = false
+            if id != nil { DispatchQueue.main.async { rotating = true } }
+        }
+    }
+}
 
 /// Borderless panel that sits over the menu bar, on top of the notch.
 final class NotchPanel: NSPanel {
@@ -50,7 +75,7 @@ final class NotchRootView: NSView {
     static let wingWidth: CGFloat = 40
     private let badgeIcon = NSImageView()
     private let badgeLabel = NSTextField(labelWithString: "")
-    private let agentLabel = NSTextField(labelWithString: "")
+    private let agentBadge = NSHostingView(rootView: RunningAgentBadge(agent: nil))
     private var hasRunningAgent = false
 
     override init(frame: NSRect) {
@@ -67,10 +92,8 @@ final class NotchRootView: NSView {
             .withSymbolConfiguration(.init(pointSize: 13, weight: .semibold))
         badgeLabel.font = .monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
         badgeLabel.alignment = .center
-        agentLabel.font = .systemFont(ofSize: 17)
-        agentLabel.alignment = .center
-        agentLabel.textColor = .systemPurple
-        addSubview(agentLabel)
+        agentBadge.isHidden = true
+        addSubview(agentBadge)
         for view in [badgeIcon, badgeLabel] as [NSView] {
             view.alphaValue = 0
             addSubview(view)
@@ -97,11 +120,11 @@ final class NotchRootView: NSView {
         badgeLabel.alphaValue = alpha
     }
 
-    func setRunningAgent(_ glyph: String?) {
-        hasRunningAgent = glyph != nil
-        agentLabel.stringValue = glyph ?? ""
-        agentLabel.isHidden = glyph == nil
-        badgeIcon.alphaValue = glyph == nil && badgeLabel.alphaValue > 0 ? 1 : 0
+    func setRunningAgent(_ agent: SavedNotionAgent?) {
+        hasRunningAgent = agent != nil
+        agentBadge.rootView = RunningAgentBadge(agent: agent)
+        agentBadge.isHidden = agent == nil
+        badgeIcon.alphaValue = agent == nil && badgeLabel.alphaValue > 0 ? 1 : 0
     }
 
     override func updateTrackingAreas() {
@@ -142,7 +165,7 @@ final class NotchRootView: NSView {
         let wing = Self.wingWidth
         let labelHeight = badgeLabel.intrinsicContentSize.height
         badgeIcon.frame = NSRect(x: 4, y: ((bounds.height - 18) / 2).rounded(), width: wing - 4, height: 18)
-        agentLabel.frame = NSRect(x: 3, y: ((bounds.height - 24) / 2).rounded(), width: wing - 4, height: 24)
+        agentBadge.frame = NSRect(x: 4, y: ((bounds.height - 30) / 2).rounded(), width: 30, height: 30)
         badgeLabel.frame = NSRect(x: bounds.width - wing, y: ((bounds.height - labelHeight) / 2).rounded(), width: wing - 4, height: labelHeight)
         content.frame = NSRect(
             x: ((bounds.width - contentSize.width) / 2).rounded(),
@@ -161,6 +184,8 @@ final class NotchController: NSObject, NSWindowDelegate {
     private unowned let manager: NotchManager
     private(set) var isExpanded = false
     private var hoverTimer: Timer?
+    private var notificationHoldTimer: Timer?
+    private var notificationHoldUntil: Date?
     private let transition = NotchTransition()
     private var pointerInside = false
     private(set) var shelfVisible = false
@@ -299,7 +324,7 @@ final class NotchController: NSObject, NSWindowDelegate {
         root.contentSize = expandedSize
         layoutContent()
         root.setBadge(minutes: manager.minutesToNextEvent, visible: !isExpanded)
-        root.setRunningAgent(isExpanded ? nil : manager.runningAgentGlyph)
+        root.setRunningAgent(isExpanded ? nil : manager.runningAgent)
         animate(to: isExpanded ? expandedFrame : collapsedFrame,
                 radius: isExpanded ? 18 : 10, contentAlpha: isExpanded ? 1 : 0, animated: animated)
     }
@@ -346,9 +371,23 @@ final class NotchController: NSObject, NSWindowDelegate {
         }
         panel.hasShadow = false
         root.setBadge(minutes: manager.minutesToNextEvent, visible: true)
-        root.setRunningAgent(manager.runningAgentGlyph)
+        root.setRunningAgent(manager.runningAgent)
         animate(to: collapsedFrame, radius: 10, contentAlpha: 0, animated: animated)
         manager.didCollapse()
+    }
+
+    func holdForNotification() {
+        notificationHoldUntil = Date().addingTimeInterval(10)
+        notificationHoldTimer?.invalidate()
+        notificationHoldTimer = .scheduledTimer(withTimeInterval: 10, repeats: false) { [weak self] _ in
+            self?.notificationHoldUntil = nil
+            self?.resumeHoverCloseIfNeeded()
+        }
+    }
+
+    private var isHoldingNotification: Bool {
+        guard let notificationHoldUntil else { return false }
+        return notificationHoldUntil > Date()
     }
 
     func showShelf() {
@@ -429,10 +468,12 @@ final class NotchController: NSObject, NSWindowDelegate {
                 self.expand(focus: false)
             }
         } else {
-            guard isExpanded, !manager.keepOpen, !manager.isShowingModal, !manager.dragActive else { return }
+            guard isExpanded, !manager.keepOpen, !manager.isShowingModal, !manager.dragActive,
+                  !isHoldingNotification else { return }
             scheduleHover(after: motion.closeDelay) { [weak self] in
                 guard let self, !self.pointerInside, !self.manager.keepOpen,
-                      !self.manager.isShowingModal, !self.manager.dragActive else { return }
+                      !self.manager.isShowingModal, !self.manager.dragActive,
+                      !self.isHoldingNotification else { return }
                 self.collapse()
             }
         }
@@ -447,7 +488,8 @@ final class NotchController: NSObject, NSWindowDelegate {
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        guard !manager.keepOpen, !manager.isShowingModal, !manager.dragActive, !shelfVisible, !panel.frame.contains(NSEvent.mouseLocation) else { return }
+        guard !manager.keepOpen, !manager.isShowingModal, !manager.dragActive,
+              !isHoldingNotification, !shelfVisible, !panel.frame.contains(NSEvent.mouseLocation) else { return }
         // Preserve the timer already started by mouseExited instead of closing early.
         if hoverTimer?.isValid != true { hoverChanged(false) }
     }
@@ -514,7 +556,7 @@ final class NotchManager {
         }.store(in: &cancellables)
         notion.$alert.receive(on: RunLoop.main).sink { [weak self] notice in
             guard let self, let notice else { return }
-            self.showNotion(focus: false)
+            self.showNotion(focus: false, notification: true)
             Task { @MainActor in
                 await self.notion.selectAgent(notice.agentID)
                 await self.notion.selectThread(notice.threadID)
@@ -626,14 +668,15 @@ final class NotchManager {
         target.showShelf()
     }
 
-    var runningAgentGlyph: String? {
-        notion.visibleAgents.first(where: { notion.busyAgentIDs.contains($0.id) })?.glyph
+    var runningAgent: SavedNotionAgent? {
+        notion.visibleAgents.first(where: { notion.busyAgentIDs.contains($0.id) })
     }
 
-    func showNotion(on target: NotchController? = nil, focus: Bool = true) {
+    func showNotion(on target: NotchController? = nil, focus: Bool = true, notification: Bool = false) {
         let target = target ?? orderedControllers.first { $0.screen.frame.contains(NSEvent.mouseLocation) } ?? orderedControllers.first
         guard let target else { return }
         target.expand(focus: focus)
+        if notification { target.holdForNotification() }
         browser.showNotion()
         target.panel.orderFrontRegardless()
     }

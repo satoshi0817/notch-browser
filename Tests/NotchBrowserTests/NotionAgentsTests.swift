@@ -21,6 +21,47 @@ final class NotionAgentsTests: XCTestCase {
         XCTAssertEqual(restored.notionSavedAgents, [SavedNotionAgent(id: "agent-1", name: "Writer")])
     }
 
+    func testReplyAlertCoversNewAndCompletedThreadsWithoutRealertingOnSameState() throws {
+        func thread(_ status: String, _ edited: String) throws -> NotionThread {
+            let json = """
+            {"id":"thread","title":"Chat","status":"\(status)","last_edited_time":"\(edited)"}
+            """
+            return try JSONDecoder().decode(NotionThread.self, from: Data(json.utf8))
+        }
+        let complete = try thread("completed", "2026-09-30T00:00:02Z")
+        XCTAssertNil(NotionThreadAlertPolicy.title(for: complete, previousSignature: nil, hasBaseline: false))
+        XCTAssertEqual(NotionThreadAlertPolicy.title(for: complete, previousSignature: nil, hasBaseline: true), "返信が届きました")
+        XCTAssertEqual(NotionThreadAlertPolicy.title(for: complete, previousSignature: "pending:2026-09-30T00:00:01Z", hasBaseline: true), "返信が届きました")
+        XCTAssertNil(NotionThreadAlertPolicy.title(for: complete, previousSignature: "completed:2026-09-30T00:00:02Z", hasBaseline: true))
+        XCTAssertEqual(NotionThreadAlertPolicy.title(for: try thread("requires_action", "2026-09-30T00:00:03Z"), previousSignature: nil, hasBaseline: true), "確認が必要です")
+    }
+
+    func testNotionReplyMarkupProducesLinksListsAndCopyableText() {
+        let raw = """
+        <mention url="https://app.dev.notion.com/p/example">Business → Demo</mention> です。[^https://app.dev.notion.com/p/example]
+
+        - **Security** の紹介
+        1. [デモを見る](https://www.loom.com/share/example)
+
+        <data_artifact toolResultId="tool-458" viewType="table" />
+        """
+        let blocks = NotionReplyFormatter.blocks(raw)
+        XCTAssertEqual(blocks, [.paragraph("[Business → Demo](https://app.dev.notion.com/p/example) です。[出典](https://app.dev.notion.com/p/example)"),
+                                .bullet("**Security** の紹介"), .numbered("1", "[デモを見る](https://www.loom.com/share/example)"), .artifact])
+        let copied = NotionReplyFormatter.copyText(raw)
+        XCTAssertFalse(copied.contains("<mention"))
+        XCTAssertFalse(copied.contains("<data_artifact"))
+        XCTAssertTrue(copied.contains("表データ（Notionで確認）"))
+    }
+
+    func testCustomAgentAvatarURLIsDecoded() throws {
+        let json = """
+        {"id":"agent","name":"Demo","agent_type":"custom_agent","status":"active","icon":{"type":"custom_agent_avatar","custom_agent_avatar":{"static_url":"https://images.example.com/avatar.png","animated_url":"https://images.example.com/avatar.gif"}}}
+        """
+        let agent = try JSONDecoder().decode(NotionAgent.self, from: Data(json.utf8))
+        XCTAssertEqual(agent.iconURL, "https://images.example.com/avatar.png")
+    }
+
     func testURLAndIDParsingRejectsOtherSitesAndNormalizesUUIDs() {
         let id = "3c90c3cc-0d44-4b50-8888-8dd25736052a"
         XCTAssertEqual(NotionAgentInput.id(from: id), id)
