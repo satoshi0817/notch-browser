@@ -22,23 +22,94 @@ enum OnboardingState {
 }
 
 struct OnboardingChoices {
+    var pinnedTabs: [PinnedTab]
+    var enabledDisplayIDs: Set<String>
+    var displayPreset: DisplayPreset?
+    var displayPresetChanged = false
+    var motion: MotionSettings
     var automaticShelf: Bool
     var calendarCountdown: Bool
     var notionButton: Bool
     var hideFromCapture: Bool
+    var externalBrowserBundleID: String?
 
-    init(settings: SettingsData) {
+    init(settings: SettingsData, screens: [NSScreen] = NSScreen.screens) {
+        pinnedTabs = settings.pinnedTabs
+        let enabledIDs = Set(screens.filter { Self.currentDisplay($0, in: settings, screens: screens).enabled }.map(\.displayUUID))
+        enabledDisplayIDs = enabledIDs
+        if let screen = screens.first(where: { enabledIDs.contains($0.displayUUID) }) {
+            let current = Self.currentDisplay(screen, in: settings, screens: screens)
+            displayPreset = DisplayPreset.allCases.first {
+                let preset = $0.settings(for: screen, enabled: true)
+                return preset.width == current.width && preset.height == current.height
+            }
+        } else { displayPreset = nil }
+        motion = settings.motion
         automaticShelf = settings.shelfTrigger != .manual
         calendarCountdown = settings.countdownEnabled
         notionButton = settings.toolbarActions.contains(.notion)
         hideFromCapture = settings.hideFromScreenCapture
+        externalBrowserBundleID = settings.externalBrowserBundleID
     }
 
-    func apply(to settings: inout SettingsData) {
+    private static func currentDisplay(_ screen: NSScreen, in settings: SettingsData, screens: [NSScreen]) -> DisplaySettings {
+        if let saved = settings.displays[screen.displayUUID] { return saved }
+        let enabled = screen.hasNotch || (!screens.contains(where: \.hasNotch) && screen == screens.first)
+        return DisplaySettings(enabled: enabled, width: min(960, screen.frame.width - 80).rounded(),
+                               height: min(660, screen.frame.height * 0.75).rounded())
+    }
+
+    mutating func setDisplay(_ id: String, enabled: Bool) {
+        if enabled { enabledDisplayIDs.insert(id) }
+        else if enabledDisplayIDs.count > 1 { enabledDisplayIDs.remove(id) }
+    }
+
+    mutating func selectDisplayPreset(_ preset: DisplayPreset) {
+        displayPreset = preset
+        displayPresetChanged = true
+    }
+
+    @discardableResult mutating func addPage(name: String, address: String) -> Bool {
+        let raw = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty, !raw.contains(where: \.isWhitespace) else { return false }
+        let input = raw.contains("://") ? raw : "https://" + raw
+        guard let components = URLComponents(string: input),
+              let scheme = components.scheme?.lowercased(), ["http", "https"].contains(scheme),
+              let host = components.host, host.contains(".") || host == "localhost",
+              components.user == nil, components.password == nil,
+              let url = components.url else { return false }
+        func pageKey(_ url: URL) -> String {
+            var parts = URLComponents(url: url, resolvingAgainstBaseURL: false)
+            if parts?.path == "" { parts?.path = "/" }
+            return parts?.url?.absoluteString ?? url.absoluteString
+        }
+        if pinnedTabs.contains(where: { URL(string: $0.url).map(pageKey) == pageKey(url) }) { return false }
+        let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        pinnedTabs.append(PinnedTab(name: title.isEmpty ? host : title, url: url.absoluteString))
+        return true
+    }
+
+    func apply(to settings: inout SettingsData, screens: [NSScreen] = NSScreen.screens) {
+        settings.pinnedTabs = pinnedTabs
+        for screen in screens {
+            let id = screen.displayUUID
+            let enabled = enabledDisplayIDs.contains(id)
+            var current = Self.currentDisplay(screen, in: settings, screens: screens)
+            guard current.enabled != enabled || displayPresetChanged else { continue }
+            if displayPresetChanged, let displayPreset {
+                let opacity = current.idleOpacity
+                current = displayPreset.settings(for: screen, enabled: enabled)
+                current.idleOpacity = opacity
+            }
+            current.enabled = enabled
+            settings.displays[id] = current
+        }
+        settings.motion = motion
         if !automaticShelf { settings.shelfTrigger = .manual }
         else if settings.shelfTrigger == .manual { settings.shelfTrigger = .automatic }
         settings.countdownEnabled = calendarCountdown
         settings.hideFromScreenCapture = hideFromCapture
+        settings.externalBrowserBundleID = externalBrowserBundleID
         if notionButton && !settings.toolbarActions.contains(.notion) {
             let position = settings.toolbarActions.firstIndex(of: .settings) ?? settings.toolbarActions.count
             settings.toolbarActions.insert(.notion, at: position)
@@ -87,11 +158,13 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
 }
 
 private enum OnboardingStep: Int, CaseIterable {
-    case welcome, controls, personalize, ready
+    case welcome, pages, display, motion, personalize, ready
     var title: String {
         switch self {
         case .welcome: "ようこそ"
-        case .controls: "基本操作"
+        case .pages: "固定ページ"
+        case .display: "表示場所"
+        case .motion: "動き"
         case .personalize: "使う機能"
         case .ready: "準備完了"
         }
@@ -99,7 +172,9 @@ private enum OnboardingStep: Int, CaseIterable {
     var subtitle: String {
         switch self {
         case .welcome: "必要なときだけ、すぐそばに。"
-        case .controls: "ノッチから開いて、すぐ戻れます。"
+        case .pages: "すぐ開きたいページを置きましょう。"
+        case .display: "表示する画面と大きさを選びます。"
+        case .motion: "ノッチの開閉を試しながら選べます。"
         case .personalize: "まず使うものだけ選びましょう。"
         case .ready: "いつでも設定から変更できます。"
         }
@@ -107,7 +182,9 @@ private enum OnboardingStep: Int, CaseIterable {
     var symbol: String {
         switch self {
         case .welcome: "sparkles"
-        case .controls: "cursorarrow.motionlines"
+        case .pages: "square.stack"
+        case .display: "display"
+        case .motion: "waveform.path"
         case .personalize: "slider.horizontal.3"
         case .ready: "checkmark"
         }
@@ -115,8 +192,13 @@ private enum OnboardingStep: Int, CaseIterable {
 }
 
 private struct OnboardingView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var step = OnboardingStep.welcome
     @State private var choices: OnboardingChoices
+    @State private var pageName = ""
+    @State private var pageAddress = ""
+    @State private var pageError: String?
+    private let browsers = ExternalBrowserLauncher.installed()
     let onFinish: (OnboardingChoices, OnboardingDestination) -> Void
     let onSkip: () -> Void
 
@@ -131,7 +213,7 @@ private struct OnboardingView: View {
             sidebar
             VStack(alignment: .leading, spacing: 0) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("STEP \(step.rawValue + 1) / 4")
+                    Text("STEP \(step.rawValue + 1) / \(OnboardingStep.allCases.count)")
                         .font(.caption.weight(.bold)).tracking(2).foregroundStyle(.cyan)
                     Text(step.title).font(.system(size: 31, weight: .bold, design: .rounded))
                     Text(step.subtitle).font(.callout).foregroundStyle(.secondary)
@@ -141,14 +223,18 @@ private struct OnboardingView: View {
                     Group {
                         switch step {
                         case .welcome: welcome
-                        case .controls: controls
+                        case .pages: pages
+                        case .display: display
+                        case .motion: motion
                         case .personalize: personalize
                         case .ready: ready
                         }
                     }
+                    .id(step)
+                    .transition(reduceMotion ? .opacity : .asymmetric(insertion: .opacity.combined(with: .offset(x: 14)), removal: .opacity))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 34).padding(.bottom, 18)
-                }
+                }.id(step)
 
                 Divider()
                 HStack {
@@ -159,7 +245,7 @@ private struct OnboardingView: View {
                     }
                     Spacer()
                     if step != .welcome {
-                        Button("戻る") { step = OnboardingStep(rawValue: step.rawValue - 1) ?? .welcome }
+                        Button("戻る") { move(to: OnboardingStep(rawValue: step.rawValue - 1) ?? .welcome) }
                             .accessibilityLabel("前のステップに戻る")
                     }
                     if step == .ready {
@@ -169,7 +255,7 @@ private struct OnboardingView: View {
                             .buttonStyle(OnboardingPrimaryButtonStyle()).keyboardShortcut(.defaultAction)
                             .accessibilityLabel("ノッチを開いてオンボーディングを完了")
                     } else {
-                        Button("次へ") { step = OnboardingStep(rawValue: step.rawValue + 1) ?? .ready }
+                        Button("次へ") { move(to: OnboardingStep(rawValue: step.rawValue + 1) ?? .ready) }
                             .buttonStyle(OnboardingPrimaryButtonStyle()).keyboardShortcut(.defaultAction)
                             .accessibilityLabel("次のステップへ")
                     }
@@ -182,6 +268,11 @@ private struct OnboardingView: View {
         .frame(width: 840, height: 570)
         .preferredColorScheme(.dark)
         .tint(.cyan)
+    }
+
+    private func move(to next: OnboardingStep) {
+        if reduceMotion { step = next }
+        else { withAnimation(.easeInOut(duration: 0.24)) { step = next } }
     }
 
     private var sidebar: some View {
@@ -217,21 +308,137 @@ private struct OnboardingView: View {
     }
 
     private var welcome: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: 16) {
             NotchIllustration()
             Text("ブラウザと、ちょっとした道具をノッチに。")
                 .font(.system(size: 22, weight: .semibold, design: .rounded))
-            Text("いつものページ、ファイル棚、メモ、Notionエージェント。使いたいときに開き、離れると作業に戻れます。まずは基本操作を見て、使う機能を選びましょう。")
+            Text("いつものページ、ファイル棚、メモ、Notionエージェント。まずはよく使うページとノッチの見え方を決めましょう。")
                 .font(.callout).foregroundStyle(.secondary).lineSpacing(5)
+            HStack(alignment: .top, spacing: 10) {
+                instruction("cursorarrow.motionlines", title: "カーソルで開く", detail: "画面上端に乗せ、クリックで入力")
+                instruction("keyboard", title: "⌃⌥N でも開く", detail: "どのアプリからでも呼び出せます")
+            }
         }
     }
 
-    private var controls: some View {
-        VStack(spacing: 11) {
-            instruction("cursorarrow.motionlines", title: "カーソルを乗せる", detail: "画面上端のノッチに近づくと開きます。クリックすると入力できます。")
-            instruction("keyboard", title: "⌃⌥N で開く・閉じる", detail: "どのアプリを使っていても、すぐ呼び出せます。")
-            instruction("arrow.uturn.backward", title: "離れると閉じる", detail: "閉じるまでの時間や開閉の動きは設定で調整できます。")
-            instruction("tray.and.arrow.down", title: "ファイルを置く", detail: "ファイルをノッチへドラッグすると棚に並びます。元ファイルはそのままです。")
+    private var pages: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("固定ページはノッチの上部に並びます。後から設定で名前や順番も変えられます。")
+                .font(.caption).foregroundStyle(.secondary)
+            ForEach(choices.pinnedTabs) { page in
+                HStack(spacing: 11) {
+                    Image(systemName: "globe").foregroundStyle(.cyan).frame(width: 24)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(page.name).font(.subheadline.weight(.medium))
+                        Text(page.url).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                    Button { choices.pinnedTabs.removeAll { $0.id == page.id } } label: {
+                        Image(systemName: "minus.circle").foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain).help("\(page.name)を外す")
+                    .accessibilityLabel("\(page.name)を固定ページから外す")
+                }
+                .padding(11).background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 12))
+            }
+            if choices.pinnedTabs.isEmpty {
+                Text("固定ページなしでも使えます。新規タブから検索やURLの入力ができます。")
+                    .font(.caption).foregroundStyle(.secondary).padding(12)
+            }
+            HStack(spacing: 9) {
+                TextField("名前（省略可）", text: $pageName).frame(width: 140)
+                TextField("example.com", text: $pageAddress)
+                    .onSubmit(addPage)
+                Button("追加", action: addPage).disabled(pageAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            .textFieldStyle(.roundedBorder)
+            if let pageError { Text(pageError).font(.caption).foregroundStyle(.red) }
+            HStack(spacing: 8) {
+                Text("おすすめ").font(.caption).foregroundStyle(.secondary)
+                quickPage("Notion", url: "https://www.notion.so/")
+                quickPage("ChatGPT", url: "https://chatgpt.com/")
+            }
+        }
+    }
+
+    private func addPage() {
+        guard choices.addPage(name: pageName, address: pageAddress) else {
+            pageError = "URLを確認してください。http(s)のページを1つずつ追加できます。"
+            return
+        }
+        pageName = ""; pageAddress = ""; pageError = nil
+    }
+
+    private func quickPage(_ name: String, url: String) -> some View {
+        let added = choices.pinnedTabs.contains { URL(string: $0.url)?.host() == URL(string: url)?.host() }
+        return Button { _ = choices.addPage(name: name, address: url); pageError = nil } label: {
+            Label(name, systemImage: added ? "checkmark" : "plus")
+        }
+        .buttonStyle(.bordered).controlSize(.small).disabled(added)
+    }
+
+    private var display: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("表示するディスプレイ").font(.headline)
+                ForEach(NSScreen.screens, id: \.displayUUID) { screen in
+                    let id = screen.displayUUID
+                    let name = screen.localizedName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    Toggle(isOn: Binding(
+                        get: { choices.enabledDisplayIDs.contains(id) },
+                        set: { choices.setDisplay(id, enabled: $0) })) {
+                            Label(name.isEmpty ? "ディスプレイ \((NSScreen.screens.firstIndex(of: screen) ?? 0) + 1)" : name,
+                                  systemImage: screen.hasNotch ? "laptopcomputer" : "display")
+                        }
+                        .disabled(choices.enabledDisplayIDs.count == 1 && choices.enabledDisplayIDs.contains(id))
+                        .padding(10)
+                        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 10))
+                }
+                Text("少なくとも1つの画面に表示します。後から画面ごとに細かく調整できます。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                Text("開いたときの大きさ").font(.headline)
+                HStack(spacing: 10) {
+                    ForEach(DisplayPreset.allCases) { preset in
+                        PresetCard(title: preset.title, subtitle: displaySize(for: preset),
+                                   symbol: preset.symbol, selected: choices.displayPreset == preset) {
+                            choices.selectDisplayPreset(preset)
+                        }
+                    }
+                }
+                if choices.displayPreset == nil {
+                    Text("現在のサイズを維持中。カードを選ぶと変更します。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func displaySize(for preset: DisplayPreset) -> String {
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return "表示サイズを選ぶ" }
+        let size = preset.settings(for: screen, enabled: true)
+        return "\(Int(size.width)) × \(Int(size.height))"
+    }
+
+    private var motion: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            MotionPreview(settings: choices.motion, autoPlay: true)
+                .padding(14).background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 14))
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                ForEach(MotionPreset.allCases) { preset in
+                    PresetCard(title: preset.title, subtitle: preset.subtitle, symbol: preset.symbol,
+                               selected: choices.motion == preset.settings) {
+                        choices.motion = preset.settings
+                    }
+                }
+            }
+            if !MotionPreset.allCases.contains(where: { $0.settings == choices.motion }) {
+                Text("現在のカスタム設定を維持中。カードを選ぶと変更します。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Text("選ぶたびに上で再生します。macOSの「視差効果を減らす」が有効な場合は動きを省きます。")
+                .font(.caption).foregroundStyle(.secondary)
         }
     }
 
@@ -256,6 +463,22 @@ private struct OnboardingView: View {
             option("calendar", title: "次の予定を表示", detail: "カレンダーへのアクセスは、完了後に必要なときだけ確認します。", isOn: $choices.calendarCountdown)
             option("sparkles.rectangle.stack", title: "Notionボタンを置く", detail: "接続は後から設定します。使わない場合もメニューから開けます。", isOn: $choices.notionButton)
             option("eye.slash", title: "画面共有から隠す", detail: "対応する画面共有・録画ではノッチを映しません。", isOn: $choices.hideFromCapture)
+            HStack {
+                Image(systemName: "safari").frame(width: 28).foregroundStyle(.cyan)
+                Picker("ブラウザで開く先", selection: $choices.externalBrowserBundleID) {
+                    Text("システムのデフォルト").tag(nil as String?)
+                    ForEach(browsers) { browser in
+                        Text(browser.name).tag(Optional(browser.id))
+                    }
+                    if let selected = choices.externalBrowserBundleID,
+                       !browsers.contains(where: { $0.id == selected }) {
+                        Text("現在の設定を維持").tag(Optional(selected))
+                    }
+                }
+            }
+            .padding(11).background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 14))
+            Text("リンクやタブの右クリックからブラウザで開くときに使います。")
+                .font(.caption).foregroundStyle(.secondary)
         }
     }
 
@@ -290,6 +513,9 @@ private struct OnboardingView: View {
             .background(.green.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
             VStack(alignment: .leading, spacing: 12) {
                 summary("ブラウザ", "ノッチにカーソルを乗せるか、⌃⌥Nで開く")
+                summary("固定ページ", "\(choices.pinnedTabs.count)件")
+                summary("サイズ", choices.displayPreset?.title ?? "現在の設定")
+                summary("動き", MotionPreset.allCases.first(where: { $0.settings == choices.motion })?.title ?? "現在の設定")
                 summary("ファイル棚", choices.automaticShelf ? "ドラッグ時に自動で表示" : "メニューから手動で開く")
                 summary("次の予定", choices.calendarCountdown ? "表示する" : "表示しない")
                 if choices.notionButton {
