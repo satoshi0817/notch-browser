@@ -64,6 +64,24 @@ final class FileShelfTests: XCTestCase {
         XCTAssertEqual(ShelfTilesView.allowedOperations(for: .withinApplication), .copy)
     }
 
+    @MainActor func testCollectionDropAddsFileToEmptyShelf() throws {
+        _ = NSApplication.shared
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("dropped.txt")
+        try Data("dropped".utf8).write(to: url)
+        let store = ShelfStore(file: directory.appendingPathComponent("shelf.json"))
+        let controller = ShelfViewController(store: store)
+        _ = controller.view
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name(UUID().uuidString))
+        XCTAssertTrue(pasteboard.writeObjects([url as NSURL]))
+        let info = ShelfTestDraggingInfo(pasteboard: pasteboard)
+        XCTAssertTrue(controller.collectionView(controller.tiles, acceptDrop: info,
+                                                indexPath: IndexPath(item: 0, section: 0), dropOperation: .before))
+        XCTAssertEqual(store.entries.map(\.url), [url])
+    }
+
     @MainActor func testShelfUsesCompactNotchAndPreservesExpandedBrowser() throws {
         _ = NSApplication.shared
         let screen = try XCTUnwrap(NSScreen.screens.first)
@@ -205,4 +223,26 @@ final class FileShelfTests: XCTestCase {
         XCTAssertFalse(controller.isExpanded)
     }
 
+}
+
+@MainActor private final class ShelfTestDraggingInfo: NSObject, @preconcurrency NSDraggingInfo {
+    let draggingPasteboard: NSPasteboard
+    init(pasteboard: NSPasteboard) { self.draggingPasteboard = pasteboard }
+    var draggingDestinationWindow: NSWindow? { nil }
+    var draggingSourceOperationMask: NSDragOperation { .copy }
+    var draggingLocation: NSPoint { .zero }
+    var draggedImageLocation: NSPoint { .zero }
+    var draggedImage: NSImage? { nil }
+    var draggingSource: Any? { nil }
+    var draggingSequenceNumber: Int { 1 }
+    func slideDraggedImage(to screenPoint: NSPoint) {}
+    override func namesOfPromisedFilesDropped(atDestination dropDestination: URL) -> [String]? { nil }
+    var draggingFormation: NSDraggingFormation = .default
+    var animatesToDestination = false
+    var numberOfValidItemsForDrop = 0
+    func enumerateDraggingItems(options: NSDraggingItemEnumerationOptions, for view: NSView?,
+                                classes classArray: [AnyClass], searchOptions: [NSPasteboard.ReadingOptionKey: Any],
+                                using block: @escaping (NSDraggingItem, Int, UnsafeMutablePointer<ObjCBool>) -> Void) {}
+    var springLoadingHighlight: NSSpringLoadingHighlight { .none }
+    func resetSpringLoading() {}
 }
