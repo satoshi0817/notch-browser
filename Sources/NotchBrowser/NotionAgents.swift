@@ -79,6 +79,30 @@ struct NotionMessage: Decodable, Identifiable {
 
 struct NotionInvocation: Decodable { let thread_id: String; let status: String }
 
+enum NotionAgentInput {
+    static func id(from input: String) -> String? {
+        let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        let candidate: String
+        if let url = URLComponents(string: value), let scheme = url.scheme?.lowercased(),
+           ["http", "https"].contains(scheme) {
+            guard let host = url.host?.lowercased(),
+                  ["notion.so", "www.notion.so", "notion.com", "www.notion.com", "app.notion.com"].contains(host) else { return nil }
+            candidate = url.path.split(separator: "/").last.map(String.init) ?? ""
+        } else if value.contains("://") { return nil }
+        else { candidate = value }
+        let suffix = candidate.split(separator: "-").last.map(String.init) ?? candidate
+        let compact = suffix.replacingOccurrences(of: "-", with: "")
+        if compact.count == 32, compact.allSatisfy(\.isHexDigit) {
+            let value = compact.lowercased()
+            return "\(value.prefix(8))-\(value.dropFirst(8).prefix(4))-\(value.dropFirst(12).prefix(4))-\(value.dropFirst(16).prefix(4))-\(value.dropFirst(20))"
+        }
+        if let uuid = UUID(uuidString: candidate) { return uuid.uuidString.lowercased() }
+        guard !value.contains("://"), candidate.count >= 8, candidate.count <= 128,
+              candidate.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_" || $0 == "-") }) else { return nil }
+        return candidate
+    }
+}
+
 enum NotionAPIError: LocalizedError {
     case missingToken, invalidResponse, server(Int, String)
     var errorDescription: String? {
@@ -116,16 +140,21 @@ struct NotionAgentsAPI {
 
     private struct NotionServerError: Decodable { let message: String }
 
-    func agents() async throws -> [NotionAgent] {
-        var all: [NotionAgent] = [], cursor: String?
-        repeat {
-            var query = [URLQueryItem(name: "page_size", value: "100")]
-            if let cursor { query.append(.init(name: "start_cursor", value: cursor)) }
-            let page: NotionPage<NotionAgent> = try await request("agents", query: query)
-            all += page.results
-            cursor = page.has_more ? page.next_cursor : nil
-        } while cursor != nil
-        return all.filter { $0.agent_type == "custom" || $0.agent_type == "custom_agent" }
+    func searchAgents(named name: String, cursor: String? = nil) async throws -> NotionPage<NotionAgent> {
+        var query = [URLQueryItem(name: "page_size", value: "50"), URLQueryItem(name: "query", value: name)]
+        if let cursor { query.append(.init(name: "start_cursor", value: cursor)) }
+        let page: NotionPage<NotionAgent>
+        do { page = try await request("agents", query: query) }
+        catch NotionAPIError.server(let status, _) where status == 400 {
+            // Older agent APIs can reject the server-side query; scan one page locally instead.
+            var fallback = [URLQueryItem(name: "page_size", value: "50")]
+            if let cursor { fallback.append(.init(name: "start_cursor", value: cursor)) }
+            page = try await request("agents", query: fallback)
+        }
+        return NotionPage(results: page.results.filter {
+            ($0.agent_type == "custom" || $0.agent_type == "custom_agent") &&
+                $0.name.localizedStandardContains(name)
+        }, has_more: page.has_more, next_cursor: page.next_cursor)
     }
 
     func threads(agentID: String, allPages: Bool = true) async throws -> [NotionThread] {
@@ -166,7 +195,6 @@ struct NotionAgentsAPI {
 
 final class NotionAgentsStore: ObservableObject {
     static let shared = NotionAgentsStore()
-    @Published private(set) var agents: [NotionAgent] = []
     @Published private(set) var threads: [NotionThread] = []
     @Published private(set) var messages: [NotionMessage] = []
     @Published private(set) var busyAgentIDs: Set<String> = []
@@ -176,24 +204,41 @@ final class NotionAgentsStore: ObservableObject {
     @Published var selectedThreadID: String?
     @Published var error: String?
     @Published var isSending = false
+    @Published private(set) var isResponding = false
+    @Published private(set) var isRefreshing = false
+    @Published private(set) var activityText: String?
     @Published private(set) var hasToken = NotionTokenStore.read() != nil
     private var timer: Timer?
     private var observed: [String: String] = [:]
     private var hasBaseline = false
     private var refreshInProgress = false
+    private var refreshQueued = false
 
-    var visibleAgents: [NotionAgent] {
-        agents.filter { !SettingsStore.shared.data.notionHiddenAgentIDs.contains($0.id) }
-    }
+    var visibleAgents: [SavedNotionAgent] { SettingsStore.shared.data.notionSavedAgents }
 
     func saveToken(_ token: String) {
         guard NotionTokenStore.save(token.trimmingCharacters(in: .whitespacesAndNewlines)) else {
             error = "トークンをキーチェーンに保存できませんでした。"; return
         }
         hasToken = NotionTokenStore.read() != nil
-        agents = []; threads = []; messages = []; observed = [:]; hasBaseline = false
-        if hasToken { Task { @MainActor in await refresh() } }
+        threads = []; messages = []; busyAgentIDs = []; observed = [:]; hasBaseline = false; error = nil
+        selectedAgentID = nil; selectedThreadID = nil
+        if hasToken { start() }
         else { timer?.invalidate(); timer = nil }
+    }
+
+    func registrationChanged() {
+        let ids = Set(visibleAgents.map(\.id))
+        busyAgentIDs.formIntersection(ids)
+        observed = observed.filter { ids.contains(String($0.key.split(separator: ":").first ?? "")) }
+        if !ids.contains(selectedAgentID ?? "") {
+            selectedAgentID = visibleAgents.first?.id
+            selectedThreadID = nil; threads = []; messages = []
+        }
+        if hasToken {
+            if refreshInProgress { refreshQueued = true }
+            else { Task { @MainActor in await refresh() } }
+        }
     }
 
     func start() {
@@ -209,19 +254,33 @@ final class NotionAgentsStore: ObservableObject {
     func refresh() async {
         guard hasToken, !refreshInProgress, let token = NotionTokenStore.read() else { return }
         refreshInProgress = true
-        defer { refreshInProgress = false }
+        isRefreshing = true
+        defer {
+            refreshInProgress = false; isRefreshing = false; activityText = nil
+            if refreshQueued {
+                refreshQueued = false
+                Task { @MainActor in await refresh() }
+            }
+        }
+        let registered = visibleAgents
+        guard !registered.isEmpty else {
+            busyAgentIDs = []; threads = []; messages = []; error = nil
+            return
+        }
+        if !registered.contains(where: { $0.id == selectedAgentID }) {
+            selectedAgentID = registered.first?.id
+            selectedThreadID = nil; threads = []; messages = []
+        }
         let api = NotionAgentsAPI(token: token)
         do {
-            let fetched = try await api.agents()
-            agents = fetched
-            if !visibleAgents.contains(where: { $0.id == selectedAgentID }) {
-                selectedAgentID = visibleAgents.first?.id
-                selectedThreadID = nil
-                messages = []
-            }
             var running = Set<String>()
-            for agent in visibleAgents {
-                let list = try await api.threads(agentID: agent.id, allPages: agent.id == selectedAgentID)
+            var failures: [String] = []
+            for (index, agent) in registered.enumerated() {
+                guard visibleAgents.contains(where: { $0.id == agent.id }) else { continue }
+                activityText = "エージェントを確認中（\(index + 1)/\(registered.count)）"
+                let list: [NotionThread]
+                do { list = try await api.threads(agentID: agent.id, allPages: false) }
+                catch { failures.append("\(agent.name): \(error.localizedDescription)"); continue }
                 if agent.id == selectedAgentID { threads = list }
                 for thread in list {
                     if thread.isRunning { running.insert(agent.id) }
@@ -243,24 +302,40 @@ final class NotionAgentsStore: ObservableObject {
                     observed[key] = signature
                 }
             }
-            busyAgentIDs = running
+            busyAgentIDs = running.intersection(Set(visibleAgents.map(\.id)))
             hasBaseline = true
-            if let selectedThreadID { messages = try await api.messages(threadID: selectedThreadID) }
-            error = nil
+            if let selectedThreadID {
+                activityText = "会話を読み込み中…"
+                let fetched = try await api.messages(threadID: selectedThreadID)
+                if self.selectedThreadID == selectedThreadID { messages = fetched }
+            }
+            error = failures.first.map { failures.count == 1 ? $0 : "\($0) ほか\(failures.count - 1)件" }
         } catch { self.error = error.localizedDescription }
     }
 
     func selectAgent(_ id: String) async {
         selectedAgentID = id; selectedThreadID = nil; messages = []; threads = []
         guard let token = NotionTokenStore.read() else { return }
-        do { threads = try await NotionAgentsAPI(token: token).threads(agentID: id); error = nil }
+        activityText = "チャット履歴を読み込み中…"
+        defer { activityText = nil }
+        do {
+            let fetched = try await NotionAgentsAPI(token: token).threads(agentID: id, allPages: false)
+            if selectedAgentID == id { threads = fetched }
+            error = nil
+        }
         catch { self.error = error.localizedDescription }
     }
 
     func selectThread(_ id: String) async {
         selectedThreadID = id; messages = []
         guard let token = NotionTokenStore.read() else { return }
-        do { messages = try await NotionAgentsAPI(token: token).messages(threadID: id); error = nil }
+        activityText = "会話を読み込み中…"
+        defer { activityText = nil }
+        do {
+            let fetched = try await NotionAgentsAPI(token: token).messages(threadID: id)
+            if selectedThreadID == id { messages = fetched }
+            error = nil
+        }
         catch { self.error = error.localizedDescription }
     }
 
@@ -268,7 +343,8 @@ final class NotionAgentsStore: ObservableObject {
 
     func send(_ text: String) async {
         guard let agentID = selectedAgentID, let token = NotionTokenStore.read(), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        isSending = true; defer { isSending = false }
+        isSending = true; activityText = "メッセージを送信中…"
+        defer { isSending = false; activityText = nil }
         do {
             let invocation = try await NotionAgentsAPI(token: token).send(text, agentID: agentID, threadID: selectedThreadID)
             selectedThreadID = invocation.thread_id
@@ -279,6 +355,8 @@ final class NotionAgentsStore: ObservableObject {
 
     func respond(_ action: NotionAction, option: NotionAction.Option) async {
         guard let threadID = selectedThreadID, let token = NotionTokenStore.read() else { return }
+        isResponding = true; activityText = "アクションを送信中…"
+        defer { isResponding = false; activityText = nil }
         do {
             _ = try await NotionAgentsAPI(token: token).respond(actionID: action.id, optionID: option.id, threadID: threadID)
             alert = nil
@@ -300,6 +378,7 @@ struct NotionAgentsPanel: View {
     @ObservedObject private var settings = SettingsStore.shared
     @State private var draft = ""
     @State private var tokenDraft = ""
+    let onOpenSettings: () -> Void
     let onClose: () -> Void
 
     var body: some View {
@@ -308,7 +387,11 @@ struct NotionAgentsPanel: View {
                 Image(systemName: "sparkles.rectangle.stack").foregroundStyle(.purple)
                 Text("Notionエージェント").font(.headline)
                 Spacer()
-                Button { Task { @MainActor in await store.refresh() } } label: { Image(systemName: "arrow.clockwise") }.help("更新")
+                Button { Task { @MainActor in await store.refresh() } } label: {
+                    if store.isRefreshing { ProgressView().controlSize(.small) }
+                    else { Image(systemName: "arrow.clockwise") }
+                }.help("登録したエージェントを更新")
+                    .disabled(!store.hasToken || store.visibleAgents.isEmpty || store.isRefreshing)
                 Button(action: onClose) { Image(systemName: "xmark") }.help("閉じる")
             }.buttonStyle(.plain).padding(14)
             if let notice = store.noticeText {
@@ -317,6 +400,10 @@ struct NotionAgentsPanel: View {
                     .padding(.horizontal, 14).padding(.bottom, 8)
             }
             Divider()
+            if let activity = store.activityText {
+                HStack(spacing: 8) { ProgressView().controlSize(.small); Text(activity); Spacer() }
+                    .font(.caption).foregroundStyle(.secondary).padding(.horizontal, 14).padding(.vertical, 8)
+            }
             if !store.hasToken {
                 VStack(alignment: .leading, spacing: 12) {
                     Label("Notionを接続", systemImage: "key").font(.headline)
@@ -398,6 +485,7 @@ struct NotionAgentsPanel: View {
                                                     ForEach(action.options) { option in
                                                         if option.id == "approve" || option.id == "reject" {
                                                             Button(option.label) { Task { @MainActor in await store.respond(action, option: option) } }
+                                                                .disabled(store.isResponding)
                                                         } else if option.id == "use_connection",
                                                                   let urlString = action.requirements?.compactMap(\.handoff_url).first,
                                                                   let url = URL(string: urlString), url.scheme == "https" {
@@ -415,11 +503,17 @@ struct NotionAgentsPanel: View {
                                 TextField("エージェントにメッセージ", text: $draft, axis: .vertical)
                                     .lineLimit(1...4).textFieldStyle(.plain)
                                     .onSubmit(send)
-                                Button(action: send) { Image(systemName: "arrow.up.circle.fill").font(.title3) }
+                                Button(action: send) {
+                                    if store.isSending { ProgressView().controlSize(.small) }
+                                    else { Image(systemName: "arrow.up.circle.fill").font(.title3) }
+                                }
                                     .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.isSending)
                             }.padding(11)
                         } else {
-                            ContentUnavailableView("表示するエージェントがありません", systemImage: "sparkles", description: Text("設定で表示するエージェントを選んでください。"))
+                            VStack(spacing: 10) {
+                                ContentUnavailableView("エージェントが未登録です", systemImage: "sparkles", description: Text("URL・IDまたは名前検索で追加してください。"))
+                                Button("エージェントを追加", action: onOpenSettings)
+                            }
                         }
                     }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
@@ -429,12 +523,6 @@ struct NotionAgentsPanel: View {
         .background(.ultraThickMaterial, in: RoundedRectangle(cornerRadius: 16))
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.12)))
         .onAppear { store.start() }
-        .onChange(of: settings.data.notionHiddenAgentIDs) { _, _ in
-            if !store.visibleAgents.contains(where: { $0.id == store.selectedAgentID }),
-               let first = store.visibleAgents.first {
-                Task { @MainActor in await store.selectAgent(first.id) }
-            }
-        }
     }
 
     private func saveToken() {
@@ -455,6 +543,13 @@ struct NotionAgentsSettings: View {
     @EnvironmentObject var settings: SettingsStore
     @ObservedObject private var agents = NotionAgentsStore.shared
     @State private var token = ""
+    @State private var agentInput = ""
+    @State private var inputMessage: String?
+    @State private var searchName = ""
+    @State private var searchResults: [NotionAgent] = []
+    @State private var searchCursor: String?
+    @State private var isSearching = false
+    @State private var searchMessage: String?
 
     var body: some View {
         Form {
@@ -476,19 +571,68 @@ struct NotionAgentsSettings: View {
                 Text("Notion Custom Agents API の利用権限がある内部インテグレーションを使用します。トークンはMacのキーチェーンに保存します。")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Section("表示するエージェント") {
-                if agents.agents.isEmpty { Text("接続後にエージェント一覧が表示されます。") }
-                ForEach(agents.agents) { agent in
-                    Toggle(isOn: Binding(
-                        get: { !settings.data.notionHiddenAgentIDs.contains(agent.id) },
-                        set: { shown in
-                            if shown { settings.data.notionHiddenAgentIDs.remove(agent.id) }
-                            else { settings.data.notionHiddenAgentIDs.insert(agent.id) }
-                        })) {
-                        HStack { Text(agent.glyph); Text(agent.name) }
+            Section("登録したエージェント") {
+                Text("NotionのURLまたはエージェントIDを入力します。登録したものだけを監視します。")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    TextField("NotionのエージェントURLまたはID", text: $agentInput)
+                        .textFieldStyle(.roundedBorder).onSubmit(addAgent)
+                    Button("追加", action: addAgent)
+                        .disabled(agentInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                if let inputMessage { Text(inputMessage).font(.caption).foregroundStyle(.orange) }
+                if settings.data.notionSavedAgents.isEmpty {
+                    Text("まだ登録されていません。URL・IDで追加するか、下の名前検索から選べます。")
+                        .foregroundStyle(.secondary)
+                }
+                ForEach($settings.data.notionSavedAgents) { $agent in
+                    HStack(spacing: 10) {
+                        Text(agent.glyph).frame(width: 22)
+                        VStack(alignment: .leading, spacing: 2) {
+                            TextField("表示名", text: $agent.name).textFieldStyle(.plain)
+                            Text(agent.id).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
+                        }
+                        Spacer()
+                        Button { removeAgent(agent.id) } label: { Image(systemName: "minus.circle") }
+                            .buttonStyle(.plain).help("登録リストから削除")
+                            .accessibilityLabel("\(agent.name)を登録リストから削除")
                     }
                 }
-                Button("一覧を更新") { Task { @MainActor in await agents.refresh() } }.disabled(!agents.hasToken)
+                HStack {
+                    Button { Task { @MainActor in await agents.refresh() } } label: {
+                        if agents.isRefreshing { ProgressView().controlSize(.small) }
+                        else { Label("登録済みを確認", systemImage: "arrow.clockwise") }
+                    }.disabled(!agents.hasToken || agents.isRefreshing || settings.data.notionSavedAgents.isEmpty)
+                    if let activity = agents.activityText { Text(activity).font(.caption).foregroundStyle(.secondary) }
+                }
+            }
+            Section("名前で探す") {
+                Text("名前の一部を入力して検索します。結果は50件ずつ読み込みます。")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    TextField("エージェント名の一部", text: $searchName)
+                        .textFieldStyle(.roundedBorder).onSubmit { Task { await search(reset: true) } }
+                    Button { Task { await search(reset: true) } } label: {
+                        if isSearching { ProgressView().controlSize(.small) }
+                        else { Text("検索") }
+                    }.disabled(!agents.hasToken || isSearching || searchName.trimmingCharacters(in: .whitespacesAndNewlines).count < 2)
+                }
+                if let searchMessage { Text(searchMessage).font(.caption).foregroundStyle(.secondary) }
+                ForEach(searchResults) { result in
+                    HStack {
+                        Text(result.glyph); Text(result.name)
+                        Spacer()
+                        Button(settings.data.notionSavedAgents.contains(where: { $0.id == result.id }) ? "追加済み" : "追加") {
+                            save(result)
+                        }.disabled(settings.data.notionSavedAgents.contains(where: { $0.id == result.id }))
+                    }
+                }
+                if searchCursor != nil {
+                    Button { Task { await search(reset: false) } } label: {
+                        if isSearching { ProgressView().controlSize(.small) }
+                        else { Text("次のページを探す") }
+                    }.disabled(isSearching)
+                }
             }
             Section("通知") {
                 Toggle("返信・確認待ちでノッチを開く", isOn: $settings.data.notionNotificationsEnabled)
@@ -503,5 +647,49 @@ struct NotionAgentsSettings: View {
         guard !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         agents.saveToken(token)
         if agents.hasToken { token = "" }
+    }
+
+    private func addAgent() {
+        guard let id = NotionAgentInput.id(from: agentInput) else {
+            inputMessage = "NotionのエージェントURLまたはIDを確認してください。"; return
+        }
+        guard !settings.data.notionSavedAgents.contains(where: { $0.id == id }) else {
+            inputMessage = "このエージェントは登録済みです。"; return
+        }
+        settings.data.notionSavedAgents.append(SavedNotionAgent(id: id, name: "エージェント \(id.prefix(8))"))
+        agentInput = ""; inputMessage = nil
+        agents.registrationChanged()
+    }
+
+    private func save(_ result: NotionAgent) {
+        guard !settings.data.notionSavedAgents.contains(where: { $0.id == result.id }) else { return }
+        settings.data.notionSavedAgents.append(SavedNotionAgent(id: result.id, name: result.name, glyph: result.glyph))
+        agents.registrationChanged()
+    }
+
+    private func removeAgent(_ id: String) {
+        settings.data.notionSavedAgents.removeAll { $0.id == id }
+        agents.registrationChanged()
+    }
+
+    private func search(reset: Bool) async {
+        guard !isSearching, let token = NotionTokenStore.read() else { return }
+        let name = searchName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard name.count >= 2 else { return }
+        let cursor = reset ? nil : searchCursor
+        if reset { searchResults = []; searchCursor = nil }
+        isSearching = true
+        searchMessage = "検索中…"
+        defer { isSearching = false }
+        do {
+            let page = try await NotionAgentsAPI(token: token).searchAgents(named: name, cursor: cursor)
+            guard searchName.trimmingCharacters(in: .whitespacesAndNewlines) == name else { return }
+            let known = Set(searchResults.map(\.id))
+            searchResults += page.results.filter { !known.contains($0.id) }
+            searchCursor = page.has_more ? page.next_cursor : nil
+            searchMessage = searchResults.isEmpty
+                ? (searchCursor == nil ? "一致するエージェントは見つかりませんでした。" : "このページに一致はありません。次のページも探せます。")
+                : "\(searchResults.count)件見つかりました。"
+        } catch { searchMessage = error.localizedDescription }
     }
 }

@@ -21,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         notch = NotchManager()
         notch.browser.onOpenSettings = { [weak self] in self?.openSettings() }
+        notch.browser.onOpenNotionSettings = { [weak self] in self?.presentSettings(section: .notion) }
         NSApp.mainMenu = buildMainMenu()
         setupStatusItem()
         notch.start()

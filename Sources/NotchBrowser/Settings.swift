@@ -12,6 +12,13 @@ struct Profile: Codable, Identifiable, Hashable {
     var isDefault: Bool { id == Self.defaultID }
 }
 
+/// Only agents explicitly added by the user are shown and polled.
+struct SavedNotionAgent: Codable, Identifiable, Hashable {
+    var id: String
+    var name: String
+    var glyph: String = "✦"
+}
+
 enum TabIcon: Codable, Hashable {
     case favicon
     case symbol(String)
@@ -135,6 +142,7 @@ struct SettingsData: Codable {
     var shelfDownloads = false
     var shelfRemoveAfterDrag = true
     var notionHiddenAgentIDs: Set<String> = []
+    var notionSavedAgents: [SavedNotionAgent] = []
     var notionNotificationsEnabled = true
 
     init() {}
@@ -160,6 +168,7 @@ struct SettingsData: Codable {
         shelfRemoveAfterDrag = (try? c.decode(Bool.self, forKey: .shelfRemoveAfterDrag)) ?? true
         shelfDownloads = (try? c.decode(Bool.self, forKey: .shelfDownloads)) ?? false
         notionHiddenAgentIDs = (try? c.decode(Set<String>.self, forKey: .notionHiddenAgentIDs)) ?? []
+        notionSavedAgents = (try? c.decode([SavedNotionAgent].self, forKey: .notionSavedAgents)) ?? []
         notionNotificationsEnabled = (try? c.decode(Bool.self, forKey: .notionNotificationsEnabled)) ?? true
         toolbarActions = (try? c.decode([String].self, forKey: .toolbarActions))
             .map { raw in

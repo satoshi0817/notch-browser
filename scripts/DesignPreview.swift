@@ -40,6 +40,7 @@ struct DesignPreview {
         let onboarding: OnboardingWindowController? = CommandLine.arguments.contains("--onboarding")
             ? OnboardingWindowController(settings: onboardingSettings, onFinish: { _, _ in }, onSkip: {}) : nil
         manager.browser.onOpenSettings = { settings.present() }
+        manager.browser.onOpenNotionSettings = { settings.present(section: .notion) }
         let menu = NSMenu()
         let appMenu = NSMenu()
         let root = NSMenuItem()

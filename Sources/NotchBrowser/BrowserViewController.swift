@@ -56,6 +56,7 @@ final class BrowserViewController: NSViewController {
     var onModalChange: ((Bool) -> Void)?
     var onOpenShelf: (() -> Void)?
     var onOpenSettings: (() -> Void)?
+    var onOpenNotionSettings: (() -> Void)?
     var keepOpen = false { didSet { updateChrome() } }
     var hideFromScreenCapture = true
 
@@ -282,7 +283,11 @@ final class BrowserViewController: NSViewController {
             guard let tab = self?.selectedTab, let url = tab.webView.url else { return nil }
             return (tab.displayName, url)
         }
-        let notion = NSHostingView(rootView: NotionAgentsPanel { [weak self] in self?.hideNotion() })
+        let notion = NSHostingView(rootView: NotionAgentsPanel(onOpenSettings: { [weak self] in
+            if let openNotion = self?.onOpenNotionSettings { openNotion() }
+            else { self?.onOpenSettings?() }
+        },
+                                                    onClose: { [weak self] in self?.hideNotion() }))
         notion.isHidden = true
         notion.translatesAutoresizingMaskIntoConstraints = false
         chrome.addSubview(notion)

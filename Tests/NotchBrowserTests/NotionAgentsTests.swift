@@ -10,33 +10,78 @@ final class NotionAgentsTests: XCTestCase {
     func testOldSettingsKeepNotionDefaultsAndNewPreferencesRoundTrip() throws {
         var settings = try JSONDecoder().decode(SettingsData.self, from: Data("{}".utf8))
         XCTAssertTrue(settings.notionHiddenAgentIDs.isEmpty)
+        XCTAssertTrue(settings.notionSavedAgents.isEmpty)
         XCTAssertTrue(settings.notionNotificationsEnabled)
         settings.notionHiddenAgentIDs.insert("agent-1")
         settings.notionNotificationsEnabled = false
+        settings.notionSavedAgents = [SavedNotionAgent(id: "agent-1", name: "Writer")]
         let restored = try JSONDecoder().decode(SettingsData.self, from: JSONEncoder().encode(settings))
         XCTAssertEqual(restored.notionHiddenAgentIDs, ["agent-1"])
         XCTAssertFalse(restored.notionNotificationsEnabled)
+        XCTAssertEqual(restored.notionSavedAgents, [SavedNotionAgent(id: "agent-1", name: "Writer")])
     }
 
-    func testAgentsPaginationAndCustomFilter() async throws {
+    func testURLAndIDParsingRejectsOtherSitesAndNormalizesUUIDs() {
+        let id = "3c90c3cc-0d44-4b50-8888-8dd25736052a"
+        XCTAssertEqual(NotionAgentInput.id(from: id), id)
+        XCTAssertEqual(NotionAgentInput.id(from: "https://www.notion.so/Workspace/Helper-3c90c3cc0d444b5088888dd25736052a?x=1"), id)
+        XCTAssertEqual(NotionAgentInput.id(from: "https://www.notion.com/Workspace/Helper-3c90c3cc0d444b5088888dd25736052a"), id)
+        XCTAssertEqual(NotionAgentInput.id(from: "agent_custom_123"), "agent_custom_123")
+        XCTAssertNil(NotionAgentInput.id(from: "https://example.com/3c90c3cc0d444b5088888dd25736052a"))
+        XCTAssertNil(NotionAgentInput.id(from: "https://www.notion.so/no-agent-id"))
+        XCTAssertNil(NotionAgentInput.id(from: "abc"))
+    }
+
+    func testNameSearchLoadsOnePageAtATimeAndFiltersPartialMatches() async throws {
         var requests: [URLRequest] = []
         let api = NotionAgentsAPI(token: "test-token") { request in
             requests.append(request)
             let next = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "start_cursor" })?.value
             let body: [String: Any] = next == nil
-                ? ["results": [["id": "a", "name": "Helper", "description": "", "agent_type": "custom", "status": "active"],
+                ? ["results": [["id": "a", "name": "Writer Helper", "description": "", "agent_type": "custom", "status": "active"],
                                ["id": "b", "name": "Notion AI", "description": "", "agent_type": "notion_ai", "status": "active"]],
                    "has_more": true, "next_cursor": "next"]
-                : ["results": [["id": "c", "name": "Writer", "description": "", "agent_type": "custom", "status": "active"]],
+                : ["results": [["id": "c", "name": "Copywriter", "description": "", "agent_type": "custom", "status": "active"]],
                    "has_more": false, "next_cursor": NSNull()]
             return (try JSONSerialization.data(withJSONObject: body), self.response(request))
         }
-        let agents = try await api.agents()
-        XCTAssertEqual(agents.map(\.id), ["a", "c"])
+        let first = try await api.searchAgents(named: "wri")
+        XCTAssertEqual(first.results.map(\.id), ["a"])
+        XCTAssertEqual(first.next_cursor, "next")
+        XCTAssertEqual(requests.count, 1, "Searching must not walk the entire workspace")
+        let second = try await api.searchAgents(named: "wri", cursor: first.next_cursor)
+        XCTAssertEqual(second.results.map(\.id), ["c"])
         XCTAssertEqual(requests.count, 2)
+        let query = URLComponents(url: requests[0].url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        XCTAssertEqual(query.first(where: { $0.name == "query" })?.value, "wri")
+        XCTAssertEqual(query.first(where: { $0.name == "page_size" })?.value, "50")
         XCTAssertEqual(requests[0].value(forHTTPHeaderField: "Authorization"), "Bearer test-token")
         XCTAssertEqual(requests[0].value(forHTTPHeaderField: "Notion-Version"), "2025-09-03")
         XCTAssertEqual(requests[1].url?.path, "/v1/agents")
+    }
+
+    func testNameSearchFallsBackWhenServerRejectsQuery() async throws {
+        var requests: [URLRequest] = []
+        let api = NotionAgentsAPI(token: "test-token") { request in
+            requests.append(request)
+            let hasQuery = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.contains(where: { $0.name == "query" }) == true
+            let body = hasQuery ? "{\"message\":\"unsupported query\"}" : "{\"results\":[{\"id\":\"a\",\"name\":\"Morning helper\",\"agent_type\":\"custom\",\"status\":\"active\"}],\"has_more\":false,\"next_cursor\":null}"
+            return (Data(body.utf8), self.response(request, hasQuery ? 400 : 200))
+        }
+        let page = try await api.searchAgents(named: "morn")
+        XCTAssertEqual(page.results.map(\.id), ["a"])
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertFalse(URLComponents(url: requests[1].url!, resolvingAgainstBaseURL: false)!.queryItems!.contains(where: { $0.name == "query" }))
+    }
+
+    func testRegisteredAgentPollCanStopAtFirstHistoryPage() async throws {
+        var requests = 0
+        let api = NotionAgentsAPI(token: "test-token") { request in
+            requests += 1
+            return (Data("{\"results\":[],\"has_more\":true,\"next_cursor\":\"next\"}".utf8), self.response(request))
+        }
+        _ = try await api.threads(agentID: "saved", allPages: false)
+        XCTAssertEqual(requests, 1)
     }
 
     func testThreadHistoryChatAndActionEndpoints() async throws {
@@ -73,7 +118,7 @@ final class NotionAgentsTests: XCTestCase {
         let api = NotionAgentsAPI(token: "secret-value") { request in
             (Data("{\"message\":\"No access\"}".utf8), self.response(request, 403))
         }
-        do { _ = try await api.agents(); XCTFail("Expected a 403") }
+        do { _ = try await api.searchAgents(named: "secret"); XCTFail("Expected a 403") }
         catch {
             XCTAssertTrue(error.localizedDescription.contains("403"))
             XCTAssertFalse(error.localizedDescription.contains("secret-value"))
