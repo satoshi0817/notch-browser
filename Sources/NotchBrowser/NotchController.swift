@@ -22,7 +22,7 @@ final class NotchPanel: NSPanel {
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         // Browser commands must also work while editing a note or a web form.
-        if let table = firstResponder as? ShelfTable, event.modifierFlags.contains(.command),
+        if let table = firstResponder as? ShelfTilesView, event.modifierFlags.contains(.command),
            ["a", "c", "v", "z"].contains(event.charactersIgnoringModifiers?.lowercased() ?? "") {
             table.keyDown(with: event); return true
         }
@@ -355,7 +355,7 @@ final class NotchController: NSObject, NSWindowDelegate {
 
     func layoutContent() {
         let bounds = root.content.bounds
-        let shelfHeight: CGFloat = shelfVisible ? (shelfOnly ? max(0, bounds.height - stripHeight) : 220) : 0
+        let shelfHeight: CGFloat = shelfVisible ? (shelfOnly ? max(0, bounds.height - stripHeight) : manager.shelf.preferredShelfHeight) : 0
         if manager.shelf.view.superview === root.content {
             manager.shelf.view.frame = NSRect(x: 0, y: 0, width: bounds.width, height: shelfHeight)
         }
@@ -465,7 +465,7 @@ final class NotchManager {
         shelf = ShelfViewController(store: shelfStore)
         browser.onOpenShelf = { [weak self] in self?.showShelf() }
         shelf.onClose = { [weak self] in self?.controllers.values.filter(\.shelfVisible).forEach { $0.hideShelf() } }
-        shelf.onSizeChange = { [weak self] in self?.controllers.values.filter(\.shelfOnly).forEach { $0.relayout(animated: false) } }
+        shelf.onSizeChange = { [weak self] in self?.controllers.values.filter(\.shelfVisible).forEach { $0.relayout(animated: false) } }
         shelf.onDrop = { [weak self] in self?.shelfDropReceived = true }
         shelf.onDrag = { [weak self] active in
             self?.shelfDragOutgoing = active
@@ -515,6 +515,7 @@ final class NotchManager {
         applyCalendarSettings()
         rebuild()
         applyWindowSettings()
+        shelf.settingsChanged()
         browser.settingsChanged()
     }
 

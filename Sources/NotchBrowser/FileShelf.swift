@@ -3,11 +3,19 @@ import Combine
 import SwiftUI
 import Quartz
 import QuickLookThumbnailing
+import UniformTypeIdentifiers
 
 enum ShelfTrigger: String, Codable, CaseIterable {
     case automatic, nearby, manual
     var title: String {
         switch self { case .automatic: "ドラッグ開始"; case .nearby: "ノッチに接近"; case .manual: "手動" }
+    }
+}
+
+enum ShelfTileSize: Int, Codable, CaseIterable {
+    case small = 80, medium = 96, large = 112
+    var title: String {
+        switch self { case .small: "小"; case .medium: "中"; case .large: "大" }
     }
 }
 
@@ -188,8 +196,8 @@ final class ShelfDragMonitor {
     }
 }
 
-final class ShelfTable: NSTableView {
-    var makeDragItems: ((IndexSet, NSPoint) -> [NSDraggingItem])?
+final class ShelfTilesView: NSCollectionView {
+    var makeDragItems: ((Set<IndexPath>, NSPoint) -> [NSDraggingItem])?
     var dragStarted: (() -> Void)?
     var dragEnded: ((NSPoint, NSDragOperation) -> Void)?
     var preview: (() -> Void)?
@@ -197,30 +205,35 @@ final class ShelfTable: NSTableView {
     var copyFiles: (() -> Void)?
     var pasteFiles: (() -> Void)?
     var undoClear: (() -> Void)?
+    var open: (() -> Void)?
+    var addFiles: (([URL]) -> Bool)?
+    var selectionChanged: (() -> Void)?
+
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        let index = row(at: point)
-        guard index >= 0 else { super.mouseDown(with: event); return }
+        guard let index = indexPathForItem(at: point) else { super.mouseDown(with: event); return }
         window?.makeFirstResponder(self)
         let command = event.modifierFlags.contains(.command)
         let shift = event.modifierFlags.contains(.shift)
-        if shift, selectedRow >= 0 {
-            selectRowIndexes(IndexSet(integersIn: min(selectedRow, index)...max(selectedRow, index)), byExtendingSelection: true)
+        if shift, let anchor = selectionIndexPaths.first {
+            let range = min(anchor.item, index.item)...max(anchor.item, index.item)
+            selectionIndexPaths = Set(range.map { IndexPath(item: $0, section: 0) })
         } else if command {
-            if selectedRowIndexes.contains(index) { deselectRow(index) }
-            else { selectRowIndexes(IndexSet(integer: index), byExtendingSelection: true) }
-        } else if !selectedRowIndexes.contains(index) {
-            selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+            if selectionIndexPaths.contains(index) { selectionIndexPaths.remove(index) }
+            else { selectionIndexPaths.insert(index) }
+        } else if !selectionIndexPaths.contains(index) {
+            selectionIndexPaths = [index]
         }
-        if event.clickCount == 2 { _ = sendAction(doubleAction, to: target); return }
+        selectionChanged?()
+        if event.clickCount == 2 { open?(); return }
         while let next = NSApp.nextEvent(matching: [.leftMouseDragged, .leftMouseUp], until: .distantFuture, inMode: .eventTracking, dequeue: true) {
             if next.type == .leftMouseUp {
-                if !command && !shift { selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false) }
+                if !command && !shift { selectionIndexPaths = [index]; selectionChanged?() }
                 return
             }
             let nextPoint = convert(next.locationInWindow, from: nil)
             guard hypot(nextPoint.x - point.x, nextPoint.y - point.y) > 3 else { continue }
-            let items = makeDragItems?(selectedRowIndexes, point) ?? []
+            let items = makeDragItems?(selectionIndexPaths, point) ?? []
             guard !items.isEmpty else { return }
             dragStarted?()
             let session = beginDraggingSession(with: items, event: next, source: self)
@@ -229,8 +242,23 @@ final class ShelfTable: NSTableView {
             return
         }
     }
-    override func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation { .copy }
+    override func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        Self.allowedOperations(for: context)
+    }
+    static func allowedOperations(for context: NSDraggingContext) -> NSDragOperation {
+        context == .outsideApplication ? [.copy, .move] : .copy
+    }
     override func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) { dragEnded?(screenPoint, operation) }
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard sender.draggingSource as? ShelfTilesView !== self,
+              sender.draggingSourceOperationMask.contains(.copy),
+              !ShelfViewController.urls(from: sender.draggingPasteboard).isEmpty else { return [] }
+        return .copy
+    }
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool { draggingEntered(sender) == .copy }
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        addFiles?(ShelfViewController.urls(from: sender.draggingPasteboard)) ?? false
+    }
     override func keyDown(with event: NSEvent) {
         if event.modifierFlags.contains(.command) {
             switch event.charactersIgnoringModifiers?.lowercased() {
@@ -247,14 +275,90 @@ final class ShelfTable: NSTableView {
     }
 }
 
-final class ShelfViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, QLPreviewPanelDataSource, NSMenuDelegate {
+final class ShelfTileItem: NSCollectionViewItem {
+    static let identifier = NSUserInterfaceItemIdentifier("ShelfTile")
+    private let icon = NSImageView()
+    private let name = NSTextField(labelWithString: "")
+    private let count = NSTextField(labelWithString: "")
+    private var representedID: UUID?
+
+    override var isSelected: Bool { didSet { updateSelection() } }
+
+    override func loadView() {
+        let tile = NSView()
+        tile.wantsLayer = true
+        tile.layer?.cornerRadius = 14
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        name.font = .systemFont(ofSize: 11, weight: .medium)
+        name.alignment = .center
+        name.lineBreakMode = .byTruncatingMiddle
+        name.translatesAutoresizingMaskIntoConstraints = false
+        count.font = .systemFont(ofSize: 10, weight: .semibold)
+        count.textColor = .secondaryLabelColor
+        count.alignment = .center
+        count.translatesAutoresizingMaskIntoConstraints = false
+        for child in [icon, name, count] as [NSView] { tile.addSubview(child) }
+        NSLayoutConstraint.activate([
+            icon.centerXAnchor.constraint(equalTo: tile.centerXAnchor),
+            icon.topAnchor.constraint(equalTo: tile.topAnchor, constant: 6),
+            icon.widthAnchor.constraint(equalToConstant: 40),
+            icon.heightAnchor.constraint(equalToConstant: 40),
+            name.leadingAnchor.constraint(equalTo: tile.leadingAnchor, constant: 5),
+            name.trailingAnchor.constraint(equalTo: tile.trailingAnchor, constant: -5),
+            name.topAnchor.constraint(equalTo: icon.bottomAnchor, constant: 4),
+            count.leadingAnchor.constraint(equalTo: tile.leadingAnchor, constant: 4),
+            count.trailingAnchor.constraint(equalTo: tile.trailingAnchor, constant: -4),
+            count.topAnchor.constraint(equalTo: name.bottomAnchor, constant: 1)
+        ])
+        view = tile
+        updateSelection()
+    }
+
+    func configure(_ row: ShelfRow, showDetails: Bool) {
+        representedID = row.id
+        let entry = row.items[0]
+        let exists = row.items.allSatisfy { FileManager.default.fileExists(atPath: $0.url.path) }
+        let symbol = row.isStack ? "square.stack.3d.up" : (entry.url.hasDirectoryPath ? "folder.fill" : "doc.fill")
+        icon.image = exists && !row.isStack ? NSWorkspace.shared.icon(forFile: entry.url.path)
+            : NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        name.stringValue = row.title
+        name.textColor = exists ? .labelColor : .secondaryLabelColor
+        count.stringValue = row.isStack ? "\(row.items.count) 個\(row.items.contains(where: \.pinned) ? " · 固定" : "")" : (entry.pinned ? "固定中" : "")
+        view.setAccessibilityLabel(row.title)
+        view.toolTip = showDetails ? row.items.map { item in
+            let path = item.url.path
+            let size = (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? NSNumber)?.int64Value
+            let detail = size.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? ""
+            return "\(item.url.lastPathComponent)\n\(path)\(detail.isEmpty ? "" : " · \(detail)")"
+        }.joined(separator: "\n\n") : nil
+        let type = UTType(filenameExtension: entry.url.pathExtension)
+        if exists && !row.isStack && (type?.conforms(to: .image) == true || type?.conforms(to: .pdf) == true || type?.conforms(to: .movie) == true) {
+            let id = row.id
+            let request = QLThumbnailGenerator.Request(fileAt: entry.url, size: NSSize(width: 40, height: 40), scale: 2, representationTypes: .thumbnail)
+            QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { [weak self] result, _ in
+                guard let result else { return }
+                DispatchQueue.main.async { if self?.representedID == id { self?.icon.image = result.nsImage } }
+            }
+        }
+    }
+
+    private func updateSelection() {
+        guard isViewLoaded else { return }
+        view.layer?.backgroundColor = (isSelected ? NSColor.controlAccentColor.withAlphaComponent(0.32) : NSColor.white.withAlphaComponent(0.08)).cgColor
+        view.layer?.borderColor = (isSelected ? NSColor.controlAccentColor : NSColor.white.withAlphaComponent(0.12)).cgColor
+        view.layer?.borderWidth = 1
+    }
+}
+
+final class ShelfViewController: NSViewController, NSCollectionViewDataSource, NSCollectionViewDelegate, QLPreviewPanelDataSource, NSMenuDelegate {
     let store: ShelfStore
-    let table = ShelfTable()
+    let tiles = ShelfTilesView()
     var onClose: (() -> Void)?
     var onDrop: (() -> Void)?
     var onDrag: ((Bool) -> Void)?
     var onSizeChange: (() -> Void)?
-    var preferredShelfHeight: CGFloat { min(360, max(160, 110 + CGFloat(displayed.count) * 46)) }
+    var preferredShelfHeight: CGFloat { CGFloat(SettingsStore.shared.data.shelfTileSize.rawValue) + 120 }
     private let message = NSTextField(labelWithString: "")
     private var cancellables: Set<AnyCancellable> = []
     private var previewURLs: [URL] = []
@@ -262,6 +366,7 @@ final class ShelfViewController: NSViewController, NSTableViewDataSource, NSTabl
     private var displayed: [ShelfRow] = []
     private var expandedGroups: Set<UUID> = []
     private var draggedIDs: Set<UUID> = []
+    private var tileHeight: NSLayoutConstraint?
     private let clearSelectionButton = NSButton()
     private let clearAllButton = NSButton()
     private let undoButton = NSButton()
@@ -310,41 +415,56 @@ final class ShelfViewController: NSViewController, NSTableViewDataSource, NSTabl
             buttons.append(button)
         }
         stack.addArrangedSubview(header)
-        let column = NSTableColumn(identifier: .init("file"))
-        column.title = "ファイル"
-        table.addTableColumn(column)
-        table.headerView = nil
-        table.rowHeight = 46
-        table.backgroundColor = .clear
-        table.allowsMultipleSelection = true
-        table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
-        table.dataSource = self; table.delegate = self
-        table.registerForDraggedTypes([.fileURL])
-        table.setDraggingSourceOperationMask(.copy, forLocal: false)
-        table.setDraggingSourceOperationMask(.copy, forLocal: true)
-        table.preview = { [weak self] in self?.previewFiles() }
-        table.remove = { [weak self] in self?.removeFiles() }
-        table.makeDragItems = { [weak self] rows, point in
+        let flow = NSCollectionViewFlowLayout()
+        flow.scrollDirection = .horizontal
+        let side = CGFloat(SettingsStore.shared.data.shelfTileSize.rawValue)
+        flow.itemSize = NSSize(width: side, height: side)
+        flow.minimumInteritemSpacing = 8
+        flow.sectionInset = NSEdgeInsets(top: 6, left: 4, bottom: 6, right: 4)
+        tiles.collectionViewLayout = flow
+        tiles.backgroundColors = [.clear]
+        tiles.isSelectable = true
+        tiles.allowsMultipleSelection = true
+        tiles.dataSource = self; tiles.delegate = self
+        tiles.register(ShelfTileItem.self, forItemWithIdentifier: ShelfTileItem.identifier)
+        tiles.registerForDraggedTypes([.fileURL])
+        tiles.setDraggingSourceOperationMask([.copy, .move], forLocal: false)
+        tiles.setDraggingSourceOperationMask(.copy, forLocal: true)
+        tiles.preview = { [weak self] in self?.previewFiles() }
+        tiles.remove = { [weak self] in self?.removeFiles() }
+        tiles.makeDragItems = { [weak self] rows, point in
             guard let self else { return [] }
-            return self.pasteboardItems(forRows: rows).enumerated().map { index, writer in
+            return self.pasteboardItems(forRows: IndexSet(rows.map(\.item))).enumerated().map { index, writer in
                 let item = NSDraggingItem(pasteboardWriter: writer)
-                item.setDraggingFrame(NSRect(x: point.x + CGFloat(index % 5) * 3, y: point.y, width: 28, height: 28), contents: NSImage(systemSymbolName: "doc", accessibilityDescription: nil))
+                item.setDraggingFrame(NSRect(x: point.x + CGFloat(index % 5) * 3, y: point.y, width: 48, height: 48), contents: NSImage(systemSymbolName: "doc", accessibilityDescription: nil))
                 return item
             }
         }
-        table.dragStarted = { [weak self] in self?.onDrag?(true) }
-        table.dragEnded = { [weak self] point, operation in self?.finishDragging(at: point, operation: operation) }
-        table.copyFiles = { [weak self] in self?.copyFiles() }
-        table.pasteFiles = { [weak self] in self?.pasteFiles() }
-        table.undoClear = { [weak self] in self?.undoClear() }
-        table.target = self; table.doubleAction = #selector(openSelection)
+        tiles.dragStarted = { [weak self] in self?.onDrag?(true) }
+        tiles.dragEnded = { [weak self] point, operation in self?.finishDragging(at: point, operation: operation) }
+        tiles.copyFiles = { [weak self] in self?.copyFiles() }
+        tiles.pasteFiles = { [weak self] in self?.pasteFiles() }
+        tiles.undoClear = { [weak self] in self?.undoClear() }
+        tiles.open = { [weak self] in self?.openSelection() }
+        tiles.selectionChanged = { [weak self] in self?.updateButtons() }
+        tiles.addFiles = { [weak self] urls in
+            guard let self else { return false }
+            let result = self.store.add(urls)
+            if result { self.onDrop?() }
+            return result
+        }
         let menu = NSMenu()
         menu.delegate = self
-        table.menu = menu
+        tiles.menu = menu
         let scroll = NSScrollView()
-        scroll.documentView = table
-        scroll.hasVerticalScroller = true
+        scroll.documentView = tiles
+        scroll.hasHorizontalScroller = true
+        scroll.hasVerticalScroller = false
+        scroll.horizontalScrollElasticity = .allowed
         scroll.drawsBackground = false
+        let tileHeight = scroll.heightAnchor.constraint(equalToConstant: side + 18)
+        tileHeight.isActive = true
+        self.tileHeight = tileHeight
         stack.addArrangedSubview(scroll)
         message.font = .systemFont(ofSize: 11)
         message.textColor = .secondaryLabelColor
@@ -369,14 +489,24 @@ final class ShelfViewController: NSViewController, NSTableViewDataSource, NSTabl
         refresh()
     }
 
-    private var selection: [ShelfEntry] { ShelfRow.files(in: displayed, at: table.selectedRowIndexes) }
+    func settingsChanged() {
+        guard isViewLoaded else { return }
+        let side = CGFloat(SettingsStore.shared.data.shelfTileSize.rawValue)
+        (tiles.collectionViewLayout as? NSCollectionViewFlowLayout)?.itemSize = NSSize(width: side, height: side)
+        tileHeight?.constant = side + 18
+        tiles.collectionViewLayout?.invalidateLayout()
+        tiles.reloadData()
+        onSizeChange?()
+    }
+
+    private var selection: [ShelfEntry] { ShelfRow.files(in: displayed, at: IndexSet(tiles.selectionIndexPaths.map(\.item))) }
     private func refresh() {
-        let selectedRows = Set(table.selectedRowIndexes.filter { displayed.indices.contains($0) }.map { displayed[$0].id })
+        let selectedRows = Set(tiles.selectionIndexPaths.map(\.item).filter { displayed.indices.contains($0) }.map { displayed[$0].id })
         displayed = ShelfRow.make(from: store.entries, expanded: expandedGroups)
-        table.reloadData()
-        table.selectRowIndexes(IndexSet(displayed.indices.filter { selectedRows.contains(displayed[$0].id) }), byExtendingSelection: false)
+        tiles.reloadData()
+        tiles.selectionIndexPaths = Set(displayed.indices.filter { selectedRows.contains(displayed[$0].id) }.map { IndexPath(item: $0, section: 0) })
         let stacks = ShelfRow.make(from: store.entries).filter(\.isStack).count
-        message.stringValue = store.error ?? (displayed.isEmpty ? "ファイルをここにドロップ" : "\(store.entries.count)ファイル · \(stacks)スタック · Spaceでプレビュー")
+        message.stringValue = store.error ?? (displayed.isEmpty ? "ファイルをここにドロップ" : "\(store.entries.count)ファイル · \(stacks)スタック · 横スクロールで移動 · Spaceでプレビュー")
         updateButtons()
         onSizeChange?()
     }
@@ -388,47 +518,13 @@ final class ShelfViewController: NSViewController, NSTableViewDataSource, NSTabl
         clearAllButton.isEnabled = !store.entries.isEmpty
         undoButton.isEnabled = !store.lastRemoved.isEmpty
     }
-    func tableViewSelectionDidChange(_ notification: Notification) { updateButtons() }
-    func numberOfRows(in tableView: NSTableView) -> Int { displayed.count }
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let item = displayed[row]
-        let entry = item.items[0]
-        let exists = item.items.allSatisfy { FileManager.default.fileExists(atPath: $0.url.path) }
-        let cell = NSStackView()
-        cell.spacing = 8
-        cell.edgeInsets = NSEdgeInsets(top: 0, left: item.child ? 24 : 0, bottom: 0, right: 4)
-        if item.isStack {
-            let expand = NSButton(image: NSImage(systemSymbolName: expandedGroups.contains(item.id) ? "chevron.down" : "chevron.right", accessibilityDescription: "スタックの中身")!, target: self, action: #selector(toggleStack(_:)))
-            expand.tag = row; expand.isBordered = false
-            expand.widthAnchor.constraint(equalToConstant: 18).isActive = true
-            cell.addArrangedSubview(expand)
-        }
-        let symbol = item.isStack ? "square.stack.3d.up" : (entry.url.hasDirectoryPath ? "folder" : "doc")
-        let image = NSImageView(image: NSImage(systemSymbolName: symbol, accessibilityDescription: nil)!)
-        image.widthAnchor.constraint(equalToConstant: 28).isActive = true
-        image.heightAnchor.constraint(equalToConstant: 28).isActive = true
-        let text = NSStackView(); text.orientation = .vertical; text.alignment = .leading; text.spacing = 2
-        let label = NSTextField(labelWithString: item.title + (exists ? "" : "（見つからないファイル）"))
-        label.font = .systemFont(ofSize: 12, weight: item.isStack ? .semibold : .regular)
-        label.lineBreakMode = .byTruncatingMiddle
-        label.textColor = exists ? .labelColor : .secondaryLabelColor
-        text.addArrangedSubview(label)
-        if item.isStack {
-            let detail = NSTextField(labelWithString: item.items.map { $0.url.lastPathComponent }.joined(separator: "、"))
-            detail.font = .systemFont(ofSize: 10); detail.textColor = .secondaryLabelColor
-            detail.lineBreakMode = .byTruncatingTail
-            text.addArrangedSubview(detail)
-        }
-        cell.addArrangedSubview(image); cell.addArrangedSubview(text)
-        if item.items.contains(where: \.pinned) { cell.addArrangedSubview(NSImageView(image: NSImage(systemSymbolName: "pin.fill", accessibilityDescription: "ピン留め")!)) }
-        cell.toolTip = item.items.map { $0.url.path }.joined(separator: "\n")
-        if exists && !item.isStack {
-            let request = QLThumbnailGenerator.Request(fileAt: entry.url, size: NSSize(width: 28, height: 28), scale: 2, representationTypes: .thumbnail)
-            QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { [weak image] result, _ in
-                if let result { DispatchQueue.main.async { image?.image = result.nsImage } }
-            }
-        }
-        return cell
+    func collectionView(_ collectionView: NSCollectionView, didSelectItemsAt indexPaths: Set<IndexPath>) { updateButtons() }
+    func collectionView(_ collectionView: NSCollectionView, didDeselectItemsAt indexPaths: Set<IndexPath>) { updateButtons() }
+    func collectionView(_ collectionView: NSCollectionView, numberOfItemsInSection section: Int) -> Int { displayed.count }
+    func collectionView(_ collectionView: NSCollectionView, itemForRepresentedObjectAt indexPath: IndexPath) -> NSCollectionViewItem {
+        let item = collectionView.makeItem(withIdentifier: ShelfTileItem.identifier, for: indexPath) as! ShelfTileItem
+        item.configure(displayed[indexPath.item], showDetails: SettingsStore.shared.data.shelfHoverDetails)
+        return item
     }
     /// One visual stack supplies multiple file pasteboard items to the receiving app.
     func pasteboardItems(forRows rowIndexes: IndexSet) -> [NSPasteboardItem] {
@@ -449,14 +545,14 @@ final class ShelfViewController: NSViewController, NSTableViewDataSource, NSTabl
         if !operation.isEmpty && !insideShelf && SettingsStore.shared.data.shelfRemoveAfterDrag { store.finishDrag(draggedIDs) }
         draggedIDs = []
     }
-    @objc private func toggleStack(_ sender: NSButton) {
-        guard displayed.indices.contains(sender.tag) else { return }
-        let id = displayed[sender.tag].id
+    @objc private func toggleSelectedStack() {
+        guard let index = tiles.selectionIndexPaths.first?.item, displayed.indices.contains(index), displayed[index].isStack else { return }
+        let id = displayed[index].id
         if expandedGroups.contains(id) { expandedGroups.remove(id) } else { expandedGroups.insert(id) }
         refresh()
     }
     @objc private func openSelection() {
-        let rows = table.selectedRowIndexes.filter { displayed.indices.contains($0) }.map { displayed[$0] }
+        let rows = tiles.selectionIndexPaths.map(\.item).filter { displayed.indices.contains($0) }.map { displayed[$0] }
         if let stack = rows.first, rows.count == 1, stack.isStack {
             if expandedGroups.contains(stack.id) { expandedGroups.remove(stack.id) } else { expandedGroups.insert(stack.id) }
             refresh()
@@ -464,11 +560,13 @@ final class ShelfViewController: NSViewController, NSTableViewDataSource, NSTabl
         else { selection.forEach { NSWorkspace.shared.open($0.url) } }
     }
     func menuNeedsUpdate(_ menu: NSMenu) {
-        let clicked = table.clickedRow
-        if displayed.indices.contains(clicked), !table.selectedRowIndexes.contains(clicked) { table.selectRowIndexes(IndexSet(integer: clicked), byExtendingSelection: false) }
+        if let event = NSApp.currentEvent, let clicked = tiles.indexPathForItem(at: tiles.convert(event.locationInWindow, from: nil)),
+           !tiles.selectionIndexPaths.contains(clicked) { tiles.selectionIndexPaths = [clicked] }
         menu.removeAllItems(); menu.autoenablesItems = false
+        let hasStack = tiles.selectionIndexPaths.count == 1 && tiles.selectionIndexPaths.first.map { displayed.indices.contains($0.item) && displayed[$0.item].isStack } == true
         for (title, action, enabled) in [
             ("プレビュー", #selector(previewFiles), !selection.isEmpty),
+            ("スタックを展開／閉じる", #selector(toggleSelectedStack), hasStack),
             ("Finderで表示", #selector(revealFiles), !selection.isEmpty),
             ("コピー", #selector(copyFiles), !selection.isEmpty),
             ("スタックにまとめる", #selector(combineFiles), selection.count > 1),
@@ -487,17 +585,6 @@ final class ShelfViewController: NSViewController, NSTableViewDataSource, NSTabl
     @objc private func splitFiles() { store.splitGroups(Set(selection.compactMap(\.groupID))) }
     @objc private func clearAllFiles() { store.clearAll() }
     @objc private func undoClear() { store.restoreRemoved() }
-    func tableView(_ tableView: NSTableView, validateDrop info: NSDraggingInfo, proposedRow row: Int, proposedDropOperation dropOperation: NSTableView.DropOperation) -> NSDragOperation {
-        guard info.draggingSource as? NSTableView !== table, info.draggingSourceOperationMask.contains(.copy),
-              !Self.urls(from: info.draggingPasteboard).isEmpty else { return [] }
-        tableView.setDropRow(-1, dropOperation: .on)
-        return .copy
-    }
-    func tableView(_ tableView: NSTableView, acceptDrop info: NSDraggingInfo, row: Int, dropOperation: NSTableView.DropOperation) -> Bool {
-        let result = store.add(Self.urls(from: info.draggingPasteboard))
-        if result { onDrop?() }
-        return result
-    }
     static func urls(from pasteboard: NSPasteboard) -> [URL] {
         (pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
     }
@@ -546,9 +633,19 @@ struct ShelfSettingsView: View {
             }
             Section {
                 Toggle("取り出しに成功したファイルを棚から外す", isOn: $store.data.shelfRemoveAfterDrag)
-                Text("ピン留めしたファイルは残ります。元のファイルは削除しません。").font(.caption).foregroundStyle(.secondary)
+                Text("ピン留めしたファイルは残ります。Finderでは通常のファイルドラッグと同じ移動・コピーが適用されます。⌥でコピー、⌘で移動。ブラウザやメールへの添付では元ファイルを保持します。")
+                    .font(.caption).foregroundStyle(.secondary)
                 Toggle("完了したダウンロードを棚に追加", isOn: $store.data.shelfDownloads)
-                Text("棚から外しても元のファイルは削除されません。ファイルとフォルダを追加できます。")
+                Text("棚から外す操作は元ファイルを変更しません。ファイルとフォルダを追加できます。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("表示") {
+                Picker("タイルの大きさ", selection: $store.data.shelfTileSize) {
+                    ForEach(ShelfTileSize.allCases, id: \.self) { size in Text(size.title).tag(size) }
+                }
+                .pickerStyle(.segmented)
+                Toggle("ホバーでファイルの詳細を表示", isOn: $store.data.shelfHoverDetails)
+                Text("タイルは横に並び、棚の幅を超えると横スクロールできます。スタックはダブルクリックで展開できます。")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }.formStyle(.grouped)

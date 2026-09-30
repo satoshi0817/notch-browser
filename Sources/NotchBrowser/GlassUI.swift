@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 /// A single glass layer for the app chrome. Web pages remain opaque and readable.
@@ -78,7 +79,14 @@ struct StartPage: View {
     let open: (UUID) -> Void
     let navigate: (String) -> Void
     @State private var query = ""
+    @State private var exampleIndex = 0
     @FocusState private var queryFocused: Bool
+    private let examples = [
+        "「富士山の天気」を検索",
+        "https://example.com を開く",
+        "「近くのカフェ」を調べる",
+        "「macOS の使い方」を検索"
+    ]
 
     var body: some View {
         GeometryReader { geometry in
@@ -88,8 +96,10 @@ struct StartPage: View {
                         Image(systemName: "safari")
                             .font(.system(size: 34, weight: .ultraLight))
                             .foregroundStyle(.white.opacity(0.7))
-                        Text("どこへ行きますか？")
+                        Text(query.isEmpty && !queryFocused ? examples[exampleIndex] : "検索するか、URLを入力")
                             .font(.system(size: 29, weight: .medium, design: .rounded))
+                            .contentTransition(.opacity)
+                            .frame(height: 42)
                         HStack(spacing: 14) {
                             Image(systemName: "magnifyingglass")
                                 .font(.system(size: 18))
@@ -154,6 +164,10 @@ struct StartPage: View {
         .background(Color.black)
         .preferredColorScheme(.dark)
         .onChange(of: tabID) { _, _ in query = "" }
+        .onReceive(Timer.publish(every: 4, on: .main, in: .common).autoconnect()) { _ in
+            guard query.isEmpty, !queryFocused else { return }
+            withAnimation(.easeInOut(duration: 0.45)) { exampleIndex = (exampleIndex + 1) % examples.count }
+        }
     }
 
     private func submitQuery() {

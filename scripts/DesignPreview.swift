@@ -26,6 +26,12 @@ struct DesignPreview {
         for screen in NSScreen.screens { data.displays[screen.displayUUID] = DisplaySettings(enabled: screen == NSScreen.screens.first, width: CommandLine.arguments.contains("--compact") ? 600 : 960, height: 660) }
         SettingsStore.shared.data = data
         let manager = NotchManager(shelfStore: ShelfStore(file: fixture.deletingLastPathComponent().appendingPathComponent("preview-shelf.json")))
+        if CommandLine.arguments.contains("--shelf") {
+            let files = (1...8).map { index in fixture.deletingLastPathComponent().appendingPathComponent("preview-file-\(index).txt") }
+            for (index, file) in files.enumerated() { try? Data("Preview file \(index + 1)".utf8).write(to: file) }
+            _ = manager.shelf.store.add(Array(files.prefix(2)))
+            for file in files.dropFirst(2) { _ = manager.shelf.store.add([file]) }
+        }
         let settings = SettingsWindowController()
         manager.browser.onOpenSettings = { settings.present() }
         let menu = NSMenu()

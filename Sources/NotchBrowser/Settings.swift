@@ -124,6 +124,8 @@ struct SettingsData: Codable {
     var motion = MotionSettings()
     var glassTint = 0.5
     var shelfTrigger = ShelfTrigger.automatic
+    var shelfTileSize = ShelfTileSize.medium
+    var shelfHoverDetails = true
     var toolbarActions = ToolbarAction.defaults
     var confirmBeforeQuit = true
     var shelfDownloads = false
@@ -146,6 +148,8 @@ struct SettingsData: Codable {
         grayscaleIcons = try c.decodeIfPresent(Bool.self, forKey: .grayscaleIcons) ?? fallback.grayscaleIcons
         colorSelectedIcon = try c.decodeIfPresent(Bool.self, forKey: .colorSelectedIcon) ?? fallback.colorSelectedIcon
         shelfTrigger = (try? c.decode(ShelfTrigger.self, forKey: .shelfTrigger)) ?? .automatic
+        shelfTileSize = (try? c.decode(ShelfTileSize.self, forKey: .shelfTileSize)) ?? .medium
+        shelfHoverDetails = (try? c.decode(Bool.self, forKey: .shelfHoverDetails)) ?? true
         shelfRemoveAfterDrag = (try? c.decode(Bool.self, forKey: .shelfRemoveAfterDrag)) ?? true
         shelfDownloads = (try? c.decode(Bool.self, forKey: .shelfDownloads)) ?? false
         toolbarActions = (try? c.decode([String].self, forKey: .toolbarActions))

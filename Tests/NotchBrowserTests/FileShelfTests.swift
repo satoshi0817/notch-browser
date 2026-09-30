@@ -52,7 +52,16 @@ final class FileShelfTests: XCTestCase {
     func testOldSettingsKeepShelfDefaults() throws {
         let data = try JSONDecoder().decode(SettingsData.self, from: Data("{}".utf8))
         XCTAssertEqual(data.shelfTrigger, .automatic)
+        XCTAssertEqual(data.shelfTileSize, .medium)
+        XCTAssertTrue(data.shelfHoverDetails)
         XCTAssertFalse(data.shelfDownloads)
+    }
+
+    func testOutgoingDragAllowsFinderStyleMoveAndCopy() {
+        let external = ShelfTilesView.allowedOperations(for: .outsideApplication)
+        XCTAssertTrue(external.contains(.copy))
+        XCTAssertTrue(external.contains(.move))
+        XCTAssertEqual(ShelfTilesView.allowedOperations(for: .withinApplication), .copy)
     }
 
     @MainActor func testShelfUsesCompactNotchAndPreservesExpandedBrowser() throws {
@@ -77,8 +86,12 @@ final class FileShelfTests: XCTestCase {
         let browserSize = manager.browser.view.frame.size
         controller.showShelf()
         XCTAssertFalse(controller.shelfOnly)
-        XCTAssertEqual(manager.browser.view.frame.height, browserSize.height - 220)
+        XCTAssertEqual(manager.browser.view.frame.height, browserSize.height - manager.shelf.preferredShelfHeight)
         XCTAssertFalse(manager.browser.view.frame.intersects(manager.shelf.view.frame))
+        let scroll = try XCTUnwrap(manager.shelf.tiles.enclosingScrollView)
+        XCTAssertTrue(scroll.hasHorizontalScroller)
+        XCTAssertFalse(scroll.hasVerticalScroller)
+        XCTAssertEqual((manager.shelf.tiles.collectionViewLayout as? NSCollectionViewFlowLayout)?.scrollDirection, .horizontal)
         controller.hideShelf()
         XCTAssertTrue(controller.isExpanded)
         XCTAssertEqual(manager.browser.view.frame.size, browserSize)
@@ -150,7 +163,7 @@ final class FileShelfTests: XCTestCase {
         store.add(urls)
         let controller = ShelfViewController(store: store)
         _ = controller.view
-        XCTAssertEqual(controller.numberOfRows(in: controller.table), 1)
+        XCTAssertEqual(controller.collectionView(controller.tiles, numberOfItemsInSection: 0), 1)
         let pasteboard = NSPasteboard.withUniqueName()
         defer { pasteboard.releaseGlobally() }
         XCTAssertTrue(pasteboard.writeObjects(controller.pasteboardItems(forRows: [0])))
