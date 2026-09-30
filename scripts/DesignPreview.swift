@@ -7,6 +7,8 @@ struct DesignPreview {
         precondition(Bundle.main.bundleIdentifier == "com.satoshi0817.NotchBrowser.DesignPreview")
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)
+        let quitDelegate = PreviewQuitDelegate()
+        app.delegate = quitDelegate
         var data = SettingsData()
         data.countdownEnabled = false
         data.hideFromScreenCapture = false
@@ -72,7 +74,7 @@ struct DesignPreview {
             let release = GitHubRelease(tag_name: "v0.2.2", draft: false, prerelease: false, assets: [.init(name: "NotchBrowser-0.2.2.zip", state: "uploaded", size: 1)])
             updatePreview = UpdateWindowController(release: release, checker: UpdateChecker(currentVersion: "0.2.1"), manual: true)
         }
-        withExtendedLifetime((manager, settings, updatePreview, dragFixture)) { app.run() }
+        withExtendedLifetime((manager, settings, updatePreview, dragFixture, quitDelegate)) { app.run() }
     }
 }
 
@@ -109,4 +111,12 @@ final class FileDragFixture: NSView, NSDraggingSource {
         return !urls.isEmpty
     }
     func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation { .copy }
+}
+
+/// Exercise the production quit confirmation without starting production services.
+final class PreviewQuitDelegate: NSObject, NSApplicationDelegate {
+    private let delegate = AppDelegate()
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        delegate.applicationShouldTerminate(sender)
+    }
 }

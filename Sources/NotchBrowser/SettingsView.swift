@@ -57,7 +57,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 }
 
 private enum SettingsSection: String, CaseIterable, Identifiable {
-    case tabs = "固定ページ", profiles = "プロファイル", displays = "ディスプレイ", motion = "動き", shelf = "ファイル棚", general = "一般"
+    case tabs = "固定ページ", profiles = "プロファイル", displays = "ディスプレイ", motion = "動き", shelf = "ファイル棚", toolbar = "ボタン配置", general = "一般"
     var id: Self { self }
     var symbol: String {
         switch self {
@@ -67,6 +67,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
         case .motion: "waveform.path"
         case .general: "slider.horizontal.3"
         case .shelf: "tray"
+        case .toolbar: "rectangle.topthird.inset.filled"
         }
     }
 
@@ -94,6 +95,7 @@ struct SettingsView: View {
                             }
                             .font(.system(size: 13, weight: item == section ? .semibold : .regular))
                             .padding(12)
+                            .contentShape(Rectangle())
                             .background(item == section ? Color.white.opacity(0.10) : .clear, in: RoundedRectangle(cornerRadius: 13))
                             .foregroundStyle(item == section ? .white : .secondary)
                         }.buttonStyle(.plain).accessibilityLabel(item.rawValue)
@@ -111,6 +113,7 @@ struct SettingsView: View {
                     case .motion: MotionSettingsView()
                     case .general: GeneralSettings()
                     case .shelf: ShelfSettingsView()
+                    case .toolbar: ToolbarSettingsView()
                     }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -352,6 +355,7 @@ struct GeneralSettings: View {
             }
 
             Section {
+                Toggle("終了前に確認する", isOn: $store.data.confirmBeforeQuit)
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("NotchBrowser を終了")
@@ -371,5 +375,32 @@ struct GeneralSettings: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+struct ToolbarSettingsView: View {
+    @EnvironmentObject var store: SettingsStore
+
+    var body: some View {
+        Form {
+            Section("ノッチのボタン配置") {
+                ForEach(ToolbarAction.allCases) { action in
+                    Picker(action.title, selection: Binding(
+                        get: { store.data.toolbarActions.contains(action) },
+                        set: { visible in
+                            store.data.toolbarActions.removeAll { $0 == action }
+                            if visible { store.data.toolbarActions.append(action) }
+                        }
+                    )) {
+                        Text("ノッチに表示").tag(true)
+                        Text("メニュー内").tag(false)
+                    }
+                }
+                Text("幅に収まらないボタンは自動的にメニューへ移動します。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("配置を標準に戻す") { store.data.toolbarActions = ToolbarAction.defaults }
+            }
+
+        }.formStyle(.grouped)
     }
 }

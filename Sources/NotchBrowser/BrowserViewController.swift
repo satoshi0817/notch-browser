@@ -90,6 +90,42 @@ final class BrowserViewController: NSViewController {
     private lazy var reloadButton = iconButton("arrow.clockwise", "再読み込み", #selector(reloadOrStop))
     private lazy var keepOpenButton = iconButton("pin", "開いたままにする", #selector(toggleKeepOpen))
 
+    private lazy var toolbarButtons: [ToolbarAction: NSButton] = {
+        var buttons: [ToolbarAction: NSButton] = [
+            .back: backButton, .forward: forwardButton, .home: homeButton,
+            .reload: reloadButton, .address: addressButton, .keepOpen: keepOpenButton
+        ]
+        let extras: [(ToolbarAction, String, Selector)] = [
+            (.find, "magnifyingglass", #selector(showFind)),
+            (.copyURL, "link", #selector(copyPageURL)),
+            (.zoomIn, "plus.magnifyingglass", #selector(zoomIn)),
+            (.zoomOut, "minus.magnifyingglass", #selector(zoomOut)),
+            (.resetZoom, "arrow.up.left.and.arrow.down.right", #selector(resetZoom)),
+            (.autoRefresh, "arrow.triangle.2.circlepath", #selector(showAutoRefresh)),
+            (.restore, "arrow.uturn.backward", #selector(reopenClosedTab)),
+            (.tabSearch, "square.stack", #selector(showTabSwitcher)),
+            (.closeTab, "xmark", #selector(closeCurrentTab)),
+            (.shelf, "tray", #selector(openShelf)),
+            (.notes, "square.and.pencil", #selector(toggleNotes)),
+            (.external, "safari", #selector(openExternally)),
+            (.settings, "gearshape", #selector(openSettings)),
+            (.quit, "power", #selector(quitApplication))
+        ]
+        for (action, icon, selector) in extras {
+            buttons[action] = iconButton(icon, action.title, selector)
+        }
+        return buttons
+    }()
+
+    private var autoRefreshMenu = NSMenu()
+
+    @objc private func showAutoRefresh() {
+        guard let button = toolbarButtons[.autoRefresh] else { return }
+        autoRefreshMenu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.maxY), in: button)
+    }
+
+    @objc private func quitApplication() { NSApp.terminate(nil) }
+
     private var tabTrailingConstraint: NSLayoutConstraint!
     private var controlLeadingConstraint: NSLayoutConstraint!
     private var stripHeightConstraints: [NSLayoutConstraint] = []
@@ -154,9 +190,11 @@ final class BrowserViewController: NSViewController {
         addressPopover.behavior = .transient
         addressPopover.animates = false
         addressPopover.delegate = self
-        for button in [backButton, forwardButton, homeButton, reloadButton, addressButton] { controlStack.addArrangedSubview(button) }
+        for action in ToolbarAction.allCases {
+            if let button = toolbarButtons[action] { controlStack.addArrangedSubview(button) }
+        }
         controlStack.addArrangedSubview(NSView())
-        for button in [keepOpenButton, toolsButton] { controlStack.addArrangedSubview(button) }
+        controlStack.addArrangedSubview(toolsButton)
         tabScroll.drawsBackground = false
         tabScroll.hasHorizontalScroller = true
         tabScroll.scrollerStyle = .overlay
@@ -241,9 +279,17 @@ final class BrowserViewController: NSViewController {
 
     private func updateCompactControls() {
         let available = view.bounds.width / 2 - controlLeadingConstraint.constant - 12
-        // Five 28pt controls plus spacing fit at 600pt with a physical camera cutout.
-        forwardButton.isHidden = available < 230
-        reloadButton.isHidden = available < 230
+        let capacity = max(0, Int((available - 32) / 32))
+        let requested = Set(store.data.toolbarActions)
+        let priority: [ToolbarAction] = [.address, .settings, .quit, .back, .keepOpen]
+            + ToolbarAction.allCases.filter { ![.address, .settings, .quit, .back, .keepOpen].contains($0) }
+        let visible = Set(priority.filter { requested.contains($0) }.prefix(capacity))
+        var changed = false
+        for (action, button) in toolbarButtons {
+            let hidden = !visible.contains(action)
+            if button.isHidden != hidden { button.isHidden = hidden; changed = true }
+        }
+        if changed { rebuildToolsMenu() }
     }
 
     override func viewDidLayout() {
@@ -269,6 +315,7 @@ final class BrowserViewController: NSViewController {
         guard isViewLoaded else { return }
         syncPinnedTabs()
         glass.updateAppearance()
+        updateCompactControls()
         updateChrome()
     }
 
@@ -682,7 +729,8 @@ final class BrowserViewController: NSViewController {
         if !addressPopover.isShown {
             addressField.stringValue = selectedTab?.webView.url?.absoluteString ?? ""
             onModalChange?(true)
-            addressPopover.show(relativeTo: addressButton.bounds, of: addressButton, preferredEdge: .minY)
+            let anchor: NSView = addressButton.isHidden ? toolsButton : addressButton
+            addressPopover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
             addressField.window?.level = NSWindow.Level(rawValue: window.level.rawValue + 1)
             addressField.window?.sharingType = hideFromScreenCapture ? .none : .readOnly
         }
@@ -748,22 +796,27 @@ final class BrowserViewController: NSViewController {
         let heading = NSMenuItem(title: "", action: nil, keyEquivalent: "")
         heading.image = symbol("ellipsis.circle")
         menu.addItem(heading)
-        func add(_ title: String, _ icon: String, _ action: Selector, enabled: Bool = true) -> NSMenuItem {
-            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
-            item.target = self
-            item.image = symbol(icon)
-            item.isEnabled = enabled
-            menu.addItem(item)
-            return item
-        }
         let hasPage = selectedTab?.webView.url != nil
-        _ = add("ページ内を検索  ⌘F", "magnifyingglass", #selector(showFind), enabled: hasPage)
-        _ = add("URLをコピー", "link", #selector(copyPageURL), enabled: hasPage)
-        menu.addItem(.separator())
         let zoom = selectedTab?.webView.pageZoom ?? 1
-        _ = add("拡大  ⌘+", "plus.magnifyingglass", #selector(zoomIn), enabled: hasPage && zoom < 3)
-        _ = add("縮小  ⌘−", "minus.magnifyingglass", #selector(zoomOut), enabled: hasPage && zoom > 0.5)
-        _ = add("実際のサイズ (\(Int((zoom * 100).rounded()))%)  ⌘0", "arrow.up.left.and.arrow.down.right", #selector(resetZoom), enabled: hasPage)
+        for action in ToolbarAction.allCases {
+            guard let button = toolbarButtons[action] else { continue }
+            switch action {
+            case .find, .copyURL, .resetZoom, .external, .autoRefresh: button.isEnabled = hasPage
+            case .zoomIn: button.isEnabled = hasPage && zoom < 3
+            case .zoomOut: button.isEnabled = hasPage && zoom > 0.5
+            case .restore: button.isEnabled = !closedTabs.isEmpty
+            case .closeTab: button.isEnabled = selectedTab != nil && selectedTab?.pinnedID == nil
+            case .reload: button.isEnabled = hasPage || selectedTab?.webView.isLoading == true
+            default: break
+            }
+            guard button.isHidden, action != .autoRefresh else { continue }
+            let item = NSMenuItem(title: action.title, action: button.action, keyEquivalent: "")
+            item.target = self
+            item.image = button.image
+            item.isEnabled = button.isEnabled
+            if action == .keepOpen { item.state = keepOpen ? .on : .off }
+            menu.addItem(item)
+        }
         menu.addItem(.separator())
         let refresh = NSMenuItem(title: "自動更新", action: nil, keyEquivalent: "")
         refresh.image = symbol("arrow.triangle.2.circlepath")
@@ -779,23 +832,8 @@ final class BrowserViewController: NSViewController {
             intervals.addItem(item)
         }
         refresh.submenu = intervals
-        menu.addItem(refresh)
-        menu.addItem(.separator())
-        _ = add("閉じたタブを戻す  ⌘⇧T", "arrow.uturn.backward", #selector(reopenClosedTab), enabled: !closedTabs.isEmpty)
-        _ = add("設定したページに戻る", "house", #selector(goHome), enabled: homeButton.isEnabled)
-        _ = add("進む", "chevron.right", #selector(goForward), enabled: forwardButton.isEnabled)
-        _ = add("再読み込み  ⌘R", "arrow.clockwise", #selector(reloadPage), enabled: hasPage)
-        _ = add("URLを表示・検索  ⌘L", "magnifyingglass", #selector(focusAddressBar))
-        _ = add("タブを検索  ⌘⇧A", "square.stack", #selector(showTabSwitcher))
-        _ = add("タブを閉じる  ⌘W", "xmark", #selector(closeCurrentTab), enabled: selectedTab != nil && selectedTab?.pinnedID == nil)
-        menu.addItem(.separator())
-        _ = add("ファイル棚", "tray", #selector(openShelf))
-        _ = add("クイックメモ  ⌘⇧M", "square.and.pencil", #selector(toggleNotes))
-        menu.addItem(.separator())
-        _ = add("デフォルトブラウザで開く", "safari", #selector(openExternally), enabled: hasPage)
-        _ = add("設定…  ⌘,", "gearshape", #selector(openSettings))
-        let quit = add("NotchBrowser を終了  ⌘Q", "power", #selector(NSApplication.terminate(_:)))
-        quit.target = NSApp
+        autoRefreshMenu = intervals
+        if toolbarButtons[.autoRefresh]?.isHidden == true { menu.addItem(refresh) }
         toolsButton.menu = menu
         reloadButton.toolTip = (selectedTab?.refreshInterval ?? 0) > 0
             ? "再読み込み・自動更新中 (\(Int(selectedTab!.refreshInterval))秒ごと)" : "再読み込み (⌘R)"
@@ -891,9 +929,7 @@ final class BrowserViewController: NSViewController {
             guard let self, let tab = self.tabs.first(where: { $0.pinnedID == id }) else { return }
             self.select(tab)
             self.focusContent()
-        }, search: { [weak self] in self?.focusAddressBar() }, restore: { [weak self] in
-            self?.reopenClosedTab(nil)
-        }, canRestore: !closedTabs.isEmpty, settings: { [weak self] in self?.onOpenSettings?() })
+        }, search: { [weak self] in self?.focusAddressBar() })
         if let startPage { startPage.rootView = page; startPage.isHidden = false }
         else {
             let host = NSHostingView(rootView: page)

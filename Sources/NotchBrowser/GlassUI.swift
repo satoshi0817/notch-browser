@@ -76,31 +76,19 @@ struct StartPage: View {
     let tabs: [PinnedTab]
     let open: (UUID) -> Void
     let search: () -> Void
-    let restore: () -> Void
-    let canRestore: Bool
-    let settings: () -> Void
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                HStack(spacing: 14) {
-                    Image(systemName: "safari").font(.system(size: 32, weight: .light))
-                        .foregroundStyle(.cyan).frame(width: 64, height: 64).modifier(GlassCard())
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("次の作業を、ここから。").font(.system(size: 25, weight: .semibold, design: .rounded))
-                        Text("いつものページへ、ひと続きで。").font(.system(size: 13)).foregroundStyle(.secondary)
-                    }
-                }
                 Button(action: search) {
                     HStack {
                         Image(systemName: "magnifyingglass")
                         Text("検索、またはURLを入力")
                         Spacer()
                         Text("⌘ L").font(.caption.monospaced()).foregroundStyle(.secondary)
-                    }.padding(16).modifier(GlassCard())
+                    }.padding(16).background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10)).contentShape(Rectangle())
                 }.buttonStyle(.plain).accessibilityLabel("検索またはURLを入力")
                 VStack(alignment: .leading, spacing: 12) {
-                    Label("固定したページ", systemImage: "pin").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
                     if tabs.isEmpty {
                         Text("タブのメニューからページを固定すると、ここに表示されます。")
                             .font(.callout).foregroundStyle(.secondary)
@@ -110,27 +98,20 @@ struct StartPage: View {
                             Button { open(tab.id) } label: {
                                 HStack(spacing: 12) {
                                     Image(systemName: TabIconRenderer.symbolName(for: tab.icon, hosts: [tab.host]))
-                                        .font(.system(size: 20, weight: .medium)).foregroundStyle(.cyan).frame(width: 28)
+                                        .font(.system(size: 20, weight: .medium)).foregroundStyle(.secondary).frame(width: 24)
                                     VStack(alignment: .leading, spacing: 4) {
                                         Text(tab.name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                                        Text(tab.host ?? "Web").font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
                                     }
                                     Spacer(minLength: 0)
-                                }.padding(16).frame(maxWidth: .infinity, alignment: .leading).modifier(GlassCard())
+                                }.padding(12).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                             }.buttonStyle(.plain).accessibilityLabel(tab.name)
                         }
                     }
                 }
-                HStack(spacing: 16) {
-                    Button(action: restore) { Label("閉じたタブを戻す", systemImage: "arrow.uturn.backward") }
-                        .disabled(!canRestore)
-                    Spacer()
-                    Button(action: settings) { Label("固定ページを編集", systemImage: "slider.horizontal.3") }
-                }.font(.system(size: 12)).buttonStyle(.plain).foregroundStyle(.secondary)
-            }.padding(32).frame(maxWidth: 760)
+            }.padding(.horizontal, 32).padding(.top, 64).padding(.bottom, 32).frame(maxWidth: 640)
                 .frame(maxWidth: .infinity)
         }
-        .background(LinearGradient(colors: [Color(red: 0.085, green: 0.12, blue: 0.2), Color(red: 0.04, green: 0.055, blue: 0.09)], startPoint: .topLeading, endPoint: .bottomTrailing))
+        .background(Color.black)
         .preferredColorScheme(.dark)
     }
 }

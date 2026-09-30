@@ -117,6 +117,37 @@ final class BrowserToolsTests: XCTestCase {
     }
 
     @MainActor
+    func testToolbarPlacementMovesActionsIntoMenuAndBack() throws {
+        _ = NSApplication.shared
+        let store = SettingsStore.shared
+        let saved = store.data
+        defer { store.data = saved }
+        var settings = SettingsData()
+        settings.pinnedTabs = []
+        settings.toolbarActions = [.settings, .quit]
+        store.data = settings
+        let browser = BrowserViewController()
+        browser.view.frame = NSRect(x: 0, y: 0, width: 960, height: 500)
+        browser.updateNotchMetrics(notchWidth: 200, stripHeight: 32)
+        browser.view.layoutSubtreeIfNeeded()
+        let controls = descendants(browser.view).compactMap { $0 as? NSButton }
+        let settingsButton = try XCTUnwrap(controls.first { $0.accessibilityLabel() == "設定" })
+        let menu = try XCTUnwrap(controls.compactMap { $0 as? NSPopUpButton }.first)
+        XCTAssertFalse(settingsButton.isHidden)
+        XCTAssertFalse(menu.itemTitles.contains("設定"))
+        XCTAssertTrue(menu.itemTitles.contains("戻る"))
+        store.data.toolbarActions = []
+        browser.settingsChanged()
+        XCTAssertTrue(settingsButton.isHidden)
+        XCTAssertTrue(menu.itemTitles.contains("設定"))
+        XCTAssertTrue(menu.itemTitles.contains("終了"))
+        store.data.toolbarActions = [.settings, .quit]
+        browser.settingsChanged()
+        XCTAssertFalse(settingsButton.isHidden)
+        XCTAssertFalse(menu.itemTitles.contains("設定"))
+    }
+
+    @MainActor
     func testCompactLayoutKeepsTheOriginalSingleStripAndCameraGap() throws {
         _ = NSApplication.shared
         let store = SettingsStore.shared
@@ -140,7 +171,7 @@ final class BrowserToolsTests: XCTestCase {
             browser.view.layoutSubtreeIfNeeded()
             browser.view.layoutSubtreeIfNeeded()
             let buttons = descendants(browser.view).compactMap { $0 as? NSButton }.filter {
-                !$0.isHidden && ["戻る", "進む", "設定したページに戻る", "再読み込み", "URLを表示・検索 (⌘L)", "開いたままにする", "ページの操作"].contains($0.accessibilityLabel() ?? "")
+                !$0.isHidden && ["戻る", "進む", "設定したページに戻る", "再読み込み", "URLを表示・検索 (⌘L)", "開いたままにする", "設定", "終了", "ページの操作"].contains($0.accessibilityLabel() ?? "")
             }
             let frames = buttons.map { $0.convert($0.bounds, to: browser.view) }.sorted { $0.minX < $1.minX }
             XCTAssertGreaterThanOrEqual(frames.count, 5)

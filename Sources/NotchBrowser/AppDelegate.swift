@@ -36,6 +36,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private var isConfirmingQuit = false
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !isConfirmingQuit else { return .terminateCancel }
+        guard SettingsStore.shared.data.confirmBeforeQuit else { return .terminateNow }
+        isConfirmingQuit = true
+        defer { isConfirmingQuit = false }
+        let alert = NSAlert()
+        alert.messageText = "NotchBrowser を終了しますか？"
+        alert.informativeText = "ブラウザとファイル棚を閉じます。"
+        alert.addButton(withTitle: "キャンセル")
+        alert.addButton(withTitle: "終了")
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = "今後表示しない"
+        alert.window.appearance = NSAppearance(named: .darkAqua)
+        // runModal resets the level to modalPanel; raise it once its modal loop starts.
+        DispatchQueue.main.async {
+            alert.window.level = NSWindow.Level(rawValue: NotchController.level.rawValue + 2)
+            alert.window.orderFrontRegardless()
+        }
+        sender.activate()
+        guard alert.runModal() == .alertSecondButtonReturn else { return .terminateCancel }
+        if alert.suppressionButton?.state == .on {
+            SettingsStore.shared.data.confirmBeforeQuit = false
+        }
+        return .terminateNow
+    }
+
     // MARK: Status item
 
     private func setupStatusItem() {

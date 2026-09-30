@@ -47,6 +47,37 @@ struct DisplaySettings: Codable, Hashable {
     var height: Double = 660
 }
 
+enum ToolbarAction: String, Codable, CaseIterable, Identifiable {
+    case back, forward, home, reload, address, keepOpen, find, copyURL
+    case zoomIn, zoomOut, resetZoom, autoRefresh, restore, tabSearch, closeTab, shelf, notes, external, settings, quit
+    var id: Self { self }
+    var title: String {
+        switch self {
+        case .back: "戻る"
+        case .forward: "進む"
+        case .home: "設定したページに戻る"
+        case .reload: "再読み込み"
+        case .address: "URLを表示・検索"
+        case .keepOpen: "開いたままにする"
+        case .find: "ページ内を検索"
+        case .copyURL: "URLをコピー"
+        case .zoomIn: "拡大"
+        case .zoomOut: "縮小"
+        case .resetZoom: "実際のサイズ"
+        case .autoRefresh: "自動更新"
+        case .restore: "閉じたタブを戻す"
+        case .tabSearch: "タブを検索"
+        case .closeTab: "タブを閉じる"
+        case .shelf: "ファイル棚"
+        case .notes: "クイックメモ"
+        case .external: "デフォルトブラウザで開く"
+        case .settings: "設定"
+        case .quit: "終了"
+        }
+    }
+    static let defaults: [Self] = [.back, .forward, .home, .reload, .address, .keepOpen, .settings, .quit]
+}
+
 struct SettingsData: Codable {
     var profiles = [Profile(id: Profile.defaultID, name: "デフォルト")]
     var pinnedTabs = [
@@ -67,6 +98,8 @@ struct SettingsData: Codable {
     var motion = MotionSettings()
     var glassTint = 0.5
     var shelfTrigger = ShelfTrigger.automatic
+    var toolbarActions = ToolbarAction.defaults
+    var confirmBeforeQuit = true
     var shelfDownloads = false
     var shelfRemoveAfterDrag = true
 
@@ -89,6 +122,9 @@ struct SettingsData: Codable {
         shelfTrigger = (try? c.decode(ShelfTrigger.self, forKey: .shelfTrigger)) ?? .automatic
         shelfRemoveAfterDrag = (try? c.decode(Bool.self, forKey: .shelfRemoveAfterDrag)) ?? true
         shelfDownloads = (try? c.decode(Bool.self, forKey: .shelfDownloads)) ?? false
+        toolbarActions = (try? c.decode([String].self, forKey: .toolbarActions))
+            .map { raw in ToolbarAction.allCases.filter { raw.contains($0.rawValue) } } ?? fallback.toolbarActions
+        confirmBeforeQuit = (try? c.decode(Bool.self, forKey: .confirmBeforeQuit)) ?? true
         let tint = (try? c.decode(Double.self, forKey: .glassTint)) ?? fallback.glassTint
         glassTint = tint.isFinite ? min(1, max(0, tint)) : fallback.glassTint
         motion = (try? c.decode(MotionSettings.self, forKey: .motion)) ?? fallback.motion
