@@ -16,6 +16,20 @@ final class NotionAgentsTests: XCTestCase {
         XCTAssertEqual(NotionMessage.oldestFirst([later, earlier]).map(\.id), ["earlier", "later"])
     }
 
+    func testSentMessageStaysPendingUntilMatchingUserEventArrives() {
+        let pending = NotionMessage(id: "pending", role: "user", content: "質問です",
+                                    created_time: "2026-10-01T01:00:00Z", pending_user_actions: nil)
+        XCTAssertTrue(NotionMessage(id: "server", role: "user", content: "質問です",
+                                    created_time: "2026-10-01T01:00:00.500Z", pending_user_actions: nil)
+            .confirms(pending))
+        XCTAssertFalse(NotionMessage(id: "old", role: "user", content: "質問です",
+                                     created_time: "2026-09-30T00:00:00Z", pending_user_actions: nil)
+            .confirms(pending))
+        XCTAssertFalse(NotionMessage(id: "agent", role: "agent", content: "質問です",
+                                     created_time: "2026-10-01T01:00:01Z", pending_user_actions: nil)
+            .confirms(pending))
+    }
+
     private func response(_ request: URLRequest, _ status: Int = 200) -> HTTPURLResponse {
         HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!
     }
@@ -26,18 +40,42 @@ final class NotionAgentsTests: XCTestCase {
         XCTAssertTrue(settings.notionSavedAgents.isEmpty)
         XCTAssertTrue(settings.notionNotificationsEnabled)
         XCTAssertEqual(settings.notionNotificationDuration, 10)
+        XCTAssertEqual(settings.notionAppearance, .system)
         XCTAssertEqual(settings.notionTabPosition, settings.pinnedTabs.count)
         settings.notionHiddenAgentIDs.insert("agent-1")
         settings.notionNotificationsEnabled = false
         settings.notionNotificationDuration = 30
         settings.notionTabPosition = 1
         settings.notionSavedAgents = [SavedNotionAgent(id: "agent-1", name: "Writer")]
+        settings.notionAppearance = .dark
         let restored = try JSONDecoder().decode(SettingsData.self, from: JSONEncoder().encode(settings))
         XCTAssertEqual(restored.notionHiddenAgentIDs, ["agent-1"])
         XCTAssertFalse(restored.notionNotificationsEnabled)
         XCTAssertEqual(restored.notionNotificationDuration, 30)
         XCTAssertEqual(restored.notionTabPosition, 1)
         XCTAssertEqual(restored.notionSavedAgents, [SavedNotionAgent(id: "agent-1", name: "Writer")])
+        XCTAssertEqual(restored.notionAppearance, .dark)
+    }
+
+    func testNotionChatPaletteHasDistinctReadableLightAndDarkColors() {
+        var light: NSColor!
+        var dark: NSColor!
+        NSAppearance(named: .aqua)!.performAsCurrentDrawingAppearance {
+            light = NotionPanelTheme.text.usingColorSpace(.deviceRGB)
+        }
+        NSAppearance(named: .darkAqua)!.performAsCurrentDrawingAppearance {
+            dark = NotionPanelTheme.text.usingColorSpace(.deviceRGB)
+        }
+        XCTAssertLessThan(light.brightnessComponent, dark.brightnessComponent)
+        var lightLink: NSColor!
+        var darkLink: NSColor!
+        NSAppearance(named: .aqua)!.performAsCurrentDrawingAppearance {
+            lightLink = NotionPanelTheme.link.usingColorSpace(.deviceRGB)
+        }
+        NSAppearance(named: .darkAqua)!.performAsCurrentDrawingAppearance {
+            darkLink = NotionPanelTheme.link.usingColorSpace(.deviceRGB)
+        }
+        XCTAssertNotEqual(lightLink, darkLink)
     }
 
     func testPollingAndNotificationOnlyFollowLocallyPendingThreads() {

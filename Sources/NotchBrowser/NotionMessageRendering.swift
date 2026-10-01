@@ -2,16 +2,26 @@ import AppKit
 import SwiftUI
 
 enum NotionPanelTheme {
-    static let canvas = Color(red: 1, green: 1, blue: 1)
-    static let surface = Color(red: 0.965, green: 0.961, blue: 0.957)
-    static let softSurface = Color(red: 0.98, green: 0.976, blue: 0.973)
-    static let hairline = Color(red: 0.898, green: 0.89, blue: 0.875)
-    static let ink = Color(red: 0.216, green: 0.208, blue: 0.184)
-    static let muted = Color(red: 0.471, green: 0.463, blue: 0.443)
-    static let purple = Color(red: 0.337, green: 0.271, blue: 0.831)
-    static let lavender = Color(red: 0.902, green: 0.878, blue: 0.961)
-    static let link = NSColor(srgbRed: 0, green: 0.459, blue: 0.871, alpha: 1)
-    static let text = NSColor(srgbRed: 0.216, green: 0.208, blue: 0.184, alpha: 1)
+    private static func adaptive(light: UInt32, dark: UInt32) -> NSColor {
+        NSColor(name: nil) { appearance in
+            let value = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light
+            return NSColor(srgbRed: CGFloat((value >> 16) & 0xff) / 255,
+                           green: CGFloat((value >> 8) & 0xff) / 255,
+                           blue: CGFloat(value & 0xff) / 255, alpha: 1)
+        }
+    }
+
+    static let canvas = Color(nsColor: adaptive(light: 0xffffff, dark: 0x191919))
+    static let surface = Color(nsColor: adaptive(light: 0xf7f7f5, dark: 0x202020))
+    static let softSurface = Color(nsColor: adaptive(light: 0xf9f9f8, dark: 0x292929))
+    static let hairline = Color(nsColor: adaptive(light: 0xe9e9e7, dark: 0x383838))
+    static let ink = Color(nsColor: adaptive(light: 0x37352f, dark: 0xe9e9e7))
+    static let muted = Color(nsColor: adaptive(light: 0x787774, dark: 0x9b9b99))
+    static let blue = Color(nsColor: adaptive(light: 0x2383e2, dark: 0x529cca))
+    static let blueWash = Color(nsColor: adaptive(light: 0xe8f2fc, dark: 0x25394a))
+    static let notice = Color(nsColor: adaptive(light: 0xfff4ce, dark: 0x3c3320))
+    static let link = adaptive(light: 0x0075de, dark: 0x529cca)
+    static let text = adaptive(light: 0x37352f, dark: 0xe9e9e7)
 }
 
 struct NotionAgentAvatar: View {
@@ -20,7 +30,7 @@ struct NotionAgentAvatar: View {
 
     var body: some View {
         ZStack {
-            Circle().fill(NotionPanelTheme.lavender)
+            Circle().fill(NotionPanelTheme.blueWash)
             if let value = agent.iconURL, let url = URL(string: value) {
                 AsyncImage(url: url) { image in
                     image.resizable().scaledToFill()
@@ -140,6 +150,7 @@ private final class NotionLinkTextView: NSTextView {
 
 private struct NotionReplyText: NSViewRepresentable {
     let source: String
+    @Environment(\.colorScheme) private var colorScheme
 
     func makeNSView(context: Context) -> NotionLinkTextView {
         let view = NotionLinkTextView()
@@ -149,7 +160,6 @@ private struct NotionReplyText: NSViewRepresentable {
         view.textContainerInset = .zero
         view.isHorizontallyResizable = false
         view.isVerticallyResizable = true
-        view.appearance = NSAppearance(named: .aqua)
         view.textContainer?.widthTracksTextView = true
         view.linkTextAttributes = [.foregroundColor: NotionPanelTheme.link,
                                    .underlineStyle: NSUnderlineStyle.single.rawValue]
@@ -157,6 +167,7 @@ private struct NotionReplyText: NSViewRepresentable {
     }
 
     func updateNSView(_ view: NotionLinkTextView, context: Context) {
+        view.appearance = NSAppearance(named: colorScheme == .dark ? .darkAqua : .aqua)
         let value = (try? AttributedString(markdown: source,
                                            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(source)
         let text = NSMutableAttributedString(attributedString: NSAttributedString(value))
@@ -219,7 +230,7 @@ struct NotionMessageView: View {
                 }
                 .padding(.horizontal, 15)
                 .padding(.vertical, 11)
-                .background(isUser ? NotionPanelTheme.lavender.opacity(0.62) : NotionPanelTheme.canvas,
+                .background(isUser ? NotionPanelTheme.blueWash : NotionPanelTheme.canvas,
                             in: RoundedRectangle(cornerRadius: 12))
                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(NotionPanelTheme.hairline))
                 HStack(spacing: 8) {

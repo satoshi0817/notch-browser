@@ -11,7 +11,7 @@ private struct RunningAgentBadge: View {
             if let agent {
                 NotionAgentAvatar(agent: agent, size: 18)
                 Circle().trim(from: 0.08, to: 0.82)
-                    .stroke(AngularGradient(colors: [.purple.opacity(0.2), .purple, .cyan], center: .center),
+                    .stroke(AngularGradient(colors: [NotionPanelTheme.blue.opacity(0.2), NotionPanelTheme.blue, .cyan], center: .center),
                             style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
                     .rotationEffect(.degrees(rotating ? 360 : 0))
                     .animation(.linear(duration: 1.1).repeatForever(autoreverses: false), value: rotating)
@@ -38,7 +38,7 @@ private struct NotionNotificationBanner: View {
             NotionAgentAvatar(agent: agent, size: 32)
             VStack(alignment: .leading, spacing: 3) {
                 Text(agent.name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                Text(title).font(.system(size: 11, weight: .medium)).foregroundStyle(.purple)
+                Text(title).font(.system(size: 11, weight: .medium)).foregroundStyle(NotionPanelTheme.blue)
                 Text(preview.isEmpty ? title : preview)
                     .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(2)
             }
@@ -48,7 +48,7 @@ private struct NotionNotificationBanner: View {
                 ZStack {
                     Circle().stroke(NotionPanelTheme.hairline, lineWidth: 3)
                     Circle().trim(from: 0, to: min(1, remaining / Double(duration)))
-                        .stroke(NotionPanelTheme.purple, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                        .stroke(NotionPanelTheme.blue, style: StrokeStyle(lineWidth: 3, lineCap: .round))
                         .rotationEffect(.degrees(-90))
                     Text("\(Int(ceil(remaining)))")
                         .font(.system(size: 12, weight: .semibold, design: .rounded))
@@ -61,7 +61,6 @@ private struct NotionNotificationBanner: View {
         .padding(.horizontal, 18)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .foregroundStyle(NotionPanelTheme.ink)
-        .environment(\.colorScheme, .light)
         .background(NotionPanelTheme.canvas, in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(NotionPanelTheme.hairline))
     }
@@ -176,6 +175,7 @@ final class NotchRootView: NSView {
         guard let agent else { return }
         let banner = NSHostingView(rootView: NotionNotificationBanner(agent: agent, title: title, preview: preview,
                                                                       deadline: deadline, duration: duration))
+        banner.appearance = SettingsStore.shared.data.notionAppearance.resolvedAppearance
         addSubview(banner)
         notificationBanner = banner
         positionContent()

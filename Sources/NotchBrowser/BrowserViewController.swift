@@ -96,6 +96,7 @@ final class BrowserViewController: NSViewController {
     private var findGeneration = 0
     private let notes = ScratchpadView()
     private var notionPanel: NSHostingView<NotionAgentsPanel>?
+    private var systemAppearanceObserver: NSObjectProtocol?
     private let switcher = NSView()
     private let tabSearch = NSSearchField()
     private let switchResults = TopAlignedStackView()
@@ -311,6 +312,10 @@ final class BrowserViewController: NSViewController {
             notion.bottomAnchor.constraint(equalTo: webContainer.bottomAnchor)
         ])
         notionPanel = notion
+        updateNotionAppearance()
+        systemAppearanceObserver = DistributedNotificationCenter.default().addObserver(
+            forName: NSNotification.Name("AppleInterfaceThemeChangedNotification"), object: nil, queue: .main
+        ) { [weak self] _ in self?.updateNotionAppearance() }
         syncPinnedTabs()
         selectInitialTab()
     }
@@ -382,10 +387,21 @@ final class BrowserViewController: NSViewController {
 
     func settingsChanged() {
         guard isViewLoaded else { return }
+        updateNotionAppearance()
         syncPinnedTabs()
         glass.updateAppearance()
         updateCompactControls()
         updateChrome()
+    }
+
+    deinit {
+        if let systemAppearanceObserver {
+            DistributedNotificationCenter.default().removeObserver(systemAppearanceObserver)
+        }
+    }
+
+    private func updateNotionAppearance() {
+        notionPanel?.appearance = store.data.notionAppearance.resolvedAppearance
     }
 
     // MARK: Tabs
@@ -504,7 +520,7 @@ final class BrowserViewController: NSViewController {
         }
         tabs = ordered + tabs.filter { $0.pinnedID == nil }
         let index = selected.flatMap { s in tabs.firstIndex { $0 === s } } ?? (tabs.isEmpty ? nil : 0)
-        select(index)
+        select(index, preservingNotion: true)
     }
 
     private func makeTab(pinnedID: UUID?, profileID: UUID, configuration: WKWebViewConfiguration? = nil) -> Tab {
@@ -577,8 +593,8 @@ final class BrowserViewController: NSViewController {
         select(tab)
     }
 
-    private func select(_ index: Int?) {
-        hideNotion()
+    private func select(_ index: Int?, preservingNotion: Bool = false) {
+        if !preservingNotion { hideNotion() }
         if !notes.isHidden { notes.isHidden = true }
         findGeneration += 1
         findStatus.stringValue = ""
@@ -1237,6 +1253,7 @@ final class BrowserViewController: NSViewController {
     }
     @objc func toggleNotion(_ sender: Any?) {
         addressPopover.close()
+        updateNotionAppearance()
         let willShow = notionPanel?.isHidden == true
         notes.isHidden = true
         switcher.isHidden = true
@@ -1247,6 +1264,7 @@ final class BrowserViewController: NSViewController {
     }
     func showNotion() {
         _ = view
+        updateNotionAppearance()
         notionPanel?.isHidden = false
         updateNotionTabSelection()
         notes.isHidden = true

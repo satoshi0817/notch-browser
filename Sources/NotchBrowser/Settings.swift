@@ -20,6 +20,28 @@ struct SavedNotionAgent: Codable, Identifiable, Hashable {
     var iconURL: String? = nil
 }
 
+enum NotionAppearance: String, Codable, CaseIterable, Identifiable {
+    case system, light, dark
+    var id: Self { self }
+    var title: String {
+        switch self {
+        case .system: "システムに合わせる"
+        case .light: "ライト"
+        case .dark: "ダーク"
+        }
+    }
+    var isDark: Bool {
+        switch self {
+        case .light: false
+        case .dark: true
+        case .system: NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        }
+    }
+    var resolvedAppearance: NSAppearance {
+        NSAppearance(named: isDark ? .darkAqua : .aqua)!
+    }
+}
+
 enum TabIcon: Codable, Hashable {
     case favicon
     case symbol(String)
@@ -146,6 +168,7 @@ struct SettingsData: Codable {
     var shelfRemoveAfterDrag = true
     var notionHiddenAgentIDs: Set<String> = []
     var notionSavedAgents: [SavedNotionAgent] = []
+    var notionAppearance = NotionAppearance.system
     var notionNotificationsEnabled = true
     var notionNotificationDuration = 10
 
@@ -175,6 +198,7 @@ struct SettingsData: Codable {
         shelfDownloads = (try? c.decode(Bool.self, forKey: .shelfDownloads)) ?? false
         notionHiddenAgentIDs = (try? c.decode(Set<String>.self, forKey: .notionHiddenAgentIDs)) ?? []
         notionSavedAgents = (try? c.decode([SavedNotionAgent].self, forKey: .notionSavedAgents)) ?? []
+        notionAppearance = (try? c.decode(NotionAppearance.self, forKey: .notionAppearance)) ?? .system
         notionNotificationsEnabled = (try? c.decode(Bool.self, forKey: .notionNotificationsEnabled)) ?? true
         notionNotificationDuration = min(60, max(5,
             (try? c.decode(Int.self, forKey: .notionNotificationDuration)) ?? 10))

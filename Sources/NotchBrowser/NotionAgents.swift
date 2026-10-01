@@ -123,6 +123,17 @@ struct NotionMessage: Decodable, Identifiable {
     let created_time: String
     let pending_user_actions: [NotionAction]?
 
+    func confirms(_ pending: NotionMessage) -> Bool {
+        guard role == "user", content == pending.content else { return false }
+        let standard = ISO8601DateFormatter()
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let fetchedAt = fractional.date(from: created_time) ?? standard.date(from: created_time)
+        let pendingAt = standard.date(from: pending.created_time)
+        guard let fetchedAt, let pendingAt else { return false }
+        return fetchedAt >= pendingAt.addingTimeInterval(-10)
+    }
+
     static func oldestFirst(_ messages: [NotionMessage]) -> [NotionMessage] {
         let fractional = ISO8601DateFormatter()
         fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -317,6 +328,12 @@ struct NotionAgentsAPI {
 }
 
 final class NotionAgentsStore: ObservableObject {
+    struct PendingOutbound: Identifiable {
+        let message: NotionMessage
+        let agentID: String
+        var threadID: String?
+        var id: String { message.id }
+    }
     private struct PendingReply: Codable {
         let agentID: String
         let threadID: String
@@ -326,6 +343,7 @@ final class NotionAgentsStore: ObservableObject {
     static let shared = NotionAgentsStore()
     @Published private(set) var threads: [NotionThread] = []
     @Published private(set) var messages: [NotionMessage] = []
+    @Published private(set) var pendingMessages: [PendingOutbound] = []
     @Published private(set) var busyAgentIDs: Set<String> = []
     @Published private(set) var alert: (agentID: String, threadID: String, title: String, preview: String)?
     @Published private(set) var noticeText: String?
@@ -352,15 +370,33 @@ final class NotionAgentsStore: ObservableObject {
     private var refreshInProgress = false
     private var refreshQueued = false
     private var refreshQueuedFull = false
-
     var visibleAgents: [SavedNotionAgent] { SettingsStore.shared.data.notionSavedAgents }
+    var hasPendingMessageForSelectedAgent: Bool {
+        pendingMessages.contains { $0.agentID == selectedAgentID && $0.threadID == selectedThreadID }
+    }
+    var visibleMessages: [NotionMessage] {
+        messages + pendingMessages.filter { $0.agentID == selectedAgentID && $0.threadID == selectedThreadID }
+            .map(\.message)
+    }
+
+    private func applyMessages(_ fetched: [NotionMessage], threadID: String) {
+        guard selectedThreadID == threadID else { return }
+        messages = fetched
+        var unmatched = fetched.filter { $0.role == "user" }
+        pendingMessages.removeAll { pending in
+            guard pending.agentID == selectedAgentID, pending.threadID == threadID,
+                  let index = unmatched.firstIndex(where: { $0.confirms(pending.message) }) else { return false }
+            unmatched.remove(at: index)
+            return true
+        }
+    }
 
     func saveToken(_ token: String) {
         guard NotionTokenStore.save(token.trimmingCharacters(in: .whitespacesAndNewlines)) else {
             error = "トークンをキーチェーンに保存できませんでした。"; return
         }
         hasToken = NotionTokenStore.read() != nil
-        threads = []; messages = []; busyAgentIDs = []; observed = [:]; metadataChecked = []; baselinedAgentIDs = []; error = nil
+        threads = []; messages = []; pendingMessages = []; busyAgentIDs = []; observed = [:]; metadataChecked = []; baselinedAgentIDs = []; error = nil
         pendingReplies = [:]; savePendingReplies()
         selectedAgentID = nil; selectedThreadID = nil
         start()
@@ -517,7 +553,7 @@ final class NotionAgentsStore: ObservableObject {
             if isPanelVisible || forceFull, let selectedThreadID {
                 activityText = "会話を読み込み中…"
                 let fetched = try await api.messages(threadID: selectedThreadID)
-                if self.selectedThreadID == selectedThreadID { messages = fetched }
+                applyMessages(fetched, threadID: selectedThreadID)
             }
             error = failures.first.map { failures.count == 1 ? $0 : "\($0) ほか\(failures.count - 1)件" }
             lastUpdatedAt = Date()
@@ -546,7 +582,7 @@ final class NotionAgentsStore: ObservableObject {
         defer { isLoadingMessages = false; activityText = nil }
         do {
             let fetched = try await NotionAgentsAPI(token: token).messages(threadID: id)
-            if selectedThreadID == id { messages = fetched }
+            applyMessages(fetched, threadID: id)
             lastUpdatedAt = Date()
             error = nil
         }
@@ -555,12 +591,21 @@ final class NotionAgentsStore: ObservableObject {
 
     func showHistory() { selectedThreadID = nil; messages = [] }
 
-    func send(_ text: String) async {
-        guard let agentID = selectedAgentID, let token = NotionTokenStore.read(), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+    @discardableResult
+    func send(_ text: String) async -> Bool {
+        guard let agentID = selectedAgentID, let token = NotionTokenStore.read(),
+              !isSending, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        let sendingThreadID = selectedThreadID
+        let outbound = PendingOutbound(
+            message: NotionMessage(id: "pending-\(UUID().uuidString)", role: "user", content: text,
+                                   created_time: ISO8601DateFormatter().string(from: Date()),
+                                   pending_user_actions: nil),
+            agentID: agentID, threadID: sendingThreadID)
+        pendingMessages.append(outbound)
         isSending = true; activityText = "メッセージを送信中…"
         defer { isSending = false; activityText = nil }
         do {
-            let invocation = try await NotionAgentsAPI(token: token).send(text, agentID: agentID, threadID: selectedThreadID)
+            let invocation = try await NotionAgentsAPI(token: token).send(text, agentID: agentID, threadID: sendingThreadID)
             let key = "\(agentID):\(invocation.thread_id)"
             let baseline = observed[key] ?? threads.first(where: { $0.id == invocation.thread_id })
                 .map { "\($0.status):\($0.last_edited_time)" }
@@ -568,10 +613,20 @@ final class NotionAgentsStore: ObservableObject {
                                                baselineSignature: baseline)
             savePendingReplies()
             updatePolling()
-            selectedThreadID = invocation.thread_id
+            if let index = pendingMessages.firstIndex(where: { $0.id == outbound.id }) {
+                pendingMessages[index].threadID = invocation.thread_id
+            }
+            if selectedAgentID == agentID && selectedThreadID == sendingThreadID {
+                selectedThreadID = invocation.thread_id
+            }
             busyAgentIDs.insert(agentID)
             await refresh(forceFull: true)
-        } catch { self.error = error.localizedDescription }
+            return true
+        } catch {
+            pendingMessages.removeAll { $0.id == outbound.id }
+            self.error = error.localizedDescription
+            return false
+        }
     }
 
     func respond(_ action: NotionAction, option: NotionAction.Option) async {
@@ -608,15 +663,18 @@ struct NotionAgentsPanel: View {
     @State private var tokenDraft = ""
     @State private var showJumpToBottom = false
     let onOpenSettings: () -> Void
+    private var canSend: Bool {
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !store.isSending
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
                 Image(systemName: "sparkles.rectangle.stack")
                     .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(NotionPanelTheme.purple)
+                    .foregroundStyle(NotionPanelTheme.blue)
                     .frame(width: 28, height: 28)
-                    .background(NotionPanelTheme.lavender.opacity(0.55),
+                    .background(NotionPanelTheme.blueWash,
                                 in: RoundedRectangle(cornerRadius: 8))
                 Text("Notionエージェント").font(.system(size: 15, weight: .semibold))
                 Spacer()
@@ -625,7 +683,7 @@ struct NotionAgentsPanel: View {
                 HStack { Image(systemName: "bell.badge.fill"); Text(notice); Spacer() }
                     .font(.caption.weight(.medium)).foregroundStyle(NotionPanelTheme.ink)
                     .padding(.horizontal, 14).padding(.vertical, 8)
-                    .background(Color(red: 0.996, green: 0.969, blue: 0.839),
+                    .background(NotionPanelTheme.notice,
                                 in: RoundedRectangle(cornerRadius: 8))
                     .padding(.horizontal, 20).padding(.bottom, 10)
             }
@@ -694,7 +752,7 @@ struct NotionAgentsPanel: View {
                                 .help("新しいチャット")
                             }.padding(.horizontal, 20).padding(.vertical, 14)
                             Divider()
-                            if store.selectedThreadID == nil {
+                            if store.selectedThreadID == nil && !store.hasPendingMessageForSelectedAgent {
                                 ScrollView {
                                     LazyVStack(alignment: .leading, spacing: 6) {
                                         ForEach(store.threads) { thread in
@@ -730,16 +788,11 @@ struct NotionAgentsPanel: View {
                                         }
                                         .buttonStyle(.plain)
                                         .foregroundStyle(NotionPanelTheme.muted)
-                                        if store.messages.isEmpty {
-                                            if store.isLoadingMessages {
-                                                HStack(spacing: 8) { ProgressView().controlSize(.small); Text("会話を読み込み中…") }
-                                                    .foregroundStyle(.secondary).padding(.top, 20)
-                                            } else {
-                                                ContentUnavailableView("メッセージがありません", systemImage: "bubble.left",
-                                                                       description: Text("このチャットには表示できるメッセージがありません。"))
-                                            }
+                                        if store.visibleMessages.isEmpty && store.isLoadingMessages {
+                                            HStack(spacing: 8) { ProgressView().controlSize(.small); Text("会話を読み込み中…") }
+                                                .foregroundStyle(.secondary).padding(.top, 20)
                                         }
-                                        ForEach(store.messages) { message in
+                                        ForEach(store.visibleMessages) { message in
                                             NotionMessageView(message: message, agent: agent)
                                         }
                                         if store.busyAgentIDs.contains(agent.id) {
@@ -773,6 +826,14 @@ struct NotionAgentsPanel: View {
                                     .padding(.horizontal, 24).padding(.vertical, 22)
                                 }
                                 .coordinateSpace(name: "conversation")
+                                .overlay {
+                                    if store.visibleMessages.isEmpty && !store.isLoadingMessages &&
+                                        !store.busyAgentIDs.contains(agent.id) {
+                                        ContentUnavailableView("メッセージがありません", systemImage: "bubble.left",
+                                                               description: Text("このチャットには表示できるメッセージがありません。"))
+                                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                    }
+                                }
                                 .onPreferenceChange(ConversationBottomKey.self) { bottom in
                                     showJumpToBottom = bottom > geometry.size.height + 80
                                 }
@@ -781,7 +842,7 @@ struct NotionAgentsPanel: View {
                                     showJumpToBottom = false
                                     DispatchQueue.main.async { proxy.scrollTo("conversation-bottom", anchor: .bottom) }
                                 }
-                                .onChange(of: store.messages.count) { _, _ in
+                                .onChange(of: store.visibleMessages.count) { _, _ in
                                     if !showJumpToBottom { withAnimation { proxy.scrollTo("conversation-bottom", anchor: .bottom) } }
                                 }
                                 .overlay(alignment: .bottom) {
@@ -793,7 +854,7 @@ struct NotionAgentsPanel: View {
                                                 .font(.caption.weight(.medium))
                                         }
                                         .buttonStyle(.bordered)
-                                        .tint(NotionPanelTheme.purple)
+                                        .tint(NotionPanelTheme.blue)
                                         .controlSize(.small)
                                         .padding(.bottom, 12)
                                     }
@@ -801,10 +862,11 @@ struct NotionAgentsPanel: View {
                                 }
                                 }
                             }
-                            HStack(alignment: .bottom, spacing: 12) {
+                            HStack(alignment: .center, spacing: 12) {
                                 TextField("エージェントにメッセージ", text: $draft, axis: .vertical)
                                     .lineLimit(1...5).textFieldStyle(.plain)
                                     .font(.system(size: 14))
+                                    .frame(minHeight: 30, alignment: .center)
                                     .onKeyPress(.return, phases: .down) { key in
                                         if key.modifiers.contains(.command) { send(); return .handled }
                                         return .ignored
@@ -814,12 +876,12 @@ struct NotionAgentsPanel: View {
                                     else { Image(systemName: "arrow.up").font(.system(size: 13, weight: .bold)) }
                                 }
                                     .buttonStyle(.plain)
-                                    .foregroundStyle(.white)
+                                    .foregroundStyle(canSend ? Color.white : NotionPanelTheme.muted)
                                     .frame(width: 30, height: 30)
-                                    .background(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                                ? NotionPanelTheme.muted : NotionPanelTheme.purple,
-                                                in: RoundedRectangle(cornerRadius: 8))
-                                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.isSending)
+                                    .background(canSend ? NotionPanelTheme.blue : NotionPanelTheme.surface, in: Circle())
+                                    .overlay(Circle().stroke(NotionPanelTheme.hairline, lineWidth: canSend ? 0 : 1))
+                                    .disabled(!canSend)
+                                    .accessibilityLabel("メッセージを送信")
                             }
                             .padding(.horizontal, 14).padding(.vertical, 10)
                             .background(NotionPanelTheme.canvas, in: RoundedRectangle(cornerRadius: 12))
@@ -861,8 +923,7 @@ struct NotionAgentsPanel: View {
             .background(NotionPanelTheme.softSurface)
         }
         .foregroundStyle(NotionPanelTheme.ink)
-        .tint(Color(red: 0, green: 0.459, blue: 0.871))
-        .environment(\.colorScheme, .light)
+        .tint(NotionPanelTheme.blue)
         .background(NotionPanelTheme.canvas, in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(NotionPanelTheme.hairline))
         .onAppear { store.start() }
@@ -876,9 +937,11 @@ struct NotionAgentsPanel: View {
 
     private func send() {
         let message = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !message.isEmpty else { return }
+        guard !message.isEmpty && !store.isSending else { return }
         draft = ""
-        Task { @MainActor in await store.send(message) }
+        Task { @MainActor in
+            if !(await store.send(message)) && draft.isEmpty { draft = message }
+        }
     }
 }
 
@@ -927,6 +990,13 @@ struct NotionAgentsSettings: View {
 
     var body: some View {
         Form {
+            Section("外観") {
+                Picker("チャットの外観", selection: $settings.data.notionAppearance) {
+                    ForEach(NotionAppearance.allCases) { appearance in
+                        Text(appearance.title).tag(appearance)
+                    }
+                }
+            }
             Section("接続") {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("内部インテグレーションのトークン").font(.subheadline.weight(.medium))

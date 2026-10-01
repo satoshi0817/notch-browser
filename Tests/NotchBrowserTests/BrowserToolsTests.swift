@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import WebKit
 import XCTest
 @testable import NotchBrowser
@@ -57,6 +58,34 @@ final class BrowserToolsTests: XCTestCase {
         let menu = try XCTUnwrap(button.menu)
         XCTAssertTrue(menu.items.contains { $0.title == "ブラウザで開く" })
         XCTAssertFalse(try XCTUnwrap(menu.items.first { $0.title == "ブラウザで開く" }).isEnabled)
+    }
+
+    @MainActor func testSettingsRefreshKeepsNotionPanelVisible() throws {
+        _ = NSApplication.shared
+        let store = SettingsStore.shared
+        let saved = store.data
+        defer { store.data = saved }
+        var settings = SettingsData()
+        settings.pinnedTabs = []
+        store.data = settings
+        let browser = BrowserViewController()
+        let panel = NotchPanel(contentRect: NSRect(x: 100, y: 100, width: 960, height: 660),
+                               styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.contentView = browser.view
+        panel.orderFrontRegardless()
+        defer { panel.orderOut(nil) }
+        browser.showNotion()
+        let notion = try XCTUnwrap(descendants(browser.view).first { $0 is NSHostingView<NotionAgentsPanel> })
+        XCTAssertFalse(notion.isHidden)
+        store.data.notionSavedAgents = [SavedNotionAgent(id: "agent", name: "Updated")]
+        browser.settingsChanged()
+        XCTAssertFalse(notion.isHidden, "Metadata-driven settings updates must not switch back to a pinned page")
+        store.data.notionAppearance = .light
+        browser.settingsChanged()
+        XCTAssertEqual(notion.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]), .aqua)
+        store.data.notionAppearance = .dark
+        browser.settingsChanged()
+        XCTAssertEqual(notion.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]), .darkAqua)
     }
 
     @MainActor
