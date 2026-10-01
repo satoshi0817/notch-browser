@@ -177,7 +177,9 @@ private struct NotionReplyText: NSViewRepresentable {
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView view: NotionLinkTextView, context: Context) -> CGSize? {
-        let width = max(1, proposal.width ?? 500)
+        let availableWidth = max(1, proposal.width ?? 500)
+        let intrinsicWidth = ceil(view.attributedString().size().width) + 10
+        let width = min(availableWidth, max(18, intrinsicWidth))
         view.textContainer?.containerSize = NSSize(width: width, height: .greatestFiniteMagnitude)
         if let textContainer = view.textContainer, let layoutManager = view.layoutManager {
             layoutManager.ensureLayout(for: textContainer)
@@ -190,6 +192,7 @@ private struct NotionReplyText: NSViewRepresentable {
 struct NotionMessageView: View {
     let message: NotionMessage
     let agent: SavedNotionAgent
+    var notionLink: NotionChatLink? = nil
     @State private var copied = false
     private var isUser: Bool { message.role == "user" }
 
@@ -235,16 +238,22 @@ struct NotionMessageView: View {
                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(NotionPanelTheme.hairline))
                 HStack(spacing: 8) {
                     Text(timestamp).font(.caption2).foregroundStyle(.tertiary)
-                    if !isUser {
-                        Button {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(NotionReplyFormatter.copyText(message.content), forType: .string)
-                            copied = true
-                        } label: {
-                            Label(copied ? "コピーしました" : "コピー", systemImage: copied ? "checkmark" : "doc.on.doc")
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(isUser ? message.content : NotionReplyFormatter.copyText(message.content), forType: .string)
+                        copied = true
+                    } label: {
+                        Label(copied ? "コピーしました" : "コピー", systemImage: copied ? "checkmark" : "doc.on.doc")
+                    }
+                    .buttonStyle(.plain).font(.caption2).foregroundStyle(.secondary)
+                    .help(isUser ? "メッセージをコピー" : "返信をコピー")
+                    if !isUser, let notionLink {
+                        Button { NSWorkspace.shared.open(notionLink.url) } label: {
+                            Label(notionLink.isDirect ? "Notionでチャットを開く" : "Notionでエージェントを開く",
+                                  systemImage: "arrow.up.right")
                         }
                         .buttonStyle(.plain).font(.caption2).foregroundStyle(.secondary)
-                        .help("返信をコピー")
+                        .help(notionLink.isDirect ? "このチャットをNotionで開く" : "このエージェントをNotionで開く")
                     }
                 }.padding(.horizontal, 3)
             }

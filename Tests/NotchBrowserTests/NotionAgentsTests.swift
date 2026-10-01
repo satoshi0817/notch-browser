@@ -431,6 +431,23 @@ final class NotionAgentsTests: XCTestCase {
         let linkView = try XCTUnwrap(textViews(in: view).first { $0.string.contains("デモを見る") })
         XCTAssertTrue(linkView.isSelectable)
         XCTAssertNotNil(linkView.textStorage?.attribute(.link, at: 0, effectiveRange: nil))
+        XCTAssertLessThan(linkView.frame.width, 300, "短い返信は内容に合わせた幅にする")
+    }
+
+    func testNotionChatLinkPrefersAValidatedThreadURLAndFallsBackToAgent() throws {
+        let agentID = "3c90c3cc-0d44-4b50-8888-8dd25736052a"
+        let thread = try JSONDecoder().decode(NotionThread.self, from: Data("""
+        {"id":"thread-1","title":"Chat","status":"completed","last_edited_time":"2026-10-01T00:00:00Z","url":"https://www.notion.so/agent/chat/thread-1"}
+        """.utf8))
+        let direct = try XCTUnwrap(NotionChatLink.resolve(thread: thread, agentID: agentID))
+        XCTAssertTrue(direct.isDirect)
+        XCTAssertEqual(direct.url.absoluteString, "https://www.notion.so/agent/chat/thread-1")
+
+        var unsafe = thread
+        unsafe.url = "https://example.com/other"
+        let fallback = try XCTUnwrap(NotionChatLink.resolve(thread: unsafe, agentID: agentID))
+        XCTAssertFalse(fallback.isDirect)
+        XCTAssertEqual(fallback.url.absoluteString, "https://www.notion.so/agent/\(agentID)")
     }
 
     func testCustomAgentAvatarURLIsDecoded() throws {

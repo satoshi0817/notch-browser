@@ -84,7 +84,25 @@ struct NotionThread: Codable, Identifiable {
     let status: String
     let last_edited_time: String
     let pending_user_actions: [NotionAction]?
+    var url: String? = nil
     var isRunning: Bool { status == "pending" || status == "queued" || status == "in_progress" }
+}
+
+struct NotionChatLink {
+    let url: URL
+    let isDirect: Bool
+
+    static func resolve(thread: NotionThread?, agentID: String) -> NotionChatLink? {
+        if let raw = thread?.url, let url = URL(string: raw),
+           url.scheme?.lowercased() == "https",
+           let host = url.host?.lowercased(),
+           host == "notion.so" || host.hasSuffix(".notion.so") ||
+           host == "notion.com" || host.hasSuffix(".notion.com") {
+            return NotionChatLink(url: url, isDirect: true)
+        }
+        guard let id = NotionAgentInput.id(from: agentID) else { return nil }
+        return URL(string: "https://www.notion.so/agent/\(id)").map { NotionChatLink(url: $0, isDirect: false) }
+    }
 }
 
 enum NotionThreadAlertPolicy {
@@ -922,6 +940,7 @@ struct NotionAgentsPanel: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                 .padding(28)
             } else {
+                GeometryReader { geometry in
                 HStack(spacing: 0) {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("エージェント")
@@ -950,7 +969,7 @@ struct NotionAgentsPanel: View {
                             }
                         }
                     }
-                    .frame(width: 216).padding(10)
+                    .frame(width: geometry.size.width < 780 ? 164 : 216).padding(10)
                     .background(NotionPanelTheme.surface)
                     Divider()
                     VStack(spacing: 0) {
@@ -960,7 +979,7 @@ struct NotionAgentsPanel: View {
                                 Text(agent.name).font(.system(size: 15, weight: .semibold)).lineLimit(1)
                                 Spacer()
                                 Button { historyPeekOpen.toggle() } label: {
-                                    Label("履歴", systemImage: "sidebar.right")
+                                    Label("履歴", systemImage: "sidebar.left")
                                         .font(.system(size: 12, weight: .medium))
                                 }
                                 .buttonStyle(.plain)
@@ -983,6 +1002,12 @@ struct NotionAgentsPanel: View {
                             }.padding(.horizontal, 20).padding(.vertical, 14)
                             Divider()
                             HStack(spacing: 0) {
+                            if historyPeekOpen {
+                                historyPeek
+                                    .frame(width: geometry.size.width < 780 ? 180 : 236)
+                                    .transition(.move(edge: .leading).combined(with: .opacity))
+                                Divider()
+                            }
                             VStack(spacing: 0) {
                             if store.selectedThreadID == nil && !store.isNewChat && !store.hasPendingMessageForSelectedAgent {
                                 historyList
@@ -996,7 +1021,10 @@ struct NotionAgentsPanel: View {
                                                 .foregroundStyle(.secondary).padding(.top, 20)
                                         }
                                         ForEach(store.visibleMessages) { message in
-                                            NotionMessageView(message: message, agent: agent)
+                                            NotionMessageView(message: message, agent: agent,
+                                                notionLink: NotionChatLink.resolve(
+                                                    thread: store.threads.first(where: { $0.id == store.selectedThreadID }),
+                                                    agentID: agent.id))
                                         }
                                         if store.isSelectedConversationBusy {
                                             NotionThinkingView(agent: agent)
@@ -1100,12 +1128,6 @@ struct NotionAgentsPanel: View {
                             }
                             }
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            if historyPeekOpen {
-                                Divider()
-                                historyPeek
-                                    .frame(width: 236)
-                                    .transition(.move(edge: .trailing).combined(with: .opacity))
-                            }
                             }
                         } else {
                             VStack(spacing: 10) {
@@ -1114,6 +1136,7 @@ struct NotionAgentsPanel: View {
                             }
                         }
                     }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
                 }
             }
             if let error = store.error { Text(error).font(.caption).foregroundStyle(.red).padding(8) }

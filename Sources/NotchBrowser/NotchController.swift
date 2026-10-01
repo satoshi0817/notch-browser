@@ -9,7 +9,7 @@ private struct RunningAgentBadge: View {
     var body: some View {
         ZStack {
             if let agent {
-                NotionAgentAvatar(agent: agent, size: 18)
+                NotionAgentAvatar(agent: agent, size: 16)
                 Circle().trim(from: 0.08, to: 0.82)
                     .stroke(AngularGradient(colors: [NotionPanelTheme.blue.opacity(0.2), NotionPanelTheme.blue, .cyan], center: .center),
                             style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
@@ -17,7 +17,7 @@ private struct RunningAgentBadge: View {
                     .animation(.linear(duration: 1.1).repeatForever(autoreverses: false), value: rotating)
             }
         }
-        .frame(width: 25, height: 25)
+        .frame(width: 24, height: 24)
         .onAppear { rotating = agent != nil }
         .onChange(of: agent?.id) { _, id in
             rotating = false
@@ -219,7 +219,7 @@ final class NotchRootView: NSView {
         let wing = Self.wingWidth
         let labelHeight = badgeLabel.intrinsicContentSize.height
         badgeIcon.frame = NSRect(x: 4, y: ((bounds.height - 18) / 2).rounded(), width: wing - 4, height: 18)
-        agentBadge.frame = NSRect(x: 7, y: ((bounds.height - 25) / 2).rounded(), width: 25, height: 25)
+        agentBadge.frame = NSRect(x: 8, y: ((bounds.height - 24) / 2).rounded(), width: 24, height: 24)
         badgeLabel.frame = NSRect(x: bounds.width - wing, y: ((bounds.height - labelHeight) / 2).rounded(), width: wing - 4, height: labelHeight)
         content.frame = NSRect(
             x: ((bounds.width - contentSize.width) / 2).rounded(),
@@ -372,6 +372,7 @@ final class NotchController: NSObject, NSWindowDelegate {
 
     private var collapsedFrame: NSRect {
         var size = notchSize
+        size.height = stripHeight
         if manager.minutesToNextEvent != nil || !manager.notion.busyAgentIDs.isEmpty { size.width += NotchRootView.wingWidth * 2 }
         return topCenteredFrame(size)
     }
