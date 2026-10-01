@@ -1413,9 +1413,9 @@ struct NotionAgentsSettings: View {
                 Toggle("Notionカスタムエージェントを使う", isOn: Binding(
                     get: { settings.data.notionEnabled },
                     set: { enabled in
-                        if !enabled || connection.agentAccessValid { settings.data.notionEnabled = enabled }
+                        if !enabled || connection.tokenValid { settings.data.notionEnabled = enabled }
                     }))
-                    .disabled(!connection.agentAccessValid && !settings.data.notionEnabled)
+                    .disabled(!connection.tokenValid && !settings.data.notionEnabled)
                 Picker("タブの表示", selection: $settings.data.notionTabDisplay) {
                     ForEach(NotionTabDisplay.allCases) { display in
                         Text(display.title).tag(display)
@@ -1424,9 +1424,9 @@ struct NotionAgentsSettings: View {
                 LabeledContent("アイコン") {
                     Image(nsImage: NotionTabIcon.image(for: NSAppearance(named: .darkAqua)!, size: 28))
                 }
-                Text(connection.agentAccessValid
+                Text(connection.tokenValid
                      ? "オフにするとエージェントのタブ・通知・ポーリングを停止します。"
-                     : "有効にするには、通常の設定画面「Notion」でトークンとエージェントAPIの接続を確認してください。")
+                     : "有効にするには、通常の設定画面「Notion」でトークンの接続を確認してください。")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("チャットの外観") {
@@ -1483,7 +1483,7 @@ struct NotionAgentsSettings: View {
                     Button { Task { @MainActor in await agents.refresh() } } label: {
                         if agents.isRefreshing { ProgressView().controlSize(.small) }
                         else { Label("登録済みを確認", systemImage: "arrow.clockwise") }
-                    }.disabled(!connection.agentAccessValid || agents.isRefreshing || settings.data.notionSavedAgents.isEmpty)
+                    }.disabled(!connection.tokenValid || agents.isRefreshing || settings.data.notionSavedAgents.isEmpty)
                     if let activity = agents.activityText { Text(activity).font(.caption).foregroundStyle(.secondary) }
                 }
             }
@@ -1496,7 +1496,7 @@ struct NotionAgentsSettings: View {
                     Button { Task { await search(reset: true) } } label: {
                         if isSearching { ProgressView().controlSize(.small) }
                         else { Text("検索") }
-                    }.disabled(!connection.agentAccessValid || isSearching || searchName.trimmingCharacters(in: .whitespacesAndNewlines).count < 2)
+                    }.disabled(!connection.tokenValid || isSearching || searchName.trimmingCharacters(in: .whitespacesAndNewlines).count < 2)
                 }
                 if let searchMessage { Text(searchMessage).font(.caption).foregroundStyle(.secondary) }
                 ForEach(searchResults) { result in
@@ -1530,7 +1530,7 @@ struct NotionAgentsSettings: View {
         .onAppear {
             agents.start()
             baseURLDraft = settings.data.notionBaseURL ?? ""
-            if !connection.agentAccessValid { Task { await connection.verifySaved() } }
+            if !connection.tokenValid { Task { await connection.verifySaved() } }
         }
     }
 

@@ -110,7 +110,7 @@ struct OnboardingChoices {
         settings.countdownEnabled = calendarCountdown
         settings.hideFromScreenCapture = hideFromCapture
         settings.externalBrowserBundleID = externalBrowserBundleID
-        settings.notionEnabled = notionButton && NotionConnectionStore.shared.agentAccessValid
+        settings.notionEnabled = notionButton && NotionConnectionStore.shared.tokenValid
     }
 }
 

@@ -1,11 +1,6 @@
 import Combine
 import Foundation
 
-struct NotionConnectionResult {
-    let agentAccess: Bool
-    let agentError: String?
-}
-
 struct NotionConnectionAPI {
     let token: String
     var fetch: (URLRequest) async throws -> (Data, URLResponse) = { try await URLSession.shared.data(for: $0) }
@@ -25,20 +20,12 @@ struct NotionConnectionAPI {
         return (data, response)
     }
 
-    func verify() async throws -> NotionConnectionResult {
+    func verify() async throws {
         guard !token.isEmpty else { throw NotionAPIError.missingToken }
         let (userData, _) = try await get("users/me")
         guard let user = try JSONSerialization.jsonObject(with: userData) as? [String: Any],
               user["object"] as? String == "user", user["id"] as? String != nil else {
             throw NotionAPIError.invalidResponse
-        }
-        do {
-            let (agentData, _) = try await get("agents?page_size=1")
-            guard let agents = try JSONSerialization.jsonObject(with: agentData) as? [String: Any],
-                  agents["results"] is [Any] else { throw NotionAPIError.invalidResponse }
-            return NotionConnectionResult(agentAccess: true, agentError: nil)
-        } catch {
-            return NotionConnectionResult(agentAccess: false, agentError: error.localizedDescription)
         }
     }
 }
@@ -47,7 +34,6 @@ final class NotionConnectionStore: ObservableObject {
     static let shared = NotionConnectionStore()
 
     @Published private(set) var tokenValid = false
-    @Published private(set) var agentAccessValid = false
     @Published private(set) var isChecking = false
     @Published private(set) var message: String?
 
@@ -58,7 +44,7 @@ final class NotionConnectionStore: ObservableObject {
     func verifySaved() async {
         guard !isChecking else { return }
         guard let token = NotionTokenStore.read() else {
-            tokenValid = false; agentAccessValid = false; message = nil
+            tokenValid = false; message = nil
             SettingsStore.shared.data.notionEnabled = false
             return
         }
@@ -66,19 +52,17 @@ final class NotionConnectionStore: ObservableObject {
         message = "接続を確認中…"
         defer { isChecking = false }
         do {
-            let result = try await NotionConnectionAPI(token: token).verify()
+            try await NotionConnectionAPI(token: token).verify()
             guard NotionTokenStore.read() == token else { return }
             tokenValid = true
-            agentAccessValid = result.agentAccess
-            message = result.agentAccess ? "接続済み・エージェント利用可" :
-                "接続済み。エージェントAPIを利用できません: \(result.agentError ?? "権限を確認してください。")"
-            if !result.agentAccess { SettingsStore.shared.data.notionEnabled = false }
+            message = "トークンを確認しました"
         } catch {
             guard NotionTokenStore.read() == token else { return }
             tokenValid = false
-            agentAccessValid = false
             message = "接続を確認できません: \(error.localizedDescription)"
-            SettingsStore.shared.data.notionEnabled = false
+            if case NotionAPIError.server(let status, _) = error, status == 401 {
+                SettingsStore.shared.data.notionEnabled = false
+            }
         }
         NotionAgentsStore.shared.settingsChanged()
     }
@@ -91,16 +75,13 @@ final class NotionConnectionStore: ObservableObject {
         message = "トークンを確認中…"
         defer { isChecking = false }
         do {
-            let result = try await NotionConnectionAPI(token: token).verify()
+            try await NotionConnectionAPI(token: token).verify()
             guard NotionTokenStore.save(token) else {
                 message = "トークンをキーチェーンに保存できませんでした。"; return false
             }
             NotionAgentsStore.shared.storedTokenChanged()
             tokenValid = true
-            agentAccessValid = result.agentAccess
-            message = result.agentAccess ? "接続済み・エージェント利用可" :
-                "接続済み。エージェントAPIを利用できません: \(result.agentError ?? "権限を確認してください。")"
-            if !result.agentAccess { SettingsStore.shared.data.notionEnabled = false }
+            message = "トークンを確認しました"
             return true
         } catch {
             message = "トークンを確認できません: \(error.localizedDescription)"
@@ -113,7 +94,6 @@ final class NotionConnectionStore: ObservableObject {
             message = "キーチェーンの接続情報を削除できませんでした。"; return
         }
         tokenValid = false
-        agentAccessValid = false
         message = nil
         SettingsStore.shared.data.notionEnabled = false
         NotionAgentsStore.shared.storedTokenChanged()

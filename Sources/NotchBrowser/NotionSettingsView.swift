@@ -1,5 +1,37 @@
 import SwiftUI
 
+private enum DatabasePollingFrequency: String, CaseIterable, Identifiable {
+    case high, medium, low, custom
+    var id: Self { self }
+    var title: String {
+        switch self {
+        case .high: "高頻度"
+        case .medium: "中頻度"
+        case .low: "低頻度"
+        case .custom: "カスタム"
+        }
+    }
+    var detail: String {
+        switch self {
+        case .high: "30秒ごと"
+        case .medium: "90秒ごと"
+        case .low: "5分ごと"
+        case .custom: "30秒〜5分"
+        }
+    }
+    var seconds: Int? {
+        switch self {
+        case .high: 30
+        case .medium: 90
+        case .low: 300
+        case .custom: nil
+        }
+    }
+    static func matching(_ seconds: Int) -> Self {
+        allCases.first { $0.seconds == seconds } ?? .custom
+    }
+}
+
 /// Shared Notion connection and database notifications live outside the agent page.
 struct NotionSettingsView: View {
     @EnvironmentObject private var settings: SettingsStore
@@ -11,6 +43,7 @@ struct NotionSettingsView: View {
     @State private var databaseProperties: [String: [NotionDatabaseProperty]] = [:]
     @State private var isAddingDatabase = false
     @State private var pollingDraft = "90"
+    @State private var pollingFrequency = DatabasePollingFrequency.medium
     @FocusState private var pollingFocused: Bool
 
     var body: some View {
@@ -40,9 +73,14 @@ struct NotionSettingsView: View {
                 }
                 if let message = connection.message {
                     Text(message).font(.caption)
-                        .foregroundStyle(connection.tokenValid && connection.agentAccessValid ? Color.secondary : Color.orange)
+                        .foregroundStyle(connection.tokenValid ? Color.secondary : Color.orange)
                 }
-                Text("トークンはMacのキーチェーンに保存します。エージェントを有効にするには、接続とエージェントAPIの両方を確認します。")
+                if connection.tokenValid && !settings.data.notionEnabled {
+                    Button("カスタムエージェントを有効にする") {
+                        settings.data.notionEnabled = true
+                    }
+                }
+                Text("トークンはMacのキーチェーンに保存します。エージェントを有効にするには、Notionへの接続を確認します。")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("データベースの更新通知") {
@@ -106,23 +144,32 @@ struct NotionSettingsView: View {
                     }
                     .padding(.vertical, 4)
                 }
-                HStack {
-                    Text("確認間隔")
-                    Slider(value: Binding(
-                        get: { Double(settings.data.notionDatabasePollingSeconds) },
-                        set: { value in
-                            settings.data.notionDatabasePollingSeconds = Int(value.rounded())
-                            pollingDraft = String(settings.data.notionDatabasePollingSeconds)
-                        }), in: 30...300, step: 1)
-                    TextField("秒", text: $pollingDraft)
-                        .frame(width: 56).textFieldStyle(.roundedBorder)
-                        .focused($pollingFocused)
-                        .accessibilityLabel("データベースの確認間隔（秒）")
-                        .onSubmit(savePollingDraft)
-                        .onChange(of: pollingFocused) { _, focused in if !focused { savePollingDraft() } }
-                    Text("秒").foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("確認間隔").font(.subheadline.weight(.medium))
+                    HStack(spacing: 8) {
+                        ForEach(DatabasePollingFrequency.allCases) { frequency in
+                            frequencyCard(frequency)
+                        }
+                    }
+                    if pollingFrequency == .custom {
+                        HStack {
+                            Slider(value: Binding(
+                                get: { Double(settings.data.notionDatabasePollingSeconds) },
+                                set: { value in
+                                    settings.data.notionDatabasePollingSeconds = Int(value.rounded())
+                                    pollingDraft = String(settings.data.notionDatabasePollingSeconds)
+                                }), in: 30...300, step: 1)
+                            TextField("秒", text: $pollingDraft)
+                                .frame(width: 56).textFieldStyle(.roundedBorder)
+                                .focused($pollingFocused)
+                                .accessibilityLabel("データベースの確認間隔（秒）")
+                                .onSubmit(savePollingDraft)
+                                .onChange(of: pollingFocused) { _, focused in if !focused { savePollingDraft() } }
+                            Text("秒").foregroundStyle(.secondary)
+                        }
+                    }
                 }
-                Text("30〜300秒。更新のあったページだけを確認します。")
+                Text("初期値は中頻度。間隔を短くするとNotionへの問い合わせが増えます。")
                     .font(.caption).foregroundStyle(.secondary)
                 if let error = monitor.lastError { Text(error).font(.caption).foregroundStyle(.orange) }
             }
@@ -130,6 +177,7 @@ struct NotionSettingsView: View {
         .formStyle(.grouped)
         .onAppear {
             pollingDraft = String(settings.data.notionDatabasePollingSeconds)
+            pollingFrequency = .matching(settings.data.notionDatabasePollingSeconds)
             if connection.hasStoredToken && !connection.tokenValid {
                 Task { await connection.verifySaved() }
             }
@@ -148,6 +196,32 @@ struct NotionSettingsView: View {
 
     private func saveToken() async {
         if await connection.save(tokenDraft) { tokenDraft = "" }
+    }
+
+    private func frequencyCard(_ frequency: DatabasePollingFrequency) -> some View {
+        let selected = pollingFrequency == frequency
+        return Button {
+            pollingFrequency = frequency
+            if let seconds = frequency.seconds {
+                settings.data.notionDatabasePollingSeconds = seconds
+                pollingDraft = String(seconds)
+            }
+        } label: {
+            VStack(alignment: .leading, spacing: 5) {
+                Text(frequency.title).font(.system(size: 13, weight: .semibold))
+                Text(frequency.detail).font(.caption).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+            .padding(.horizontal, 10)
+            .background(selected ? Color.blue.opacity(0.14) : Color(nsColor: .controlBackgroundColor),
+                        in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10)
+                .stroke(selected ? Color.blue : Color.secondary.opacity(0.2), lineWidth: selected ? 1.5 : 1))
+            .contentShape(RoundedRectangle(cornerRadius: 10))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(frequency.title)、\(frequency.detail)")
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
     private func savePollingDraft() {
