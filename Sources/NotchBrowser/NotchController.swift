@@ -27,17 +27,26 @@ private struct RunningAgentBadge: View {
 }
 
 private struct NotionNotificationBanner: View {
-    let agent: SavedNotionAgent
+    let agent: SavedNotionAgent?
+    let name: String
     let title: String
     let preview: String
     let deadline: Date
     let duration: Int
+    let onOpen: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
-            NotionAgentAvatar(agent: agent, size: 32)
+            if let agent { NotionAgentAvatar(agent: agent, size: 32) }
+            else {
+                Image(systemName: "tray.full.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(NotionPanelTheme.blue)
+                    .frame(width: 32, height: 32)
+                    .background(NotionPanelTheme.blueWash, in: Circle())
+            }
             VStack(alignment: .leading, spacing: 3) {
-                Text(agent.name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                Text(name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
                 Text(title).font(.system(size: 11, weight: .medium)).foregroundStyle(NotionPanelTheme.blue)
                 Text(preview.isEmpty ? title : preview)
                     .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(2)
@@ -63,6 +72,8 @@ private struct NotionNotificationBanner: View {
         .foregroundStyle(NotionPanelTheme.ink)
         .background(NotionPanelTheme.canvas, in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(NotionPanelTheme.hairline))
+        .contentShape(RoundedRectangle(cornerRadius: 12))
+        .onTapGesture(perform: onOpen)
     }
 }
 
@@ -168,13 +179,15 @@ final class NotchRootView: NSView {
         badgeIcon.alphaValue = agent == nil && badgeLabel.alphaValue > 0 ? 1 : 0
     }
 
-    func setNotification(agent: SavedNotionAgent?, title: String = "", preview: String = "",
-                         deadline: Date = .now, duration: Int = 10) {
+    func setNotification(agent: SavedNotionAgent?, name: String = "", title: String = "", preview: String = "",
+                         deadline: Date = .now, duration: Int = 10, onOpen: @escaping () -> Void = {}) {
         notificationBanner?.removeFromSuperview()
         notificationBanner = nil
-        guard let agent else { return }
-        let banner = NSHostingView(rootView: NotionNotificationBanner(agent: agent, title: title, preview: preview,
-                                                                      deadline: deadline, duration: duration))
+        guard agent != nil || !name.isEmpty else { return }
+        let banner = NSHostingView(rootView: NotionNotificationBanner(agent: agent, name: agent?.name ?? name,
+                                                                      title: title, preview: preview,
+                                                                      deadline: deadline, duration: duration,
+                                                                      onOpen: onOpen))
         banner.appearance = SettingsStore.shared.data.notionAppearance.resolvedAppearance
         addSubview(banner)
         notificationBanner = banner
@@ -234,6 +247,10 @@ final class NotchRootView: NSView {
 
 /// One notch on one display. The single browser view moves to whichever notch expands.
 final class NotchController: NSObject, NSWindowDelegate {
+    private enum NoticeTarget {
+        case agent(agentID: String, threadID: String)
+        case database(URL?)
+    }
     let panel: NotchPanel
     let root = NotchRootView()
     private(set) var screen: NSScreen
@@ -241,7 +258,7 @@ final class NotchController: NSObject, NSWindowDelegate {
     private(set) var isExpanded = false
     private var hoverTimer: Timer?
     private var notificationDismissTimer: Timer?
-    private var notification: (agentID: String, threadID: String, title: String, preview: String)?
+    private var notification: NoticeTarget?
     private let transition = NotchTransition()
     private var pointerInside = false
     private(set) var shelfVisible = false
@@ -462,9 +479,26 @@ final class NotchController: NSObject, NSWindowDelegate {
         guard !isExpanded else { return }
         let duration = SettingsStore.shared.data.notionNotificationDuration
         let deadline = Date().addingTimeInterval(TimeInterval(duration))
-        notification = (agentID, threadID, title, preview)
+        notification = .agent(agentID: agentID, threadID: threadID)
         root.setNotification(agent: agent, title: title, preview: preview,
-                             deadline: deadline, duration: duration)
+                             deadline: deadline, duration: duration,
+                             onOpen: { [weak self] in self?.openNotificationChat() })
+        notificationDismissTimer?.invalidate()
+        notificationDismissTimer = .scheduledTimer(withTimeInterval: TimeInterval(duration), repeats: false) { [weak self] _ in
+            self?.clearNotification(animated: true)
+        }
+        relayout()
+        panel.orderFrontRegardless()
+    }
+
+    func showDatabaseNotification(_ notice: NotionDatabaseNotice) {
+        guard SettingsStore.shared.data.notionEnabled, !isExpanded else { return }
+        let duration = SettingsStore.shared.data.notionNotificationDuration
+        notification = .database(notice.pageURL)
+        root.setNotification(agent: nil, name: notice.databaseName,
+                             title: notice.propertyName, preview: notice.preview,
+                             deadline: Date().addingTimeInterval(TimeInterval(duration)), duration: duration,
+                             onOpen: { [weak self] in self?.openNotificationChat() })
         notificationDismissTimer?.invalidate()
         notificationDismissTimer = .scheduledTimer(withTimeInterval: TimeInterval(duration), repeats: false) { [weak self] _ in
             self?.clearNotification(animated: true)
@@ -484,8 +518,14 @@ final class NotchController: NSObject, NSWindowDelegate {
 
     private func openNotificationChat() {
         guard let notice = notification else { return }
-        manager.notion.openThread(agentID: notice.agentID, threadID: notice.threadID)
-        manager.showNotion(on: self, focus: true)
+        switch notice {
+        case .agent(let agentID, let threadID):
+            manager.notion.openThread(agentID: agentID, threadID: threadID)
+            manager.showNotion(on: self, focus: true)
+        case .database(let url):
+            clearNotification(animated: true)
+            if let url { NSWorkspace.shared.open(url) }
+        }
     }
 
     func showShelf() {
@@ -560,7 +600,8 @@ final class NotchController: NSObject, NSWindowDelegate {
         let motion = SettingsStore.shared.data.motion
         guard !manager.dragActive else { return }
         if inside {
-            if notification != nil { openNotificationChat(); return }
+            if case .agent = notification { openNotificationChat(); return }
+            if notification != nil { return }
             guard !isExpanded else { return }
             scheduleHover(after: motion.openDelay) { [weak self] in
                 guard let self, self.pointerInside else { return }
@@ -601,6 +642,7 @@ final class NotchManager {
     let browser = BrowserViewController()
     let shelf: ShelfViewController
     let notion = NotionAgentsStore.shared
+    let databaseMonitor = NotionDatabaseMonitor.shared
     private let dragMonitor = ShelfDragMonitor()
     private(set) var dragActive = false
     private var dragWasActive = false
@@ -666,6 +708,13 @@ final class NotchManager {
                 self.notion.clearAlert()
             }
         }.store(in: &cancellables)
+        databaseMonitor.$latestNotice.receive(on: RunLoop.main).sink { [weak self] notice in
+            guard let self, let notice else { return }
+            let target = self.orderedControllers.first { $0.screen.frame.contains(NSEvent.mouseLocation) }
+                ?? self.orderedControllers.first
+            target?.showDatabaseNotification(notice)
+            self.databaseMonitor.clearNotice()
+        }.store(in: &cancellables)
 
         launcherWatcher.onChange = { [weak self] level in
             self?.controllers.values.forEach { $0.setBelowLauncher(level: level) }
@@ -688,12 +737,14 @@ final class NotchManager {
         applyWindowSettings()
         calendar.start()
         notion.start()
+        databaseMonitor.start()
         dragMonitor.start()
         if !shelf.store.entries.isEmpty { showShelf() }
     }
 
     private func settingsChanged() {
         notion.settingsChanged()
+        databaseMonitor.settingsChanged()
         applyCalendarSettings()
         rebuild()
         applyWindowSettings()

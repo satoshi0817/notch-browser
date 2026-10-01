@@ -20,6 +20,15 @@ struct SavedNotionAgent: Codable, Identifiable, Hashable {
     var iconURL: String? = nil
 }
 
+struct SavedNotionDatabase: Codable, Identifiable, Hashable {
+    var id: String // Data source ID used by the query API.
+    var name: String
+    var propertyID: String
+    var propertyName: String
+    var addedAt: Date = .now
+    var enabled = true
+}
+
 enum NotionAppearance: String, Codable, CaseIterable, Identifiable {
     case system, light, dark
     var id: Self { self }
@@ -187,6 +196,8 @@ struct SettingsData: Codable {
     var notionBaseURL: String? = nil
     var notionNotificationsEnabled = true
     var notionNotificationDuration = 10
+    var notionDatabases: [SavedNotionDatabase] = []
+    var notionDatabasePollingSeconds = 90
 
     init() {}
 
@@ -222,6 +233,9 @@ struct SettingsData: Codable {
         notionNotificationsEnabled = (try? c.decode(Bool.self, forKey: .notionNotificationsEnabled)) ?? true
         notionNotificationDuration = min(60, max(5,
             (try? c.decode(Int.self, forKey: .notionNotificationDuration)) ?? 10))
+        notionDatabases = (try? c.decode([SavedNotionDatabase].self, forKey: .notionDatabases)) ?? []
+        notionDatabasePollingSeconds = min(300, max(30,
+            (try? c.decode(Int.self, forKey: .notionDatabasePollingSeconds)) ?? 90))
         toolbarActions = (try? c.decode([String].self, forKey: .toolbarActions))
             .map { raw in
                 var seen = Set<ToolbarAction>()

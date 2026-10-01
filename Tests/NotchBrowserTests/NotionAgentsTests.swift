@@ -106,6 +106,8 @@ final class NotionAgentsTests: XCTestCase {
         XCTAssertEqual(settings.notionAppearance, .system)
         XCTAssertNil(settings.notionBaseURL)
         XCTAssertEqual(settings.notionTabPosition, settings.pinnedTabs.count)
+        XCTAssertTrue(settings.notionDatabases.isEmpty)
+        XCTAssertEqual(settings.notionDatabasePollingSeconds, 90)
         settings.notionHiddenAgentIDs.insert("agent-1")
         settings.notionNotificationsEnabled = false
         settings.notionNotificationDuration = 30
@@ -115,6 +117,8 @@ final class NotionAgentsTests: XCTestCase {
         settings.notionTabDisplay = .titleOnly
         settings.notionAppearance = .dark
         settings.notionBaseURL = "https://app.dev.notion.com"
+        settings.notionDatabasePollingSeconds = 120
+        settings.notionDatabases = [SavedNotionDatabase(id: "source-1", name: "結果", propertyID: "answer", propertyName: "回答")]
         let restored = try JSONDecoder().decode(SettingsData.self, from: JSONEncoder().encode(settings))
         XCTAssertEqual(restored.notionHiddenAgentIDs, ["agent-1"])
         XCTAssertFalse(restored.notionNotificationsEnabled)
@@ -125,6 +129,76 @@ final class NotionAgentsTests: XCTestCase {
         XCTAssertEqual(restored.notionTabDisplay, .titleOnly)
         XCTAssertEqual(restored.notionAppearance, .dark)
         XCTAssertEqual(restored.notionBaseURL, "https://app.dev.notion.com")
+        XCTAssertEqual(restored.notionDatabasePollingSeconds, 120)
+        XCTAssertEqual(restored.notionDatabases, settings.notionDatabases)
+        let tooShort = try JSONDecoder().decode(SettingsData.self, from: Data("{\"notionDatabasePollingSeconds\":5}".utf8))
+        let tooLong = try JSONDecoder().decode(SettingsData.self, from: Data("{\"notionDatabasePollingSeconds\":999}".utf8))
+        XCTAssertEqual(tooShort.notionDatabasePollingSeconds, 30)
+        XCTAssertEqual(tooLong.notionDatabasePollingSeconds, 300)
+    }
+
+    func testDatabaseInputAcceptsNotionURLAndRejectsOtherSites() {
+        let id = "2f0b35e6-e67f-805e-b20c-d2ed72c02019"
+        XCTAssertEqual(NotionDatabaseInput.id(from: id), id)
+        XCTAssertEqual(NotionDatabaseInput.id(from: "https://www.notion.so/Workspace/Results-2f0b35e6e67f805eb20cd2ed72c02019?v=abc"), id)
+        XCTAssertEqual(NotionDatabaseInput.id(from: "https://www.notion.so/Workspace/Results-\(id)"), id)
+        XCTAssertNil(NotionDatabaseInput.id(from: "https://example.com/\(id)"))
+    }
+
+    func testDatabaseValueExtractsSelectedPropertyText() {
+        XCTAssertEqual(NotionDatabaseValue.text(["type": "rich_text", "rich_text": [
+            ["plain_text": "調査"], ["plain_text": "完了"]
+        ]]), "調査完了")
+        XCTAssertEqual(NotionDatabaseValue.text(["type": "status", "status": ["name": "完了"]]), "完了")
+        XCTAssertEqual(NotionDatabaseValue.text(["type": "formula", "formula": ["type": "number", "number": 42]]), "42")
+    }
+
+    func testDatabaseQueryFiltersByUpdateTimeAndSelectedProperty() async throws {
+        let configured = SavedNotionDatabase(id: "source-1", name: "結果", propertyID: "answer", propertyName: "回答",
+                                              addedAt: ISO8601DateFormatter().date(from: "2026-10-01T00:00:00Z")!)
+        let api = NotionDatabaseAPI(token: "test-token", fetch: { request in
+            XCTAssertEqual(request.url?.path, "/v1/data_sources/source-1/query")
+            XCTAssertEqual(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "filter_properties[]" })?.value, "answer")
+            let body = try XCTUnwrap(request.httpBody)
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+            let filter = try XCTUnwrap(json["filter"] as? [String: Any])
+            XCTAssertEqual(filter["timestamp"] as? String, "last_edited_time")
+            XCTAssertNotNil((filter["last_edited_time"] as? [String: Any])?["on_or_after"])
+            let response = """
+            {"results":[{"id":"page-1","last_edited_time":"2026-10-01T01:00:00Z",
+              "url":"https://www.notion.so/page-1","properties":{"回答":{"id":"answer","type":"rich_text",
+              "rich_text":[{"plain_text":"処理が完了しました"}]}}}],"has_more":false,"next_cursor":null}
+            """
+            return (Data(response.utf8), self.response(request))
+        })
+        let rows = try await api.changedRows(database: configured, since: configured.addedAt)
+        XCTAssertEqual(rows.map(\.text), ["処理が完了しました"])
+    }
+
+    func testDatabaseIDResolvesDataSourceAndPropertyNames() async throws {
+        let api = NotionDatabaseAPI(token: "test-token", fetch: { request in
+            let payload: String
+            switch request.url?.path {
+            case "/v1/data_sources/database-1":
+                payload = "{\"message\":\"not found\"}"
+                return (Data(payload.utf8), self.response(request, 404))
+            case "/v1/databases/database-1":
+                payload = "{\"data_sources\":[{\"id\":\"source-1\"}]}"
+            case "/v1/data_sources/source-1":
+                payload = """
+                {"id":"source-1","title":[{"plain_text":"Agent Results"}],
+                 "properties":{"回答":{"id":"answer","type":"rich_text"},
+                               "作成者":{"id":"creator","type":"created_by"}}}
+                """
+            default: throw NotionAPIError.invalidResponse
+            }
+            return (Data(payload.utf8), self.response(request))
+        })
+        let details = try await api.details(for: "database-1")
+        XCTAssertEqual(details.id, "source-1")
+        XCTAssertEqual(details.name, "Agent Results")
+        XCTAssertEqual(details.properties.map(\.name), ["回答"])
     }
 
     func testNotionChatPaletteHasDistinctReadableLightAndDarkColors() {

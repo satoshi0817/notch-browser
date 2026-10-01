@@ -601,6 +601,7 @@ final class NotionAgentsStore: ObservableObject {
         pendingReplies = [:]; savePendingReplies()
         selectedAgentID = nil; selectedThreadID = nil; isNewChat = false; showingAllAgents = false
         start()
+        NotionDatabaseMonitor.shared.tokenChanged()
     }
 
     func registrationChanged() {
@@ -1347,6 +1348,11 @@ struct NotionAgentsPanel: View {
                         .font(.caption2).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
+                if let date = NotionMessage.parseDate(thread.last_edited_time) {
+                    Text(date, format: .dateTime.year().month().day().hour().minute())
+                        .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                        .help("最終更新日時")
+                }
             }
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1407,6 +1413,7 @@ private struct NotionThinkingView: View {
 struct NotionAgentsSettings: View {
     @EnvironmentObject var settings: SettingsStore
     @ObservedObject private var agents = NotionAgentsStore.shared
+    @ObservedObject private var databaseMonitor = NotionDatabaseMonitor.shared
     @State private var token = ""
     @State private var agentInput = ""
     @State private var inputMessage: String?
@@ -1417,6 +1424,12 @@ struct NotionAgentsSettings: View {
     @State private var searchMessage: String?
     @State private var baseURLDraft = ""
     @State private var baseURLMessage: String?
+    @State private var databaseInput = ""
+    @State private var databaseMessage: String?
+    @State private var databaseProperties: [String: [NotionDatabaseProperty]] = [:]
+    @State private var isAddingDatabase = false
+    @State private var pollingDraft = "90"
+    @FocusState private var pollingFocused: Bool
 
     var body: some View {
         Form {
@@ -1538,7 +1551,7 @@ struct NotionAgentsSettings: View {
                 }
             }
             Section("通知") {
-                Toggle("返信・確認待ちでノッチを開く", isOn: $settings.data.notionNotificationsEnabled)
+                Toggle("返信・データベース更新をノッチで通知", isOn: $settings.data.notionNotificationsEnabled)
                 Picker("通知を閉じるまで", selection: $settings.data.notionNotificationDuration) {
                     ForEach([5, 10, 15, 30, 60], id: \.self) { seconds in
                         Text("\(seconds)秒").tag(seconds)
@@ -1546,12 +1559,90 @@ struct NotionAgentsSettings: View {
                 }
                 .disabled(!settings.data.notionNotificationsEnabled)
             }
+            Section("データベースの更新通知") {
+                Text("エージェントが更新するデータベースを登録し、通知に表示するプロパティを選びます。登録前の更新は通知しません。")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    TextField("NotionのデータベースURLまたはID", text: $databaseInput)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { Task { await addDatabase() } }
+                    Button {
+                        Task { await addDatabase() }
+                    } label: {
+                        if isAddingDatabase { ProgressView().controlSize(.small) }
+                        else { Text("追加") }
+                    }
+                    .disabled(!agents.hasToken || isAddingDatabase || databaseInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                if let databaseMessage { Text(databaseMessage).font(.caption).foregroundStyle(.orange) }
+                ForEach(settings.data.notionDatabases) { database in
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Toggle(database.name, isOn: Binding(
+                                get: { currentDatabase(database.id)?.enabled ?? false },
+                                set: { value in updateDatabase(database.id) { $0.enabled = value } }))
+                            Spacer()
+                            Button(role: .destructive) { removeDatabase(database.id) } label: {
+                                Image(systemName: "minus.circle")
+                            }
+                            .buttonStyle(.plain).help("監視対象から削除")
+                        }
+                        Text(database.id).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
+                        if let properties = databaseProperties[database.id], !properties.isEmpty {
+                            Picker("通知に表示するプロパティ", selection: Binding(
+                                get: { currentDatabase(database.id)?.propertyID ?? database.propertyID },
+                                set: { propertyID in
+                                    guard let selected = properties.first(where: { $0.id == propertyID }) else { return }
+                                    updateDatabase(database.id) {
+                                        $0.propertyID = selected.id
+                                        $0.propertyName = selected.name
+                                        $0.addedAt = .now
+                                    }
+                                })) {
+                                ForEach(properties) { property in Text(property.name).tag(property.id) }
+                            }
+                        } else {
+                            HStack {
+                                Text("表示: \(database.propertyName)")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                Button("プロパティを再取得") { Task { await loadProperties(for: database) } }
+                                    .disabled(!agents.hasToken)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+                HStack {
+                    Text("確認間隔")
+                    Slider(value: Binding(
+                        get: { Double(settings.data.notionDatabasePollingSeconds) },
+                        set: { value in
+                            settings.data.notionDatabasePollingSeconds = Int(value.rounded())
+                            pollingDraft = String(settings.data.notionDatabasePollingSeconds)
+                        }), in: 30...300, step: 1)
+                    TextField("秒", text: $pollingDraft)
+                        .frame(width: 56).textFieldStyle(.roundedBorder)
+                        .focused($pollingFocused)
+                        .onSubmit(savePollingDraft)
+                        .onChange(of: pollingFocused) { _, focused in if !focused { savePollingDraft() } }
+                    Text("秒").foregroundStyle(.secondary)
+                }
+                Text("30〜300秒。Notion APIに問い合わせ、更新のあったページだけを確認します。")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let error = databaseMonitor.lastError {
+                    Text(error).font(.caption).foregroundStyle(.orange)
+                }
+            }
             if let error = agents.error { Text(error).foregroundStyle(.red) }
         }
         .formStyle(.grouped)
         .onAppear {
             agents.start()
             baseURLDraft = settings.data.notionBaseURL ?? ""
+            pollingDraft = String(settings.data.notionDatabasePollingSeconds)
+            for database in settings.data.notionDatabases {
+                Task { await loadProperties(for: database) }
+            }
         }
     }
 
@@ -1567,6 +1658,59 @@ struct NotionAgentsSettings: View {
         } else {
             baseURLMessage = "NotionのHTTPS URLをホスト名まで入力してください。"
         }
+    }
+
+    private func savePollingDraft() {
+        let value = Int(pollingDraft.trimmingCharacters(in: .whitespacesAndNewlines))
+            ?? settings.data.notionDatabasePollingSeconds
+        settings.data.notionDatabasePollingSeconds = min(300, max(30, value))
+        pollingDraft = String(settings.data.notionDatabasePollingSeconds)
+    }
+
+    private func currentDatabase(_ id: String) -> SavedNotionDatabase? {
+        settings.data.notionDatabases.first { $0.id == id }
+    }
+
+    private func updateDatabase(_ id: String, _ change: (inout SavedNotionDatabase) -> Void) {
+        guard let index = settings.data.notionDatabases.firstIndex(where: { $0.id == id }) else { return }
+        change(&settings.data.notionDatabases[index])
+    }
+
+    private func removeDatabase(_ id: String) {
+        settings.data.notionDatabases.removeAll { $0.id == id }
+        databaseProperties[id] = nil
+    }
+
+    private func addDatabase() async {
+        guard !isAddingDatabase, let token = NotionTokenStore.read() else { return }
+        guard let id = NotionDatabaseInput.id(from: databaseInput) else {
+            databaseMessage = "NotionのデータベースURLまたはIDを確認してください。"; return
+        }
+        isAddingDatabase = true
+        databaseMessage = "データベースとプロパティを取得中…"
+        defer { isAddingDatabase = false }
+        do {
+            let details = try await NotionDatabaseAPI(token: token).details(for: id)
+            guard !settings.data.notionDatabases.contains(where: { $0.id == details.id }) else {
+                databaseMessage = "このデータベースは登録済みです。"; return
+            }
+            guard let property = details.properties.first(where: { $0.type == "rich_text" }) ?? details.properties.first else {
+                databaseMessage = "通知に表示できるプロパティがありません。"; return
+            }
+            settings.data.notionDatabases.append(SavedNotionDatabase(id: details.id, name: details.name,
+                propertyID: property.id, propertyName: property.name))
+            databaseProperties[details.id] = details.properties
+            databaseInput = ""
+            databaseMessage = nil
+        } catch { databaseMessage = error.localizedDescription }
+    }
+
+    private func loadProperties(for database: SavedNotionDatabase) async {
+        guard let token = NotionTokenStore.read() else { return }
+        do {
+            let details = try await NotionDatabaseAPI(token: token).details(for: database.id)
+            databaseProperties[database.id] = details.properties
+        } catch { databaseMessage = "\(database.name): \(error.localizedDescription)" }
     }
 
     private func saveToken() {
