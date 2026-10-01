@@ -183,6 +183,8 @@ struct SettingsData: Codable {
     var notionHiddenAgentIDs: Set<String> = []
     var notionSavedAgents: [SavedNotionAgent] = []
     var notionAppearance = NotionAppearance.system
+    /// nil uses each thread's URL when available, or the standard Notion site.
+    var notionBaseURL: String? = nil
     var notionNotificationsEnabled = true
     var notionNotificationDuration = 10
 
@@ -215,6 +217,8 @@ struct SettingsData: Codable {
         notionHiddenAgentIDs = (try? c.decode(Set<String>.self, forKey: .notionHiddenAgentIDs)) ?? []
         notionSavedAgents = (try? c.decode([SavedNotionAgent].self, forKey: .notionSavedAgents)) ?? []
         notionAppearance = (try? c.decode(NotionAppearance.self, forKey: .notionAppearance)) ?? .system
+        notionBaseURL = (try? c.decodeIfPresent(String.self, forKey: .notionBaseURL))
+            .flatMap(NotionChatLink.normalizedBaseURL)
         notionNotificationsEnabled = (try? c.decode(Bool.self, forKey: .notionNotificationsEnabled)) ?? true
         notionNotificationDuration = min(60, max(5,
             (try? c.decode(Int.self, forKey: .notionNotificationDuration)) ?? 10))

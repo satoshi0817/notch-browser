@@ -88,20 +88,54 @@ struct NotionThread: Codable, Identifiable {
     var isRunning: Bool { status == "pending" || status == "queued" || status == "in_progress" }
 }
 
+struct NotionThreadEntry: Identifiable {
+    let agent: SavedNotionAgent
+    let thread: NotionThread
+    var id: String { "\(agent.id):\(thread.id)" }
+}
+
 struct NotionChatLink {
     let url: URL
     let isDirect: Bool
 
-    static func resolve(thread: NotionThread?, agentID: String) -> NotionChatLink? {
+    static func normalizedBaseURL(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let components = URLComponents(string: trimmed),
+              components.scheme?.lowercased() == "https",
+              let host = components.host?.lowercased(),
+              isNotionHost(host),
+              components.user == nil, components.password == nil,
+              components.path.isEmpty || components.path == "/",
+              components.query == nil, components.fragment == nil else { return nil }
+        var normalized = URLComponents()
+        normalized.scheme = "https"
+        normalized.host = host
+        normalized.port = components.port
+        return normalized.url?.absoluteString
+    }
+
+    static func isNotionHost(_ host: String) -> Bool {
+        host == "notion.so" || host.hasSuffix(".notion.so") ||
+        host == "notion.com" || host.hasSuffix(".notion.com")
+    }
+
+    static func resolve(thread: NotionThread?, agentID: String, baseURL: String? = nil) -> NotionChatLink? {
+        let base = baseURL.flatMap(normalizedBaseURL)
         if let raw = thread?.url, let url = URL(string: raw),
            url.scheme?.lowercased() == "https",
            let host = url.host?.lowercased(),
-           host == "notion.so" || host.hasSuffix(".notion.so") ||
-           host == "notion.com" || host.hasSuffix(".notion.com") {
+           isNotionHost(host) {
+            if let base, let baseComponents = URLComponents(string: base),
+               var destination = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+                destination.host = baseComponents.host
+                destination.port = baseComponents.port
+                if let rewritten = destination.url { return NotionChatLink(url: rewritten, isDirect: true) }
+            }
             return NotionChatLink(url: url, isDirect: true)
         }
         guard let id = NotionAgentInput.id(from: agentID) else { return nil }
-        return URL(string: "https://www.notion.so/agent/\(id)").map { NotionChatLink(url: $0, isDirect: false) }
+        return URL(string: "\(base ?? "https://www.notion.so")/agent/\(id)")
+            .map { NotionChatLink(url: $0, isDirect: false) }
     }
 }
 
@@ -273,8 +307,7 @@ enum NotionAgentInput {
         let candidate: String
         if let url = URLComponents(string: value), let scheme = url.scheme?.lowercased(),
            ["http", "https"].contains(scheme) {
-            guard let host = url.host?.lowercased(),
-                  ["notion.so", "www.notion.so", "notion.com", "www.notion.com", "app.notion.com"].contains(host) else { return nil }
+            guard let host = url.host?.lowercased(), NotionChatLink.isNotionHost(host) else { return nil }
             candidate = url.path.split(separator: "/").last.map(String.init) ?? ""
         } else if value.contains("://") { return nil }
         else { candidate = value }
@@ -471,6 +504,7 @@ final class NotionAgentsStore: ObservableObject {
     @Published private(set) var noticeText: String?
     @Published var selectedAgentID: String?
     @Published var selectedThreadID: String?
+    @Published private(set) var showingAllAgents = false
     @Published private(set) var isNewChat = false
     @Published var error: String?
     @Published var isSending = false
@@ -495,6 +529,10 @@ final class NotionAgentsStore: ObservableObject {
 
     func isThreadBusy(_ thread: NotionThread) -> Bool {
         guard let agentID = selectedAgentID else { return false }
+        return isThreadBusy(thread, agentID: agentID)
+    }
+
+    func isThreadBusy(_ thread: NotionThread, agentID: String) -> Bool {
         return NotionAgentActivity.isBusy(thread,
             waitingForReply: pendingReplies["\(agentID):\(thread.id)"] != nil,
             cachedMessages: cache.messages(for: thread.id))
@@ -516,6 +554,15 @@ final class NotionAgentsStore: ObservableObject {
 
     deinit { timer?.invalidate() }
     var visibleAgents: [SavedNotionAgent] { SettingsStore.shared.data.notionSavedAgents }
+    var allThreadEntries: [NotionThreadEntry] {
+        visibleAgents.flatMap { agent in
+            cache.threads(for: agent.id).map { NotionThreadEntry(agent: agent, thread: $0) }
+        }.sorted { left, right in
+            let lhs = NotionMessage.parseDate(left.thread.last_edited_time) ?? .distantPast
+            let rhs = NotionMessage.parseDate(right.thread.last_edited_time) ?? .distantPast
+            return lhs == rhs ? left.id < right.id : lhs > rhs
+        }
+    }
     var hasPendingMessageForSelectedAgent: Bool {
         pendingMessages.contains { $0.agentID == selectedAgentID && $0.threadID == selectedThreadID }
     }
@@ -552,7 +599,7 @@ final class NotionAgentsStore: ObservableObject {
         threads = []; messages = []; pendingMessages = []; busyAgentIDs = []; observed = [:]; metadataChecked = []; baselinedAgentIDs = []; error = nil
         cache.clear()
         pendingReplies = [:]; savePendingReplies()
-        selectedAgentID = nil; selectedThreadID = nil; isNewChat = false
+        selectedAgentID = nil; selectedThreadID = nil; isNewChat = false; showingAllAgents = false
         start()
     }
 
@@ -768,6 +815,7 @@ final class NotionAgentsStore: ObservableObject {
     }
 
     func selectAgent(_ id: String) async {
+        showingAllAgents = false
         selectedAgentID = id; selectedThreadID = nil; isNewChat = false; messages = []
         threads = cache.threads(for: id)
         guard SettingsStore.shared.data.notionEnabled else { return }
@@ -784,7 +832,20 @@ final class NotionAgentsStore: ObservableObject {
         catch { self.error = error.localizedDescription }
     }
 
-    func selectThread(_ id: String) async {
+    func selectAllAgents() {
+        if selectedAgentID == nil { selectedAgentID = visibleAgents.first?.id }
+        showingAllAgents = true
+        selectedThreadID = nil
+        isNewChat = false
+        messages = []
+        if isPanelVisible { Task { @MainActor in await refresh(forceFull: true) } }
+    }
+
+    func selectThread(_ id: String, agentID: String? = nil) async {
+        if let agentID {
+            selectedAgentID = agentID
+            threads = cache.threads(for: agentID)
+        }
         selectedThreadID = id; isNewChat = false; messages = cache.messages(for: id)
         guard SettingsStore.shared.data.notionEnabled else { return }
         guard let agentID = selectedAgentID else { return }
@@ -804,6 +865,7 @@ final class NotionAgentsStore: ObservableObject {
     func showHistory() { selectedThreadID = nil; isNewChat = false; messages = [] }
 
     func beginNewChat() {
+        showingAllAgents = false
         selectedThreadID = nil
         messages = []
         isNewChat = true
@@ -812,6 +874,7 @@ final class NotionAgentsStore: ObservableObject {
     func openThread(agentID: String, threadID: String) {
         guard SettingsStore.shared.data.notionEnabled else { return }
         selectedAgentID = agentID
+        showingAllAgents = false
         threads = cache.threads(for: agentID)
         selectedThreadID = threadID
         isNewChat = false
@@ -949,21 +1012,39 @@ struct NotionAgentsPanel: View {
                             .padding(.horizontal, 10).padding(.top, 10)
                         ScrollView {
                             LazyVStack(spacing: 4) {
+                                Button {
+                                    historyPeekOpen = false
+                                    store.selectAllAgents()
+                                } label: {
+                                    HStack(spacing: 9) {
+                                        Image(systemName: "square.stack.3d.up")
+                                            .font(.system(size: 15))
+                                            .frame(width: 24, height: 24)
+                                        Text("すべてのエージェント")
+                                            .font(.system(size: 12, weight: store.showingAllAgents ? .semibold : .regular))
+                                            .lineLimit(1)
+                                        Spacer(minLength: 0)
+                                    }
+                                    .padding(.horizontal, 10).padding(.vertical, 8)
+                                    .background(store.showingAllAgents ? NotionPanelTheme.canvas : .clear,
+                                                in: RoundedRectangle(cornerRadius: 8))
+                                }
+                                .buttonStyle(.plain)
                                 ForEach(store.visibleAgents) { agent in
                                     Button { Task { @MainActor in await store.selectAgent(agent.id) } } label: {
                                         HStack(spacing: 9) {
                                             NotionAgentAvatar(agent: agent, size: 24)
                                             Text(agent.name)
-                                                .font(.system(size: 13, weight: store.selectedAgentID == agent.id ? .semibold : .regular))
+                                                .font(.system(size: 13, weight: !store.showingAllAgents && store.selectedAgentID == agent.id ? .semibold : .regular))
                                                 .lineLimit(1)
                                             Spacer(minLength: 0)
                                             if store.busyAgentIDs.contains(agent.id) { ProgressView().controlSize(.mini) }
                                         }
                                         .padding(.horizontal, 10).padding(.vertical, 8)
-                                        .background(store.selectedAgentID == agent.id ? NotionPanelTheme.canvas : .clear,
+                                        .background(!store.showingAllAgents && store.selectedAgentID == agent.id ? NotionPanelTheme.canvas : .clear,
                                                     in: RoundedRectangle(cornerRadius: 8))
                                         .overlay(RoundedRectangle(cornerRadius: 8)
-                                            .stroke(store.selectedAgentID == agent.id ? NotionPanelTheme.hairline : .clear))
+                                            .stroke(!store.showingAllAgents && store.selectedAgentID == agent.id ? NotionPanelTheme.hairline : .clear))
                                     }.buttonStyle(.plain)
                                 }
                             }
@@ -975,8 +1056,15 @@ struct NotionAgentsPanel: View {
                     VStack(spacing: 0) {
                         if let agent = store.visibleAgents.first(where: { $0.id == store.selectedAgentID }) {
                             HStack(spacing: 10) {
-                                NotionAgentAvatar(agent: agent, size: 26)
-                                Text(agent.name).font(.system(size: 15, weight: .semibold)).lineLimit(1)
+                                if store.showingAllAgents && store.selectedThreadID == nil {
+                                    Image(systemName: "square.stack.3d.up")
+                                        .font(.system(size: 18)).frame(width: 26, height: 26)
+                                    Text("すべてのエージェント")
+                                        .font(.system(size: 15, weight: .semibold))
+                                } else {
+                                    NotionAgentAvatar(agent: agent, size: 26)
+                                    Text(agent.name).font(.system(size: 15, weight: .semibold)).lineLimit(1)
+                                }
                                 Spacer()
                                 Button { historyPeekOpen.toggle() } label: {
                                     Label("履歴", systemImage: "sidebar.left")
@@ -987,6 +1075,7 @@ struct NotionAgentsPanel: View {
                                 .background(historyPeekOpen ? NotionPanelTheme.blueWash : NotionPanelTheme.softSurface,
                                             in: RoundedRectangle(cornerRadius: 8))
                                 .help("チャット履歴を横に表示")
+                                if !store.showingAllAgents || store.selectedThreadID != nil {
                                 Button {
                                     draft = ""
                                     store.beginNewChat()
@@ -999,6 +1088,7 @@ struct NotionAgentsPanel: View {
                                 .padding(.horizontal, 9).padding(.vertical, 7)
                                 .background(NotionPanelTheme.softSurface, in: RoundedRectangle(cornerRadius: 8))
                                 .help("新しいチャット")
+                                }
                             }.padding(.horizontal, 20).padding(.vertical, 14)
                             Divider()
                             HStack(spacing: 0) {
@@ -1024,7 +1114,8 @@ struct NotionAgentsPanel: View {
                                             NotionMessageView(message: message, agent: agent,
                                                 notionLink: NotionChatLink.resolve(
                                                     thread: store.threads.first(where: { $0.id == store.selectedThreadID }),
-                                                    agentID: agent.id))
+                                                    agentID: agent.id,
+                                                    baseURL: settings.data.notionBaseURL))
                                         }
                                         if store.isSelectedConversationBusy {
                                             NotionThinkingView(agent: agent)
@@ -1168,23 +1259,29 @@ struct NotionAgentsPanel: View {
         .onAppear { store.start() }
         .onChange(of: store.selectedAgentID) { _, _ in
             draft = ""
-            historyPeekOpen = false
+            if !store.showingAllAgents { historyPeekOpen = false }
         }
+    }
+
+    private var historyEntries: [NotionThreadEntry] {
+        if store.showingAllAgents { return store.allThreadEntries }
+        guard let agent = store.visibleAgents.first(where: { $0.id == store.selectedAgentID }) else { return [] }
+        return store.threads.map { NotionThreadEntry(agent: agent, thread: $0) }
     }
 
     private var historyList: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 8) {
-                if store.threads.isEmpty {
+                if historyEntries.isEmpty {
                     ContentUnavailableView("まだチャットがありません", systemImage: "bubble.left",
-                                           description: Text("新しいチャットから会話を始めてください。"))
+                                           description: Text(store.showingAllAgents ? "登録したエージェントの履歴はまだありません。" : "新しいチャットから会話を始めてください。"))
                         .frame(maxWidth: .infinity, minHeight: 300)
                 } else {
                     Text("最近のチャット")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(NotionPanelTheme.muted)
                         .padding(.bottom, 4)
-                    ForEach(store.threads) { thread in threadRow(thread) }
+                    ForEach(historyEntries) { entry in threadRow(entry) }
                 }
             }
             .padding(20)
@@ -1207,6 +1304,7 @@ struct NotionAgentsPanel: View {
             Divider()
             ScrollView {
                 LazyVStack(spacing: 6) {
+                    if !store.showingAllAgents || store.selectedThreadID != nil {
                     Button {
                         draft = ""
                         store.beginNewChat()
@@ -1217,7 +1315,8 @@ struct NotionAgentsPanel: View {
                             .padding(10)
                     }
                     .buttonStyle(.plain)
-                    ForEach(store.threads) { thread in threadRow(thread) }
+                    }
+                    ForEach(historyEntries) { entry in threadRow(entry) }
                 }
                 .padding(10)
             }
@@ -1225,19 +1324,26 @@ struct NotionAgentsPanel: View {
         .background(NotionPanelTheme.surface)
     }
 
-    private func threadRow(_ thread: NotionThread) -> some View {
-        Button {
+    private func threadRow(_ entry: NotionThreadEntry) -> some View {
+        let thread = entry.thread
+        return Button {
             historyPeekOpen = true
-            Task { @MainActor in await store.selectThread(thread.id) }
+            Task { @MainActor in await store.selectThread(thread.id, agentID: entry.agent.id) }
         } label: {
             HStack(alignment: .top, spacing: 9) {
-                Image(systemName: thread.status == "requires_action" ? "exclamationmark.circle.fill" : "bubble.left")
-                    .foregroundStyle(thread.status == "requires_action" ? .orange : NotionPanelTheme.muted)
-                    .padding(.top, 2)
+                if store.showingAllAgents {
+                    NotionAgentAvatar(agent: entry.agent, size: 22)
+                } else {
+                    Image(systemName: thread.status == "requires_action" ? "exclamationmark.circle.fill" : "bubble.left")
+                        .foregroundStyle(thread.status == "requires_action" ? .orange : NotionPanelTheme.muted)
+                        .padding(.top, 2)
+                }
                 VStack(alignment: .leading, spacing: 3) {
                     Text(thread.title.isEmpty ? "無題のチャット" : thread.title)
                         .font(.system(size: 12, weight: .medium)).lineLimit(2)
-                    Text(thread.status == "requires_action" ? "確認待ち" : store.isThreadBusy(thread) ? "稼働中" : "履歴")
+                    Text(store.showingAllAgents ? entry.agent.name :
+                        thread.status == "requires_action" ? "確認待ち" :
+                        store.isThreadBusy(thread, agentID: entry.agent.id) ? "稼働中" : "履歴")
                         .font(.caption2).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
@@ -1309,6 +1415,8 @@ struct NotionAgentsSettings: View {
     @State private var searchCursor: String?
     @State private var isSearching = false
     @State private var searchMessage: String?
+    @State private var baseURLDraft = ""
+    @State private var baseURLMessage: String?
 
     var body: some View {
         Form {
@@ -1331,6 +1439,22 @@ struct NotionAgentsSettings: View {
                         Text(appearance.title).tag(appearance)
                     }
                 }
+            }
+            Section("Notionで開く") {
+                TextField("ベースURL（例: https://app.dev.notion.com）", text: $baseURLDraft)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit(saveBaseURL)
+                HStack {
+                    Button("適用", action: saveBaseURL)
+                    Button("自動に戻す") {
+                        baseURLDraft = ""
+                        settings.data.notionBaseURL = nil
+                        baseURLMessage = nil
+                    }
+                }
+                Text("空欄の場合は会話URLをそのまま使い、URLがない会話では通常のNotionを開きます。")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let baseURLMessage { Text(baseURLMessage).font(.caption).foregroundStyle(.orange) }
             }
             Section("接続") {
                 VStack(alignment: .leading, spacing: 8) {
@@ -1425,7 +1549,24 @@ struct NotionAgentsSettings: View {
             if let error = agents.error { Text(error).foregroundStyle(.red) }
         }
         .formStyle(.grouped)
-        .onAppear { agents.start() }
+        .onAppear {
+            agents.start()
+            baseURLDraft = settings.data.notionBaseURL ?? ""
+        }
+    }
+
+    private func saveBaseURL() {
+        let value = baseURLDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.isEmpty {
+            settings.data.notionBaseURL = nil
+            baseURLMessage = nil
+        } else if let normalized = NotionChatLink.normalizedBaseURL(value) {
+            settings.data.notionBaseURL = normalized
+            baseURLDraft = normalized
+            baseURLMessage = nil
+        } else {
+            baseURLMessage = "NotionのHTTPS URLをホスト名まで入力してください。"
+        }
     }
 
     private func saveToken() {

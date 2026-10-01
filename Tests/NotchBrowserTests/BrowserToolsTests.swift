@@ -75,6 +75,10 @@ final class BrowserToolsTests: XCTestCase {
         panel.orderFrontRegardless()
         defer { panel.orderOut(nil) }
         browser.showNotion()
+        let glass = try XCTUnwrap(descendants(browser.view).compactMap { $0 as? GlassSurface }.first)
+        XCTAssertTrue(glass.opaqueBackdrop)
+        let tint = try XCTUnwrap(glass.content.subviews.first?.layer?.backgroundColor)
+        XCTAssertEqual(tint.alpha, 1, accuracy: 0.001)
         let notion = try XCTUnwrap(descendants(browser.view).first { $0 is NSHostingView<NotionAgentsPanel> })
         XCTAssertFalse(notion.isHidden)
         store.data.notionSavedAgents = [SavedNotionAgent(id: "agent", name: "Updated")]
@@ -86,6 +90,8 @@ final class BrowserToolsTests: XCTestCase {
         store.data.notionAppearance = .dark
         browser.settingsChanged()
         XCTAssertEqual(notion.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]), .darkAqua)
+        browser.hideNotion()
+        XCTAssertFalse(glass.opaqueBackdrop)
     }
 
     @MainActor

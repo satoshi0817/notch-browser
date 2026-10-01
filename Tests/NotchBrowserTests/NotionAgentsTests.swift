@@ -6,6 +6,37 @@ import XCTest
 
 final class NotionAgentsTests: XCTestCase {
     @MainActor
+    func testAllAgentsHistoryUsesOnlyRegisteredAgentsAndKeepsTheCombinedViewWhenOpeningAChat() async {
+        let settings = SettingsStore.shared
+        let saved = settings.data
+        defer { settings.data = saved }
+        settings.data.notionEnabled = false
+        settings.data.notionSavedAgents = [SavedNotionAgent(id: "agent-1", name: "Writer", glyph: "✍️"),
+                                           SavedNotionAgent(id: "agent-2", name: "Reviewer", glyph: "🔎")]
+        let cacheURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NotionAgentsCache-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: cacheURL) }
+        let cache = NotionAgentsCache(url: cacheURL)
+        cache.rememberThreads([NotionThread(id: "older", title: "Older", status: "completed",
+            last_edited_time: "2026-10-01T01:00:00Z", pending_user_actions: nil)], agentID: "agent-1")
+        cache.rememberThreads([NotionThread(id: "newer", title: "Newer", status: "completed",
+            last_edited_time: "2026-10-01T02:00:00Z", pending_user_actions: nil)], agentID: "agent-2")
+        cache.rememberThreads([NotionThread(id: "hidden", title: "Hidden", status: "completed",
+            last_edited_time: "2026-10-01T03:00:00Z", pending_user_actions: nil)], agentID: "unregistered")
+        let store = NotionAgentsStore(tokenProvider: { "test-token" },
+            pendingRepliesKey: "notion-all-chat-test-\(UUID().uuidString)", cache: cache)
+
+        store.selectAllAgents()
+        XCTAssertTrue(store.showingAllAgents)
+        XCTAssertEqual(store.allThreadEntries.map(\.thread.id), ["newer", "older"])
+        XCTAssertEqual(store.allThreadEntries.map(\.agent.glyph), ["🔎", "✍️"])
+        await store.selectThread("newer", agentID: "agent-2")
+        XCTAssertTrue(store.showingAllAgents)
+        XCTAssertEqual(store.selectedAgentID, "agent-2")
+        XCTAssertEqual(store.selectedThreadID, "newer")
+    }
+
+    @MainActor
     func testNewChatOpensAnEmptyConversationAndHistorySelectionLeavesDraftMode() async {
         let settings = SettingsStore.shared
         let saved = settings.data
@@ -73,6 +104,7 @@ final class NotionAgentsTests: XCTestCase {
         XCTAssertTrue(settings.notionNotificationsEnabled)
         XCTAssertEqual(settings.notionNotificationDuration, 10)
         XCTAssertEqual(settings.notionAppearance, .system)
+        XCTAssertNil(settings.notionBaseURL)
         XCTAssertEqual(settings.notionTabPosition, settings.pinnedTabs.count)
         settings.notionHiddenAgentIDs.insert("agent-1")
         settings.notionNotificationsEnabled = false
@@ -82,6 +114,7 @@ final class NotionAgentsTests: XCTestCase {
         settings.notionEnabled = false
         settings.notionTabDisplay = .titleOnly
         settings.notionAppearance = .dark
+        settings.notionBaseURL = "https://app.dev.notion.com"
         let restored = try JSONDecoder().decode(SettingsData.self, from: JSONEncoder().encode(settings))
         XCTAssertEqual(restored.notionHiddenAgentIDs, ["agent-1"])
         XCTAssertFalse(restored.notionNotificationsEnabled)
@@ -91,6 +124,7 @@ final class NotionAgentsTests: XCTestCase {
         XCTAssertFalse(restored.notionEnabled)
         XCTAssertEqual(restored.notionTabDisplay, .titleOnly)
         XCTAssertEqual(restored.notionAppearance, .dark)
+        XCTAssertEqual(restored.notionBaseURL, "https://app.dev.notion.com")
     }
 
     func testNotionChatPaletteHasDistinctReadableLightAndDarkColors() {
@@ -448,6 +482,17 @@ final class NotionAgentsTests: XCTestCase {
         let fallback = try XCTUnwrap(NotionChatLink.resolve(thread: unsafe, agentID: agentID))
         XCTAssertFalse(fallback.isDirect)
         XCTAssertEqual(fallback.url.absoluteString, "https://www.notion.so/agent/\(agentID)")
+        XCTAssertEqual(NotionChatLink.normalizedBaseURL(" https://app.dev.notion.com/ "), "https://app.dev.notion.com")
+        XCTAssertNil(NotionChatLink.normalizedBaseURL("https://example.com"))
+        XCTAssertNil(NotionChatLink.normalizedBaseURL("https://app.dev.notion.com/some-page"))
+        XCTAssertNil(NotionChatLink.normalizedBaseURL("http://app.dev.notion.com"))
+        let development = try XCTUnwrap(NotionChatLink.resolve(thread: thread, agentID: agentID,
+            baseURL: "https://app.dev.notion.com"))
+        XCTAssertTrue(development.isDirect)
+        XCTAssertEqual(development.url.absoluteString, "https://app.dev.notion.com/agent/chat/thread-1")
+        let developmentFallback = try XCTUnwrap(NotionChatLink.resolve(thread: unsafe, agentID: agentID,
+            baseURL: "https://app.dev.notion.com"))
+        XCTAssertEqual(developmentFallback.url.absoluteString, "https://app.dev.notion.com/agent/\(agentID)")
     }
 
     func testCustomAgentAvatarURLIsDecoded() throws {
@@ -463,6 +508,7 @@ final class NotionAgentsTests: XCTestCase {
         XCTAssertEqual(NotionAgentInput.id(from: id), id)
         XCTAssertEqual(NotionAgentInput.id(from: "https://www.notion.so/Workspace/Helper-3c90c3cc0d444b5088888dd25736052a?x=1"), id)
         XCTAssertEqual(NotionAgentInput.id(from: "https://www.notion.com/Workspace/Helper-3c90c3cc0d444b5088888dd25736052a"), id)
+        XCTAssertEqual(NotionAgentInput.id(from: "https://app.dev.notion.com/agent/\(id)"), id)
         XCTAssertEqual(NotionAgentInput.id(from: "agent_custom_123"), "agent_custom_123")
         XCTAssertNil(NotionAgentInput.id(from: "https://example.com/3c90c3cc0d444b5088888dd25736052a"))
         XCTAssertNil(NotionAgentInput.id(from: "https://www.notion.so/no-agent-id"))

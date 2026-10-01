@@ -8,10 +8,12 @@ final class GlassSurface: NSView {
     private let tint = NSView()
     private var effect: NSView!
     private var observer: NSObjectProtocol?
+    var opaqueBackdrop = false { didSet { updateAppearance() } }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
+        layer?.backgroundColor = NSColor(calibratedRed: 0.055, green: 0.075, blue: 0.13, alpha: 1).cgColor
         if #available(macOS 26.0, *) {
             let glass = NSGlassEffectView()
             glass.cornerRadius = 0
@@ -43,7 +45,7 @@ final class GlassSurface: NSView {
             || NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
         let strength = SettingsStore.shared.data.glassTint
         tint.layer?.backgroundColor = NSColor(calibratedRed: 0.055, green: 0.075, blue: 0.13,
-                                             alpha: accessible ? 1 : 0.18 + strength * 0.64).cgColor
+                                             alpha: accessible || opaqueBackdrop ? 1 : 0.18 + strength * 0.64).cgColor
         layer?.borderColor = NSColor.white.withAlphaComponent(accessible ? 0.5 : 0.15).cgColor
         layer?.borderWidth = 1
         layer?.cornerRadius = 18

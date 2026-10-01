@@ -1297,6 +1297,7 @@ final class BrowserViewController: NSViewController {
 
     private func updateNotionTabSelection() {
         let active = notionPanel?.isHidden == false
+        glass.opaqueBackdrop = active
         notionTabButton.state = active ? .on : .off
         notionTabButton.setAccessibilityValue(active ? "選択中" : "")
         for (index, button) in tabButtons.enumerated() {
