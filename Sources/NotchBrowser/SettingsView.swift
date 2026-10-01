@@ -62,11 +62,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 }
 
 enum SettingsSection: String, CaseIterable, Identifiable {
-    case tabs = "固定ページ", profiles = "プロファイル", displays = "ディスプレイ", motion = "動き", shelf = "ファイル棚", toolbar = "ボタン配置", general = "一般"
+    case tabs = "固定ページ", notion = "Notion", profiles = "プロファイル", displays = "ディスプレイ", motion = "動き", shelf = "ファイル棚", toolbar = "ボタン配置", general = "一般"
     var id: Self { self }
     var symbol: String {
         switch self {
         case .tabs: "square.stack"
+        case .notion: "bubble.left.and.bubble.right"
         case .profiles: "person.crop.circle"
         case .displays: "display"
         case .motion: "waveform.path"
@@ -119,6 +120,7 @@ struct SettingsView: View {
                 Group {
                     switch section {
                     case .tabs: PinnedTabsSettings(selectNotion: selectNotion)
+                    case .notion: NotionSettingsView()
                     case .profiles: ProfilesSettings()
                     case .displays: DisplaysSettings()
                     case .motion: MotionSettingsView()

@@ -591,10 +591,7 @@ final class NotionAgentsStore: ObservableObject {
         return merged
     }
 
-    func saveToken(_ token: String) {
-        guard NotionTokenStore.save(token.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-            error = "トークンをキーチェーンに保存できませんでした。"; return
-        }
+    func storedTokenChanged() {
         hasToken = tokenProvider() != nil
         threads = []; messages = []; pendingMessages = []; busyAgentIDs = []; observed = [:]; metadataChecked = []; baselinedAgentIDs = []; error = nil
         cache.clear()
@@ -968,7 +965,6 @@ struct NotionAgentsPanel: View {
     @ObservedObject private var store = NotionAgentsStore.shared
     @ObservedObject private var settings = SettingsStore.shared
     @State private var draft = ""
-    @State private var tokenDraft = ""
     @State private var showJumpToBottom = false
     @State private var historyPeekOpen = false
     @FocusState private var composerFocused: Bool
@@ -990,16 +986,9 @@ struct NotionAgentsPanel: View {
             if !store.hasToken {
                 VStack(alignment: .leading, spacing: 12) {
                     Label("Notionを接続", systemImage: "key").font(.headline)
-                    Text("内部インテグレーションのトークンを入力してください。")
+                    Text("設定の「Notion」でトークンを登録してください。")
                         .font(.caption).foregroundStyle(.secondary)
-                    SecureField("トークンを貼り付け", text: $tokenDraft)
-                        .textFieldStyle(.roundedBorder)
-                        .accessibilityLabel("Notionのトークン")
-                        .onSubmit(saveToken)
-                    Button("トークンを保存", action: saveToken)
-                        .disabled(tokenDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    Text("トークンはMacのキーチェーンに保存します。")
-                        .font(.caption2).foregroundStyle(.secondary)
+                    Button("Notion設定を開く", action: onOpenSettings)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                 .padding(28)
@@ -1363,12 +1352,6 @@ struct NotionAgentsPanel: View {
         .buttonStyle(.plain)
     }
 
-    private func saveToken() {
-        guard !tokenDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        store.saveToken(tokenDraft)
-        if store.hasToken { tokenDraft = "" }
-    }
-
     private func send() {
         let message = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty && !store.isSending else { return }
@@ -1413,8 +1396,7 @@ private struct NotionThinkingView: View {
 struct NotionAgentsSettings: View {
     @EnvironmentObject var settings: SettingsStore
     @ObservedObject private var agents = NotionAgentsStore.shared
-    @ObservedObject private var databaseMonitor = NotionDatabaseMonitor.shared
-    @State private var token = ""
+    @ObservedObject private var connection = NotionConnectionStore.shared
     @State private var agentInput = ""
     @State private var inputMessage: String?
     @State private var searchName = ""
@@ -1424,17 +1406,16 @@ struct NotionAgentsSettings: View {
     @State private var searchMessage: String?
     @State private var baseURLDraft = ""
     @State private var baseURLMessage: String?
-    @State private var databaseInput = ""
-    @State private var databaseMessage: String?
-    @State private var databaseProperties: [String: [NotionDatabaseProperty]] = [:]
-    @State private var isAddingDatabase = false
-    @State private var pollingDraft = "90"
-    @FocusState private var pollingFocused: Bool
 
     var body: some View {
         Form {
             Section("固定ページに表示") {
-                Toggle("Notionカスタムエージェントを使う", isOn: $settings.data.notionEnabled)
+                Toggle("Notionカスタムエージェントを使う", isOn: Binding(
+                    get: { settings.data.notionEnabled },
+                    set: { enabled in
+                        if !enabled || connection.agentAccessValid { settings.data.notionEnabled = enabled }
+                    }))
+                    .disabled(!connection.agentAccessValid && !settings.data.notionEnabled)
                 Picker("タブの表示", selection: $settings.data.notionTabDisplay) {
                     ForEach(NotionTabDisplay.allCases) { display in
                         Text(display.title).tag(display)
@@ -1443,7 +1424,9 @@ struct NotionAgentsSettings: View {
                 LabeledContent("アイコン") {
                     Image(nsImage: NotionTabIcon.image(for: NSAppearance(named: .darkAqua)!, size: 28))
                 }
-                Text("オフにするとタブ・通知・ポーリングを停止します。接続情報と登録したエージェントは残ります。")
+                Text(connection.agentAccessValid
+                     ? "オフにするとエージェントのタブ・通知・ポーリングを停止します。"
+                     : "有効にするには、通常の設定画面「Notion」でトークンとエージェントAPIの接続を確認してください。")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("チャットの外観") {
@@ -1468,24 +1451,6 @@ struct NotionAgentsSettings: View {
                 Text("空欄の場合は会話URLをそのまま使い、URLがない会話では通常のNotionを開きます。")
                     .font(.caption).foregroundStyle(.secondary)
                 if let baseURLMessage { Text(baseURLMessage).font(.caption).foregroundStyle(.orange) }
-            }
-            Section("接続") {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("内部インテグレーションのトークン").font(.subheadline.weight(.medium))
-                    SecureField("トークンを貼り付け", text: $token)
-                        .textFieldStyle(.roundedBorder)
-                        .accessibilityLabel("Notionのトークン")
-                        .onSubmit { saveToken() }
-                }
-                HStack {
-                    Button("トークンを保存", action: saveToken)
-                        .disabled(token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    if agents.hasToken { Button("接続を解除", role: .destructive) { agents.saveToken("") } }
-                    Spacer()
-                    Text(agents.hasToken ? "接続済み" : "未接続").foregroundStyle(agents.hasToken ? .green : .secondary)
-                }
-                Text("Notion Custom Agents API の利用権限がある内部インテグレーションを使用します。トークンはMacのキーチェーンに保存します。")
-                    .font(.caption).foregroundStyle(.secondary)
             }
             Section("登録したエージェント") {
                 Text("NotionのURLまたはエージェントIDを入力します。登録したものだけを監視します。")
@@ -1518,7 +1483,7 @@ struct NotionAgentsSettings: View {
                     Button { Task { @MainActor in await agents.refresh() } } label: {
                         if agents.isRefreshing { ProgressView().controlSize(.small) }
                         else { Label("登録済みを確認", systemImage: "arrow.clockwise") }
-                    }.disabled(!agents.hasToken || agents.isRefreshing || settings.data.notionSavedAgents.isEmpty)
+                    }.disabled(!connection.agentAccessValid || agents.isRefreshing || settings.data.notionSavedAgents.isEmpty)
                     if let activity = agents.activityText { Text(activity).font(.caption).foregroundStyle(.secondary) }
                 }
             }
@@ -1531,7 +1496,7 @@ struct NotionAgentsSettings: View {
                     Button { Task { await search(reset: true) } } label: {
                         if isSearching { ProgressView().controlSize(.small) }
                         else { Text("検索") }
-                    }.disabled(!agents.hasToken || isSearching || searchName.trimmingCharacters(in: .whitespacesAndNewlines).count < 2)
+                    }.disabled(!connection.agentAccessValid || isSearching || searchName.trimmingCharacters(in: .whitespacesAndNewlines).count < 2)
                 }
                 if let searchMessage { Text(searchMessage).font(.caption).foregroundStyle(.secondary) }
                 ForEach(searchResults) { result in
@@ -1550,8 +1515,8 @@ struct NotionAgentsSettings: View {
                     }.disabled(isSearching)
                 }
             }
-            Section("通知") {
-                Toggle("返信・データベース更新をノッチで通知", isOn: $settings.data.notionNotificationsEnabled)
+            Section("エージェントの通知") {
+                Toggle("返信・確認待ちをノッチで通知", isOn: $settings.data.notionNotificationsEnabled)
                 Picker("通知を閉じるまで", selection: $settings.data.notionNotificationDuration) {
                     ForEach([5, 10, 15, 30, 60], id: \.self) { seconds in
                         Text("\(seconds)秒").tag(seconds)
@@ -1559,90 +1524,13 @@ struct NotionAgentsSettings: View {
                 }
                 .disabled(!settings.data.notionNotificationsEnabled)
             }
-            Section("データベースの更新通知") {
-                Text("エージェントが更新するデータベースを登録し、通知に表示するプロパティを選びます。登録前の更新は通知しません。")
-                    .font(.caption).foregroundStyle(.secondary)
-                HStack {
-                    TextField("NotionのデータベースURLまたはID", text: $databaseInput)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit { Task { await addDatabase() } }
-                    Button {
-                        Task { await addDatabase() }
-                    } label: {
-                        if isAddingDatabase { ProgressView().controlSize(.small) }
-                        else { Text("追加") }
-                    }
-                    .disabled(!agents.hasToken || isAddingDatabase || databaseInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-                if let databaseMessage { Text(databaseMessage).font(.caption).foregroundStyle(.orange) }
-                ForEach(settings.data.notionDatabases) { database in
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Toggle(database.name, isOn: Binding(
-                                get: { currentDatabase(database.id)?.enabled ?? false },
-                                set: { value in updateDatabase(database.id) { $0.enabled = value } }))
-                            Spacer()
-                            Button(role: .destructive) { removeDatabase(database.id) } label: {
-                                Image(systemName: "minus.circle")
-                            }
-                            .buttonStyle(.plain).help("監視対象から削除")
-                        }
-                        Text(database.id).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
-                        if let properties = databaseProperties[database.id], !properties.isEmpty {
-                            Picker("通知に表示するプロパティ", selection: Binding(
-                                get: { currentDatabase(database.id)?.propertyID ?? database.propertyID },
-                                set: { propertyID in
-                                    guard let selected = properties.first(where: { $0.id == propertyID }) else { return }
-                                    updateDatabase(database.id) {
-                                        $0.propertyID = selected.id
-                                        $0.propertyName = selected.name
-                                        $0.addedAt = .now
-                                    }
-                                })) {
-                                ForEach(properties) { property in Text(property.name).tag(property.id) }
-                            }
-                        } else {
-                            HStack {
-                                Text("表示: \(database.propertyName)")
-                                    .font(.caption).foregroundStyle(.secondary)
-                                Button("プロパティを再取得") { Task { await loadProperties(for: database) } }
-                                    .disabled(!agents.hasToken)
-                            }
-                        }
-                    }
-                    .padding(.vertical, 4)
-                }
-                HStack {
-                    Text("確認間隔")
-                    Slider(value: Binding(
-                        get: { Double(settings.data.notionDatabasePollingSeconds) },
-                        set: { value in
-                            settings.data.notionDatabasePollingSeconds = Int(value.rounded())
-                            pollingDraft = String(settings.data.notionDatabasePollingSeconds)
-                        }), in: 30...300, step: 1)
-                    TextField("秒", text: $pollingDraft)
-                        .frame(width: 56).textFieldStyle(.roundedBorder)
-                        .focused($pollingFocused)
-                        .onSubmit(savePollingDraft)
-                        .onChange(of: pollingFocused) { _, focused in if !focused { savePollingDraft() } }
-                    Text("秒").foregroundStyle(.secondary)
-                }
-                Text("30〜300秒。Notion APIに問い合わせ、更新のあったページだけを確認します。")
-                    .font(.caption).foregroundStyle(.secondary)
-                if let error = databaseMonitor.lastError {
-                    Text(error).font(.caption).foregroundStyle(.orange)
-                }
-            }
             if let error = agents.error { Text(error).foregroundStyle(.red) }
         }
         .formStyle(.grouped)
         .onAppear {
             agents.start()
             baseURLDraft = settings.data.notionBaseURL ?? ""
-            pollingDraft = String(settings.data.notionDatabasePollingSeconds)
-            for database in settings.data.notionDatabases {
-                Task { await loadProperties(for: database) }
-            }
+            if !connection.agentAccessValid { Task { await connection.verifySaved() } }
         }
     }
 
@@ -1658,65 +1546,6 @@ struct NotionAgentsSettings: View {
         } else {
             baseURLMessage = "NotionのHTTPS URLをホスト名まで入力してください。"
         }
-    }
-
-    private func savePollingDraft() {
-        let value = Int(pollingDraft.trimmingCharacters(in: .whitespacesAndNewlines))
-            ?? settings.data.notionDatabasePollingSeconds
-        settings.data.notionDatabasePollingSeconds = min(300, max(30, value))
-        pollingDraft = String(settings.data.notionDatabasePollingSeconds)
-    }
-
-    private func currentDatabase(_ id: String) -> SavedNotionDatabase? {
-        settings.data.notionDatabases.first { $0.id == id }
-    }
-
-    private func updateDatabase(_ id: String, _ change: (inout SavedNotionDatabase) -> Void) {
-        guard let index = settings.data.notionDatabases.firstIndex(where: { $0.id == id }) else { return }
-        change(&settings.data.notionDatabases[index])
-    }
-
-    private func removeDatabase(_ id: String) {
-        settings.data.notionDatabases.removeAll { $0.id == id }
-        databaseProperties[id] = nil
-    }
-
-    private func addDatabase() async {
-        guard !isAddingDatabase, let token = NotionTokenStore.read() else { return }
-        guard let id = NotionDatabaseInput.id(from: databaseInput) else {
-            databaseMessage = "NotionのデータベースURLまたはIDを確認してください。"; return
-        }
-        isAddingDatabase = true
-        databaseMessage = "データベースとプロパティを取得中…"
-        defer { isAddingDatabase = false }
-        do {
-            let details = try await NotionDatabaseAPI(token: token).details(for: id)
-            guard !settings.data.notionDatabases.contains(where: { $0.id == details.id }) else {
-                databaseMessage = "このデータベースは登録済みです。"; return
-            }
-            guard let property = details.properties.first(where: { $0.type == "rich_text" }) ?? details.properties.first else {
-                databaseMessage = "通知に表示できるプロパティがありません。"; return
-            }
-            settings.data.notionDatabases.append(SavedNotionDatabase(id: details.id, name: details.name,
-                propertyID: property.id, propertyName: property.name))
-            databaseProperties[details.id] = details.properties
-            databaseInput = ""
-            databaseMessage = nil
-        } catch { databaseMessage = error.localizedDescription }
-    }
-
-    private func loadProperties(for database: SavedNotionDatabase) async {
-        guard let token = NotionTokenStore.read() else { return }
-        do {
-            let details = try await NotionDatabaseAPI(token: token).details(for: database.id)
-            databaseProperties[database.id] = details.properties
-        } catch { databaseMessage = "\(database.name): \(error.localizedDescription)" }
-    }
-
-    private func saveToken() {
-        guard !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        agents.saveToken(token)
-        if agents.hasToken { token = "" }
     }
 
     private func addAgent() {

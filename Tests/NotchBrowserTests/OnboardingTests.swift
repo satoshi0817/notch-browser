@@ -43,11 +43,11 @@ final class OnboardingTests: XCTestCase {
         XCTAssertEqual(settings.shelfTrigger, .manual)
         XCTAssertFalse(settings.countdownEnabled)
         XCTAssertFalse(settings.hideFromScreenCapture)
-        XCTAssertTrue(settings.notionEnabled)
+        XCTAssertFalse(settings.notionEnabled, "Agent activation requires a verified Notion connection")
         XCTAssertEqual(settings.toolbarActions, [.back, .settings, .quit])
         XCTAssertEqual(settings.pinnedTabs.first?.name, "My page")
         choices.apply(to: &settings)
-        XCTAssertTrue(settings.notionEnabled)
+        XCTAssertFalse(settings.notionEnabled)
         choices.notionButton = false
         choices.apply(to: &settings)
         XCTAssertFalse(settings.notionEnabled)

@@ -103,6 +103,8 @@ final class NotionAgentsTests: XCTestCase {
         XCTAssertEqual(settings.notionTabDisplay, .iconAndTitle)
         XCTAssertTrue(settings.notionNotificationsEnabled)
         XCTAssertEqual(settings.notionNotificationDuration, 10)
+        XCTAssertTrue(settings.notionDatabaseNotificationsEnabled)
+        XCTAssertEqual(settings.notionDatabaseNotificationDuration, 10)
         XCTAssertEqual(settings.notionAppearance, .system)
         XCTAssertNil(settings.notionBaseURL)
         XCTAssertEqual(settings.notionTabPosition, settings.pinnedTabs.count)
@@ -111,6 +113,8 @@ final class NotionAgentsTests: XCTestCase {
         settings.notionHiddenAgentIDs.insert("agent-1")
         settings.notionNotificationsEnabled = false
         settings.notionNotificationDuration = 30
+        settings.notionDatabaseNotificationsEnabled = true
+        settings.notionDatabaseNotificationDuration = 15
         settings.notionTabPosition = 1
         settings.notionSavedAgents = [SavedNotionAgent(id: "agent-1", name: "Writer")]
         settings.notionEnabled = false
@@ -123,6 +127,8 @@ final class NotionAgentsTests: XCTestCase {
         XCTAssertEqual(restored.notionHiddenAgentIDs, ["agent-1"])
         XCTAssertFalse(restored.notionNotificationsEnabled)
         XCTAssertEqual(restored.notionNotificationDuration, 30)
+        XCTAssertTrue(restored.notionDatabaseNotificationsEnabled)
+        XCTAssertEqual(restored.notionDatabaseNotificationDuration, 15)
         XCTAssertEqual(restored.notionTabPosition, 1)
         XCTAssertEqual(restored.notionSavedAgents, [SavedNotionAgent(id: "agent-1", name: "Writer")])
         XCTAssertFalse(restored.notionEnabled)
@@ -135,6 +141,10 @@ final class NotionAgentsTests: XCTestCase {
         let tooLong = try JSONDecoder().decode(SettingsData.self, from: Data("{\"notionDatabasePollingSeconds\":999}".utf8))
         XCTAssertEqual(tooShort.notionDatabasePollingSeconds, 30)
         XCTAssertEqual(tooLong.notionDatabasePollingSeconds, 300)
+        let legacy = try JSONDecoder().decode(SettingsData.self, from:
+            Data("{\"notionNotificationsEnabled\":false,\"notionNotificationDuration\":30}".utf8))
+        XCTAssertFalse(legacy.notionDatabaseNotificationsEnabled)
+        XCTAssertEqual(legacy.notionDatabaseNotificationDuration, 30)
     }
 
     func testDatabaseInputAcceptsNotionURLAndRejectsOtherSites() {

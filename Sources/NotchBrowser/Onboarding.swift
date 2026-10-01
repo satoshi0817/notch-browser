@@ -110,7 +110,7 @@ struct OnboardingChoices {
         settings.countdownEnabled = calendarCountdown
         settings.hideFromScreenCapture = hideFromCapture
         settings.externalBrowserBundleID = externalBrowserBundleID
-        settings.notionEnabled = notionButton
+        settings.notionEnabled = notionButton && NotionConnectionStore.shared.agentAccessValid
     }
 }
 
@@ -456,7 +456,7 @@ private struct OnboardingView: View {
         VStack(alignment: .leading, spacing: 11) {
             option("tray", title: "ファイル棚を自動で出す", detail: "ドラッグを始めたときに棚を開きます。手動でもいつでも開けます。", isOn: $choices.automaticShelf)
             option("calendar", title: "次の予定を表示", detail: "カレンダーへのアクセスは、完了後に必要なときだけ確認します。", isOn: $choices.calendarCountdown)
-            option("bubble.left", title: "Notionエージェントを使う", detail: "接続は後から固定ページの設定で行えます。", isOn: $choices.notionButton)
+            option("bubble.left", title: "Notionエージェントを使う", detail: "通常の設定「Notion」でトークンを確認してから有効にできます。", isOn: $choices.notionButton)
             option("eye.slash", title: "画面共有から隠す", detail: "対応する画面共有・録画ではノッチを映しません。", isOn: $choices.hideFromCapture)
             HStack {
                 Image(systemName: "safari").frame(width: 28).foregroundStyle(.cyan)

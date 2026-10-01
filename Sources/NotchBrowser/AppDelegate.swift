@@ -22,10 +22,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         notch = NotchManager()
         notch.browser.onOpenSettings = { [weak self] in self?.openSettings() }
-        notch.browser.onOpenNotionSettings = { [weak self] in self?.presentSettings(section: .tabs, selectNotion: true) }
+        notch.browser.onOpenNotionSettings = { [weak self] in self?.presentSettings(section: .notion) }
         NSApp.mainMenu = buildMainMenu()
         setupStatusItem()
         notch.start()
+        Task { @MainActor in await NotionConnectionStore.shared.verifySaved() }
         UpdateChecker.shared.onUpdate = { [weak self] release, manual in
             self?.updateWindow?.close()
             self?.updateWindow = UpdateWindowController(release: release, checker: .shared, manual: manual)
@@ -141,7 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 switch destination {
                 case .notch: self.notch.toggle()
                 case .settings: self.presentSettings()
-                case .notionSettings: self.presentSettings(section: .tabs, selectNotion: true)
+                case .notionSettings: self.presentSettings(section: .notion)
                 }
             }, onSkip: { [weak self] in
                 OnboardingState.complete()

@@ -215,7 +215,7 @@ final class NotionDatabaseMonitor: ObservableObject {
 
     func settingsChanged() {
         let settings = SettingsStore.shared.data
-        let enabled = settings.notionEnabled && settings.notionNotificationsEnabled &&
+        let enabled = settings.notionDatabaseNotificationsEnabled &&
             !settings.notionDatabases.filter(\.enabled).isEmpty && NotionTokenStore.read() != nil
         let interval = settings.notionDatabasePollingSeconds
         let signature = settings.notionDatabases.filter(\.enabled)
@@ -237,8 +237,7 @@ final class NotionDatabaseMonitor: ObservableObject {
     }
 
     func refresh() async {
-        guard !isRefreshing, SettingsStore.shared.data.notionEnabled,
-              SettingsStore.shared.data.notionNotificationsEnabled,
+        guard !isRefreshing, SettingsStore.shared.data.notionDatabaseNotificationsEnabled,
               let token = NotionTokenStore.read() else { return }
         isRefreshing = true
         defer { isRefreshing = false }
@@ -260,8 +259,7 @@ final class NotionDatabaseMonitor: ObservableObject {
                     let value = row.text.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !value.isEmpty else { continue }
                     let hash = SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
-                    let stillActive = SettingsStore.shared.data.notionEnabled &&
-                        SettingsStore.shared.data.notionNotificationsEnabled &&
+                    let stillActive = SettingsStore.shared.data.notionDatabaseNotificationsEnabled &&
                         SettingsStore.shared.data.notionDatabases.contains {
                             $0.id == database.id && $0.propertyID == database.propertyID && $0.enabled
                         }
@@ -287,7 +285,7 @@ final class NotionDatabaseMonitor: ObservableObject {
 
     func clearNotice() {
         latestNotice = nil
-        let delay = TimeInterval(SettingsStore.shared.data.notionNotificationDuration) + 0.3
+        let delay = TimeInterval(SettingsStore.shared.data.notionDatabaseNotificationDuration) + 0.3
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             self?.deliveringNotice = false
             self?.showNextNotice()

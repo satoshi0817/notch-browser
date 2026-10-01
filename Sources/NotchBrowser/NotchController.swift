@@ -340,7 +340,12 @@ final class NotchController: NSObject, NSWindowDelegate {
 
     func refreshNotionAvailability() {
         root.contextMenu = makeContextMenu()
-        if !SettingsStore.shared.data.notionEnabled { clearNotification(animated: false) }
+        switch notification {
+        case .agent where !SettingsStore.shared.data.notionEnabled,
+             .database where !SettingsStore.shared.data.notionDatabaseNotificationsEnabled:
+            clearNotification(animated: false)
+        default: break
+        }
     }
 
     @objc private func openShelfFromMenu() { manager.showShelf(on: self) }
@@ -492,8 +497,8 @@ final class NotchController: NSObject, NSWindowDelegate {
     }
 
     func showDatabaseNotification(_ notice: NotionDatabaseNotice) {
-        guard SettingsStore.shared.data.notionEnabled, !isExpanded else { return }
-        let duration = SettingsStore.shared.data.notionNotificationDuration
+        guard SettingsStore.shared.data.notionDatabaseNotificationsEnabled, !isExpanded else { return }
+        let duration = SettingsStore.shared.data.notionDatabaseNotificationDuration
         notification = .database(notice.pageURL)
         root.setNotification(agent: nil, name: notice.databaseName,
                              title: notice.propertyName, preview: notice.preview,
