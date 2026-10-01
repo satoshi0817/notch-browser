@@ -20,10 +20,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         window.delegate = self
     }
 
-    func present(section: SettingsSection? = nil) {
+    func present(section: SettingsSection? = nil, selectNotion: Bool = false) {
         guard let window else { return }
         if let section {
-            window.contentViewController = NSHostingController(rootView: SettingsView(initialSection: section).environmentObject(SettingsStore.shared))
+            window.contentViewController = NSHostingController(rootView: SettingsView(initialSection: section,
+                selectNotion: selectNotion).environmentObject(SettingsStore.shared))
         }
         if !window.isVisible { center(on: screenUnderMouse) }
         window.level = Self.frontLevel
@@ -61,7 +62,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 }
 
 enum SettingsSection: String, CaseIterable, Identifiable {
-    case tabs = "固定ページ", profiles = "プロファイル", displays = "ディスプレイ", motion = "動き", shelf = "ファイル棚", notion = "Notionエージェント", toolbar = "ボタン配置", general = "一般"
+    case tabs = "固定ページ", profiles = "プロファイル", displays = "ディスプレイ", motion = "動き", shelf = "ファイル棚", toolbar = "ボタン配置", general = "一般"
     var id: Self { self }
     var symbol: String {
         switch self {
@@ -71,7 +72,6 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .motion: "waveform.path"
         case .general: "slider.horizontal.3"
         case .shelf: "tray"
-        case .notion: "sparkles.rectangle.stack"
         case .toolbar: "rectangle.topthird.inset.filled"
         }
     }
@@ -80,9 +80,11 @@ enum SettingsSection: String, CaseIterable, Identifiable {
 
 struct SettingsView: View {
     @State private var section: SettingsSection
+    private let selectNotion: Bool
 
-    init(initialSection: SettingsSection = .tabs) {
+    init(initialSection: SettingsSection = .tabs, selectNotion: Bool = false) {
         _section = State(initialValue: initialSection)
+        self.selectNotion = selectNotion
     }
     var body: some View {
         HStack(spacing: 0) {
@@ -116,13 +118,12 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Group {
                     switch section {
-                    case .tabs: PinnedTabsSettings()
+                    case .tabs: PinnedTabsSettings(selectNotion: selectNotion)
                     case .profiles: ProfilesSettings()
                     case .displays: DisplaysSettings()
                     case .motion: MotionSettingsView()
                     case .general: GeneralSettings()
                     case .shelf: ShelfSettingsView()
-                    case .notion: NotionAgentsSettings()
                     case .toolbar: ToolbarSettingsView()
                     }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -142,6 +143,10 @@ struct PinnedTabsSettings: View {
         let id: UUID
         let tab: PinnedTab?
     }
+
+    init(selectNotion: Bool = false) {
+        _selection = State(initialValue: selectNotion ? Self.notionID : nil)
+    }
     private var rows: [Row] {
         var result = store.data.pinnedTabs.map { Row(id: $0.id, tab: $0) }
         result.insert(Row(id: Self.notionID, tab: nil),
@@ -159,12 +164,16 @@ struct PinnedTabsSettings: View {
                                 Image(nsImage: TabIconRenderer.image(for: tab.icon, hosts: [tab.host]))
                                 Text(tab.name)
                             } else {
-                                Image(systemName: "sparkles.rectangle.stack")
+                                Image(nsImage: NotionTabIcon.image(for: NSAppearance(named: .darkAqua)!))
                                 Text("Notionエージェント")
+                                    .foregroundStyle(store.data.notionEnabled ? .primary : .secondary)
                             }
                             Spacer()
-                            if row.tab?.iconOnly == true {
+                            if row.tab?.iconOnly == true || (row.tab == nil && store.data.notionTabDisplay == .iconOnly) {
                                 Image(systemName: "eye.slash").foregroundStyle(.secondary).help("アイコンのみ")
+                            }
+                            if row.tab == nil && !store.data.notionEnabled {
+                                Image(systemName: "power").foregroundStyle(.secondary).help("オフ")
                             }
                         }
                         .tag(row.id)
@@ -188,9 +197,7 @@ struct PinnedTabsSettings: View {
                 if let id = selection, let binding = binding(for: id) {
                     PinnedTabEditor(tab: binding)
                 } else if selection == Self.notionID {
-                    Label("Notionエージェントは固定ページと一緒に並び替えられます。", systemImage: "sparkles.rectangle.stack")
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    NotionAgentsSettings()
                 } else {
                     Label("タブを選択するか、追加してください", systemImage: "plus.circle")
                         .foregroundStyle(.secondary)

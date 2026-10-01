@@ -75,12 +75,12 @@ final class BrowserViewController: NSViewController {
     private var needsTabReveal = true
     private lazy var addTabButton = iconButton("plus", "新規タブ (⌘T)", #selector(newTab))
     private lazy var notionTabButton: TabButton = {
-        let button = TabButton(title: "Notion", image: symbol("sparkles.rectangle.stack") ?? NSImage(),
+        let button = TabButton(title: "Notion", image: NotionTabIcon.image(for: NSApp.effectiveAppearance),
                                target: self, action: #selector(toggleNotion))
         button.bezelStyle = .recessed
         button.setButtonType(.pushOnPushOff)
         button.imagePosition = .imageLeading
-        button.contentTintColor = .white
+        button.contentTintColor = nil
         button.font = .systemFont(ofSize: 12)
         button.setAccessibilityLabel("Notionエージェント")
         button.toolTip = "Notionエージェント"
@@ -315,7 +315,10 @@ final class BrowserViewController: NSViewController {
         updateNotionAppearance()
         systemAppearanceObserver = DistributedNotificationCenter.default().addObserver(
             forName: NSNotification.Name("AppleInterfaceThemeChangedNotification"), object: nil, queue: .main
-        ) { [weak self] _ in self?.updateNotionAppearance() }
+        ) { [weak self] _ in
+            self?.updateNotionAppearance()
+            self?.updateChrome()
+        }
         syncPinnedTabs()
         selectInitialTab()
     }
@@ -387,6 +390,7 @@ final class BrowserViewController: NSViewController {
 
     func settingsChanged() {
         guard isViewLoaded else { return }
+        if !store.data.notionEnabled { hideNotion() }
         updateNotionAppearance()
         syncPinnedTabs()
         glass.updateAppearance()
@@ -692,7 +696,9 @@ final class BrowserViewController: NSViewController {
     private func reorderPinnedButtons(afterDragging button: TabButton) {
         let dragged = button === notionTabButton ? "notion" : tabs[button.tag].pinnedID!.uuidString
         var order = store.data.pinnedTabs.map { $0.id.uuidString }
-        order.insert("notion", at: min(store.data.notionTabPosition, order.count))
+        if store.data.notionEnabled {
+            order.insert("notion", at: min(store.data.notionTabPosition, order.count))
+        }
         order.removeAll { $0 == dragged }
         let otherButtons = tabStack.arrangedSubviews.compactMap { $0 as? TabButton }
             .filter { candidate in
@@ -702,7 +708,9 @@ final class BrowserViewController: NSViewController {
         let destination = otherButtons.filter { $0.frame.midX < button.frame.midX }.count
         order.insert(dragged, at: min(destination, order.count))
         var data = store.data
-        data.notionTabPosition = order.firstIndex(of: "notion") ?? data.pinnedTabs.count
+        if store.data.notionEnabled {
+            data.notionTabPosition = order.firstIndex(of: "notion") ?? data.pinnedTabs.count
+        }
         data.pinnedTabs.sort { left, right in
             (order.firstIndex(of: left.id.uuidString) ?? .max) <
             (order.firstIndex(of: right.id.uuidString) ?? .max)
@@ -813,13 +821,21 @@ final class BrowserViewController: NSViewController {
         let grayscale = store.data.grayscaleIcons
         let notionPosition = min(store.data.notionTabPosition, firstUnpinnedIndex)
         func addNotion() {
+            let display = store.data.notionTabDisplay
+            notionTabButton.title = display == .iconOnly ? "" : "Notion"
+            notionTabButton.image = display == .titleOnly ? nil : NotionTabIcon.image(for: view.effectiveAppearance)
+            notionTabButton.imagePosition = switch display {
+            case .iconAndTitle: .imageLeading
+            case .iconOnly: .imageOnly
+            case .titleOnly: .noImage
+            }
             notionTabButton.state = notionPanel?.isHidden == false ? .on : .off
             notionTabButton.showsBorderOnlyWhileMouseInside = notionPanel?.isHidden != false
             notionTabButton.alphaValue = 1
             tabStack.addArrangedSubview(notionTabButton)
         }
         for (i, tab) in tabs.enumerated() {
-            if i == notionPosition { addNotion() }
+            if store.data.notionEnabled && i == notionPosition { addNotion() }
             if i == firstUnpinnedIndex {
                 let divider = NSBox()
                 divider.boxType = .separator
@@ -854,7 +870,7 @@ final class BrowserViewController: NSViewController {
             tabStack.addArrangedSubview(button)
             tabButtons.append(button)
         }
-        if notionPosition == tabs.count { addNotion() }
+        if store.data.notionEnabled && notionPosition == tabs.count { addNotion() }
         tabStack.frame = NSRect(origin: .zero, size: NSSize(width: tabStack.fittingSize.width, height: stripHeightConstraints.first?.constant ?? 32))
     }
 
@@ -1252,6 +1268,7 @@ final class BrowserViewController: NSViewController {
         notes.show(profile: store.profile(selectedTab?.profileID ?? store.data.newTabProfileID))
     }
     @objc func toggleNotion(_ sender: Any?) {
+        guard store.data.notionEnabled else { return }
         addressPopover.close()
         updateNotionAppearance()
         let willShow = notionPanel?.isHidden == true
@@ -1263,6 +1280,7 @@ final class BrowserViewController: NSViewController {
         if !willShow { focusContent() }
     }
     func showNotion() {
+        guard store.data.notionEnabled else { return }
         _ = view
         updateNotionAppearance()
         notionPanel?.isHidden = false

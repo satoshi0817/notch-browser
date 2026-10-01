@@ -6,6 +6,10 @@ final class TabSelectionAppearanceTests: XCTestCase {
     @MainActor
     func testNotionSelectionReplacesPinnedTabHighlightAndRestoresItOnClose() throws {
         _ = NSApplication.shared
+        let settings = SettingsStore.shared
+        let saved = settings.data
+        defer { settings.data = saved }
+        settings.data.notionEnabled = true
         let browser = BrowserViewController()
         _ = browser.view
         func button(_ label: String) throws -> NSButton {
@@ -21,6 +25,42 @@ final class TabSelectionAppearanceTests: XCTestCase {
         browser.showNotion()
         XCTAssertEqual(notion.state, .on)
         browser.hideNotion()
+        XCTAssertEqual(notion.state, .off)
+    }
+
+    @MainActor
+    func testNotionTabDisplayAndFeatureSwitchUpdateThePinnedStrip() throws {
+        _ = NSApplication.shared
+        let settings = SettingsStore.shared
+        let saved = settings.data
+        defer { settings.data = saved }
+        settings.data.notionEnabled = true
+        settings.data.notionTabDisplay = .iconAndTitle
+        let browser = BrowserViewController()
+        _ = browser.view
+        func notionButton() throws -> NSButton {
+            let views = sequence(first: [browser.view], next: { level in
+                let children = level.flatMap(\.subviews)
+                return children.isEmpty ? nil : children
+            }).flatMap { $0 }
+            return try XCTUnwrap(views.compactMap { $0 as? NSButton }
+                .first(where: { $0.accessibilityLabel() == "Notionエージェント" }))
+        }
+        let notion = try notionButton()
+        XCTAssertEqual(notion.title, "Notion")
+        XCTAssertNotNil(notion.image)
+        settings.data.notionTabDisplay = .iconOnly
+        browser.settingsChanged()
+        XCTAssertEqual(notion.title, "")
+        XCTAssertNotNil(notion.image)
+        settings.data.notionTabDisplay = .titleOnly
+        browser.settingsChanged()
+        XCTAssertEqual(notion.title, "Notion")
+        XCTAssertNil(notion.image)
+        settings.data.notionEnabled = false
+        browser.settingsChanged()
+        XCTAssertNil(notion.superview)
+        browser.showNotion()
         XCTAssertEqual(notion.state, .off)
     }
 

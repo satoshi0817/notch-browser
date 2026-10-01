@@ -43,13 +43,15 @@ final class OnboardingTests: XCTestCase {
         XCTAssertEqual(settings.shelfTrigger, .manual)
         XCTAssertFalse(settings.countdownEnabled)
         XCTAssertFalse(settings.hideFromScreenCapture)
-        XCTAssertEqual(settings.toolbarActions, [.back, .notion, .settings, .quit])
+        XCTAssertTrue(settings.notionEnabled)
+        XCTAssertEqual(settings.toolbarActions, [.back, .settings, .quit])
         XCTAssertEqual(settings.pinnedTabs.first?.name, "My page")
         choices.apply(to: &settings)
-        XCTAssertEqual(settings.toolbarActions.filter { $0 == .notion }.count, 1)
+        XCTAssertTrue(settings.notionEnabled)
         choices.notionButton = false
         choices.apply(to: &settings)
-        XCTAssertFalse(settings.toolbarActions.contains(.notion))
+        XCTAssertFalse(settings.notionEnabled)
+        XCTAssertEqual(settings.toolbarActions, [.back, .settings, .quit])
 
         settings.shelfTrigger = .nearby
         choices.automaticShelf = true

@@ -22,6 +22,7 @@ fi
 
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/NotchBrowser.icns "$APP/Contents/Resources/NotchBrowser.icns"
+cp Resources/NotionAgentIcon-Light.png Resources/NotionAgentIcon-Dark.png "$APP/Contents/Resources/"
 if [[ -n "${SIGNING_IDENTITY:-}" ]]; then
     codesign --force --sign "$SIGNING_IDENTITY" --options runtime --timestamp \
         --entitlements Resources/NotchBrowser.entitlements "$APP"

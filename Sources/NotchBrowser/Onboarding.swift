@@ -47,7 +47,7 @@ struct OnboardingChoices {
         motion = settings.motion
         automaticShelf = settings.shelfTrigger != .manual
         calendarCountdown = settings.countdownEnabled
-        notionButton = settings.toolbarActions.contains(.notion)
+        notionButton = settings.notionEnabled
         hideFromCapture = settings.hideFromScreenCapture
         externalBrowserBundleID = settings.externalBrowserBundleID
     }
@@ -110,12 +110,7 @@ struct OnboardingChoices {
         settings.countdownEnabled = calendarCountdown
         settings.hideFromScreenCapture = hideFromCapture
         settings.externalBrowserBundleID = externalBrowserBundleID
-        if notionButton && !settings.toolbarActions.contains(.notion) {
-            let position = settings.toolbarActions.firstIndex(of: .settings) ?? settings.toolbarActions.count
-            settings.toolbarActions.insert(.notion, at: position)
-        } else if !notionButton {
-            settings.toolbarActions.removeAll { $0 == .notion }
-        }
+        settings.notionEnabled = notionButton
     }
 }
 
@@ -461,7 +456,7 @@ private struct OnboardingView: View {
         VStack(alignment: .leading, spacing: 11) {
             option("tray", title: "ファイル棚を自動で出す", detail: "ドラッグを始めたときに棚を開きます。手動でもいつでも開けます。", isOn: $choices.automaticShelf)
             option("calendar", title: "次の予定を表示", detail: "カレンダーへのアクセスは、完了後に必要なときだけ確認します。", isOn: $choices.calendarCountdown)
-            option("sparkles.rectangle.stack", title: "Notionボタンを置く", detail: "接続は後から設定します。使わない場合もメニューから開けます。", isOn: $choices.notionButton)
+            option("bubble.left", title: "Notionエージェントを使う", detail: "接続は後から固定ページの設定で行えます。", isOn: $choices.notionButton)
             option("eye.slash", title: "画面共有から隠す", detail: "対応する画面共有・録画ではノッチを映しません。", isOn: $choices.hideFromCapture)
             HStack {
                 Image(systemName: "safari").frame(width: 28).foregroundStyle(.cyan)
@@ -564,7 +559,7 @@ private struct NotchIllustration: View {
                     Image(systemName: "chevron.right")
                     Image(systemName: "house")
                     Spacer()
-                    Image(systemName: "sparkles.rectangle.stack")
+                    Image(nsImage: NotionTabIcon.image(for: NSAppearance(named: .darkAqua)!))
                     Image(systemName: "tray")
                     Image(systemName: "gearshape")
                 }

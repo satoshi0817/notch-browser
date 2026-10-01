@@ -547,7 +547,7 @@ final class NotionAgentsStore: ObservableObject {
             threads = selectedAgentID.map { cache.threads(for: $0) } ?? []
             messages = []
         }
-        if hasToken {
+        if hasToken && SettingsStore.shared.data.notionEnabled {
             if refreshInProgress { refreshQueued = true; refreshQueuedFull = true }
             else { Task { @MainActor in await refresh(forceFull: true) } }
         }
@@ -561,7 +561,19 @@ final class NotionAgentsStore: ObservableObject {
         updatePolling()
     }
 
+    func settingsChanged() {
+        if !SettingsStore.shared.data.notionEnabled {
+            isPanelVisible = false
+            busyAgentIDs = []
+            alert = nil
+            noticeText = nil
+            activityText = nil
+        }
+        updatePolling()
+    }
+
     func setPanelVisible(_ visible: Bool) {
+        guard !visible || SettingsStore.shared.data.notionEnabled else { return }
         guard isPanelVisible != visible else { return }
         let wasPolling = timer != nil
         isPanelVisible = visible
@@ -571,7 +583,8 @@ final class NotionAgentsStore: ObservableObject {
     }
 
     private func updatePolling() {
-        guard NotionReplyTracking.shouldPoll(hasToken: hasToken, panelVisible: isPanelVisible,
+        guard SettingsStore.shared.data.notionEnabled,
+              NotionReplyTracking.shouldPoll(hasToken: hasToken, panelVisible: isPanelVisible,
                                              pendingCount: pendingReplies.count) else {
             timer?.invalidate(); timer = nil; timerInterval = nil
             return
@@ -595,7 +608,7 @@ final class NotionAgentsStore: ObservableObject {
     }
 
     func refresh(forceFull: Bool = false) async {
-        guard hasToken, let token = tokenProvider() else { return }
+        guard SettingsStore.shared.data.notionEnabled, hasToken, let token = tokenProvider() else { return }
         if refreshInProgress {
             refreshQueued = true
             refreshQueuedFull = refreshQueuedFull || forceFull
@@ -632,6 +645,7 @@ final class NotionAgentsStore: ObservableObject {
             isPanelVisible || forceFull || pendingReplies.values.contains(where: { $0.agentID == agent.id })
         }
         for (index, agent) in targets.enumerated() {
+            guard SettingsStore.shared.data.notionEnabled else { return }
             guard visibleAgents.contains(where: { $0.id == agent.id }) else { continue }
             if isPanelVisible { activityText = "エージェントを確認中（\(index + 1)/\(targets.count)）" }
             let placeholder = "エージェント \(agent.id.prefix(8))"
@@ -671,6 +685,7 @@ final class NotionAgentsStore: ObservableObject {
                     ?? cache.threads(for: agent.id).first { $0.id == pending.threadID }
                 let signature = thread.map { "\($0.status):\($0.last_edited_time)" }
                 let fetched = try? await api.messages(threadID: pending.threadID)
+                guard SettingsStore.shared.data.notionEnabled else { return }
                 guard pendingReplies[key] == pending else { continue }
                 let available = fetched.map { applyMessages($0, agentID: agent.id, threadID: pending.threadID) }
                     ?? cache.messages(for: pending.threadID)
@@ -718,6 +733,7 @@ final class NotionAgentsStore: ObservableObject {
                 }) { running.insert(agentID) }
             }
         }
+        guard SettingsStore.shared.data.notionEnabled else { return }
         busyAgentIDs = running.union(pendingReplies.values.map(\.agentID))
             .intersection(Set(visibleAgents.map(\.id)))
         error = failures.first.map { failures.count == 1 ? $0 : "\($0) ほか\(failures.count - 1)件" }
@@ -727,6 +743,7 @@ final class NotionAgentsStore: ObservableObject {
     func selectAgent(_ id: String) async {
         selectedAgentID = id; selectedThreadID = nil; messages = []
         threads = cache.threads(for: id)
+        guard SettingsStore.shared.data.notionEnabled else { return }
         guard let token = tokenProvider() else { return }
         activityText = "チャット履歴を読み込み中…"
         defer { activityText = nil }
@@ -742,6 +759,7 @@ final class NotionAgentsStore: ObservableObject {
 
     func selectThread(_ id: String) async {
         selectedThreadID = id; messages = cache.messages(for: id)
+        guard SettingsStore.shared.data.notionEnabled else { return }
         guard let agentID = selectedAgentID else { return }
         guard let token = tokenProvider() else { return }
         isLoadingMessages = true
@@ -759,6 +777,7 @@ final class NotionAgentsStore: ObservableObject {
     func showHistory() { selectedThreadID = nil; messages = [] }
 
     func openThread(agentID: String, threadID: String) {
+        guard SettingsStore.shared.data.notionEnabled else { return }
         selectedAgentID = agentID
         threads = cache.threads(for: agentID)
         selectedThreadID = threadID
@@ -768,7 +787,8 @@ final class NotionAgentsStore: ObservableObject {
 
     @discardableResult
     func send(_ text: String) async -> Bool {
-        guard let agentID = selectedAgentID, let token = tokenProvider(),
+        guard SettingsStore.shared.data.notionEnabled,
+              let agentID = selectedAgentID, let token = tokenProvider(),
               !isSending, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
         let sendingThreadID = selectedThreadID
         let sentAt = Date()
@@ -816,7 +836,8 @@ final class NotionAgentsStore: ObservableObject {
     }
 
     func respond(_ action: NotionAction, option: NotionAction.Option) async {
-        guard let threadID = selectedThreadID, let agentID = selectedAgentID,
+        guard SettingsStore.shared.data.notionEnabled,
+              let threadID = selectedThreadID, let agentID = selectedAgentID,
               let token = tokenProvider() else { return }
         let sentAt = Date()
         let key = "\(agentID):\(threadID)"
@@ -1179,7 +1200,20 @@ struct NotionAgentsSettings: View {
 
     var body: some View {
         Form {
-            Section("外観") {
+            Section("固定ページに表示") {
+                Toggle("Notionカスタムエージェントを使う", isOn: $settings.data.notionEnabled)
+                Picker("タブの表示", selection: $settings.data.notionTabDisplay) {
+                    ForEach(NotionTabDisplay.allCases) { display in
+                        Text(display.title).tag(display)
+                    }
+                }
+                LabeledContent("アイコン") {
+                    Image(nsImage: NotionTabIcon.image(for: NSAppearance(named: .darkAqua)!, size: 28))
+                }
+                Text("オフにするとタブ・通知・ポーリングを停止します。接続情報と登録したエージェントは残ります。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("チャットの外観") {
                 Picker("チャットの外観", selection: $settings.data.notionAppearance) {
                     ForEach(NotionAppearance.allCases) { appearance in
                         Text(appearance.title).tag(appearance)

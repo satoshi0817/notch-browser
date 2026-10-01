@@ -7,6 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var hotKey: HotKey?
     private var keepOpenItem: NSMenuItem!
+    private var notionItem: NSMenuItem!
     private var updateWindow: UpdateWindowController?
     private var onboardingWindow: OnboardingWindowController?
     private var updatesStarted = false
@@ -21,7 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         notch = NotchManager()
         notch.browser.onOpenSettings = { [weak self] in self?.openSettings() }
-        notch.browser.onOpenNotionSettings = { [weak self] in self?.presentSettings(section: .notion) }
+        notch.browser.onOpenNotionSettings = { [weak self] in self?.presentSettings(section: .tabs, selectNotion: true) }
         NSApp.mainMenu = buildMainMenu()
         setupStatusItem()
         notch.start()
@@ -94,7 +95,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         keepOpenItem = item("開いたままにする", #selector(toggleKeepOpen), target: self)
         menu.addItem(keepOpenItem)
         menu.addItem(item("ファイル棚", #selector(openShelf), target: self))
-        menu.addItem(item("Notionエージェント", #selector(openNotion), target: self))
+        notionItem = item("Notionエージェント", #selector(openNotion), target: self)
+        menu.addItem(notionItem)
         menu.addItem(item("使い方ガイド…", #selector(openOnboarding), target: self))
         menu.addItem(item("設定…", #selector(openSettings), ",", target: self))
         menu.addItem(item("アップデートを確認…", #selector(checkForUpdates), target: self))
@@ -117,9 +119,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         presentSettings()
     }
 
-    private func presentSettings(section: SettingsSection? = nil) {
+    private func presentSettings(section: SettingsSection? = nil, selectNotion: Bool = false) {
         if settingsWindow == nil { settingsWindow = SettingsWindowController() }
-        settingsWindow?.present(section: section)
+        settingsWindow?.present(section: section, selectNotion: selectNotion)
     }
 
     @objc private func openOnboarding() { presentOnboarding() }
@@ -139,7 +141,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 switch destination {
                 case .notch: self.notch.toggle()
                 case .settings: self.presentSettings()
-                case .notionSettings: self.presentSettings(section: .notion)
+                case .notionSettings: self.presentSettings(section: .tabs, selectNotion: true)
                 }
             }, onSkip: { [weak self] in
                 OnboardingState.complete()
@@ -216,5 +218,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 extension AppDelegate: NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         keepOpenItem.state = notch.keepOpen ? .on : .off
+        notionItem.isHidden = !SettingsStore.shared.data.notionEnabled
     }
 }

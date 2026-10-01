@@ -42,6 +42,18 @@ enum NotionAppearance: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+enum NotionTabDisplay: String, Codable, CaseIterable, Identifiable {
+    case iconAndTitle, iconOnly, titleOnly
+    var id: Self { self }
+    var title: String {
+        switch self {
+        case .iconAndTitle: "アイコンとタイトル"
+        case .iconOnly: "アイコンのみ"
+        case .titleOnly: "タイトルのみ"
+        }
+    }
+}
+
 enum TabIcon: Codable, Hashable {
     case favicon
     case symbol(String)
@@ -144,6 +156,8 @@ struct SettingsData: Codable {
     ]
     /// Insertion point among pinned pages for the Notion agent panel.
     var notionTabPosition = 2
+    var notionEnabled = true
+    var notionTabDisplay = NotionTabDisplay.iconAndTitle
     var newTabProfileID = Profile.defaultID
     /// Keyed by display UUID.
     var displays: [String: DisplaySettings] = [:]
@@ -182,6 +196,8 @@ struct SettingsData: Codable {
         pinnedTabs = try c.decodeIfPresent([PinnedTab].self, forKey: .pinnedTabs) ?? fallback.pinnedTabs
         notionTabPosition = min(pinnedTabs.count, max(0,
             (try? c.decode(Int.self, forKey: .notionTabPosition)) ?? pinnedTabs.count))
+        notionEnabled = (try? c.decode(Bool.self, forKey: .notionEnabled)) ?? true
+        notionTabDisplay = (try? c.decode(NotionTabDisplay.self, forKey: .notionTabDisplay)) ?? .iconAndTitle
         newTabProfileID = try c.decodeIfPresent(UUID.self, forKey: .newTabProfileID) ?? fallback.newTabProfileID
         displays = try c.decodeIfPresent([String: DisplaySettings].self, forKey: .displays) ?? fallback.displays
         countdownEnabled = try c.decodeIfPresent(Bool.self, forKey: .countdownEnabled) ?? fallback.countdownEnabled

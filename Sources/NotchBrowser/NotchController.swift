@@ -315,9 +315,15 @@ final class NotchController: NSObject, NSWindowDelegate {
         quit.image = NSImage(systemSymbolName: "power", accessibilityDescription: nil)
         let notion = NSMenuItem(title: "Notionエージェント", action: #selector(openNotionFromMenu), keyEquivalent: "")
         notion.target = self
-        notion.image = NSImage(systemSymbolName: "sparkles.rectangle.stack", accessibilityDescription: nil)
-        menu.items = [open, notion, shelf, settings, .separator(), quit]
+        notion.image = NotionTabIcon.image(for: NSApp.effectiveAppearance, size: 16)
+        menu.items = [open] + (SettingsStore.shared.data.notionEnabled ? [notion] : [])
+            + [shelf, settings, .separator(), quit]
         return menu
+    }
+
+    func refreshNotionAvailability() {
+        root.contextMenu = makeContextMenu()
+        if !SettingsStore.shared.data.notionEnabled { clearNotification(animated: false) }
     }
 
     @objc private func openShelfFromMenu() { manager.showShelf(on: self) }
@@ -450,6 +456,7 @@ final class NotchController: NSObject, NSWindowDelegate {
     }
 
     func showNotification(agentID: String, threadID: String, title: String, preview: String) {
+        guard SettingsStore.shared.data.notionEnabled else { return }
         guard let agent = manager.notion.visibleAgents.first(where: { $0.id == agentID }) else { return }
         guard !isExpanded else { return }
         let duration = SettingsStore.shared.data.notionNotificationDuration
@@ -685,11 +692,13 @@ final class NotchManager {
     }
 
     private func settingsChanged() {
+        notion.settingsChanged()
         applyCalendarSettings()
         rebuild()
         applyWindowSettings()
         shelf.settingsChanged()
         browser.settingsChanged()
+        controllers.values.forEach { $0.refreshNotionAvailability() }
     }
 
     private func applyWindowSettings() {
@@ -768,6 +777,7 @@ final class NotchManager {
     }
 
     func showNotion(on target: NotchController? = nil, focus: Bool = true) {
+        guard SettingsStore.shared.data.notionEnabled else { return }
         let target = target ?? orderedControllers.first { $0.screen.frame.contains(NSEvent.mouseLocation) } ?? orderedControllers.first
         guard let target else { return }
         target.expand(focus: focus)

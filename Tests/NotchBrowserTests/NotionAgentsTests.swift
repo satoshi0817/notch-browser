@@ -38,6 +38,8 @@ final class NotionAgentsTests: XCTestCase {
         var settings = try JSONDecoder().decode(SettingsData.self, from: Data("{}".utf8))
         XCTAssertTrue(settings.notionHiddenAgentIDs.isEmpty)
         XCTAssertTrue(settings.notionSavedAgents.isEmpty)
+        XCTAssertTrue(settings.notionEnabled)
+        XCTAssertEqual(settings.notionTabDisplay, .iconAndTitle)
         XCTAssertTrue(settings.notionNotificationsEnabled)
         XCTAssertEqual(settings.notionNotificationDuration, 10)
         XCTAssertEqual(settings.notionAppearance, .system)
@@ -47,6 +49,8 @@ final class NotionAgentsTests: XCTestCase {
         settings.notionNotificationDuration = 30
         settings.notionTabPosition = 1
         settings.notionSavedAgents = [SavedNotionAgent(id: "agent-1", name: "Writer")]
+        settings.notionEnabled = false
+        settings.notionTabDisplay = .titleOnly
         settings.notionAppearance = .dark
         let restored = try JSONDecoder().decode(SettingsData.self, from: JSONEncoder().encode(settings))
         XCTAssertEqual(restored.notionHiddenAgentIDs, ["agent-1"])
@@ -54,6 +58,8 @@ final class NotionAgentsTests: XCTestCase {
         XCTAssertEqual(restored.notionNotificationDuration, 30)
         XCTAssertEqual(restored.notionTabPosition, 1)
         XCTAssertEqual(restored.notionSavedAgents, [SavedNotionAgent(id: "agent-1", name: "Writer")])
+        XCTAssertFalse(restored.notionEnabled)
+        XCTAssertEqual(restored.notionTabDisplay, .titleOnly)
         XCTAssertEqual(restored.notionAppearance, .dark)
     }
 
@@ -76,6 +82,29 @@ final class NotionAgentsTests: XCTestCase {
             darkLink = NotionPanelTheme.link.usingColorSpace(.deviceRGB)
         }
         XCTAssertNotEqual(lightLink, darkLink)
+    }
+
+    func testNotionTabIconUsesTheSuppliedLightAndDarkAssets() {
+        XCTAssertEqual(NotionTabIcon.assetName(for: NSAppearance(named: .aqua)!), "NotionAgentIcon-Light")
+        XCTAssertEqual(NotionTabIcon.assetName(for: NSAppearance(named: .darkAqua)!), "NotionAgentIcon-Dark")
+    }
+
+    @MainActor
+    func testTurningNotionOffStopsPanelPollingWithoutRemovingSavedAgents() {
+        let settings = SettingsStore.shared
+        let saved = settings.data
+        defer { settings.data = saved }
+        settings.data.notionSavedAgents = [SavedNotionAgent(id: "agent-1", name: "Writer")]
+        settings.data.notionEnabled = false
+        let cacheURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NotionAgentsCache-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: cacheURL) }
+        let store = NotionAgentsStore(tokenProvider: { "test-token" },
+            pendingRepliesKey: "notion-off-test-\(UUID().uuidString)", cache: NotionAgentsCache(url: cacheURL))
+        store.start()
+        store.setPanelVisible(true)
+        XCTAssertFalse(store.isPolling)
+        XCTAssertEqual(store.visibleAgents.map(\.id), ["agent-1"])
     }
 
     func testPollingAndNotificationOnlyFollowLocallyPendingThreads() {
