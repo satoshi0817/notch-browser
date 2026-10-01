@@ -46,9 +46,9 @@ private struct NotionNotificationBanner: View {
             TimelineView(.periodic(from: .now, by: 0.1)) { context in
                 let remaining = max(0, deadline.timeIntervalSince(context.date))
                 ZStack {
-                    Circle().stroke(.white.opacity(0.14), lineWidth: 3)
+                    Circle().stroke(NotionPanelTheme.hairline, lineWidth: 3)
                     Circle().trim(from: 0, to: min(1, remaining / Double(duration)))
-                        .stroke(.purple, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                        .stroke(NotionPanelTheme.purple, style: StrokeStyle(lineWidth: 3, lineCap: .round))
                         .rotationEffect(.degrees(-90))
                     Text("\(Int(ceil(remaining)))")
                         .font(.system(size: 12, weight: .semibold, design: .rounded))
@@ -60,8 +60,10 @@ private struct NotionNotificationBanner: View {
         }
         .padding(.horizontal, 18)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.15)))
+        .foregroundStyle(NotionPanelTheme.ink)
+        .environment(\.colorScheme, .light)
+        .background(NotionPanelTheme.canvas, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(NotionPanelTheme.hairline))
     }
 }
 

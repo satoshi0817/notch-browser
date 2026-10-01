@@ -1,13 +1,26 @@
 import AppKit
 import SwiftUI
 
+enum NotionPanelTheme {
+    static let canvas = Color(red: 1, green: 1, blue: 1)
+    static let surface = Color(red: 0.965, green: 0.961, blue: 0.957)
+    static let softSurface = Color(red: 0.98, green: 0.976, blue: 0.973)
+    static let hairline = Color(red: 0.898, green: 0.89, blue: 0.875)
+    static let ink = Color(red: 0.216, green: 0.208, blue: 0.184)
+    static let muted = Color(red: 0.471, green: 0.463, blue: 0.443)
+    static let purple = Color(red: 0.337, green: 0.271, blue: 0.831)
+    static let lavender = Color(red: 0.902, green: 0.878, blue: 0.961)
+    static let link = NSColor(srgbRed: 0, green: 0.459, blue: 0.871, alpha: 1)
+    static let text = NSColor(srgbRed: 0.216, green: 0.208, blue: 0.184, alpha: 1)
+}
+
 struct NotionAgentAvatar: View {
     let agent: SavedNotionAgent
     let size: CGFloat
 
     var body: some View {
         ZStack {
-            Circle().fill(.white.opacity(0.16))
+            Circle().fill(NotionPanelTheme.lavender)
             if let value = agent.iconURL, let url = URL(string: value) {
                 AsyncImage(url: url) { image in
                     image.resizable().scaledToFill()
@@ -136,8 +149,9 @@ private struct NotionReplyText: NSViewRepresentable {
         view.textContainerInset = .zero
         view.isHorizontallyResizable = false
         view.isVerticallyResizable = true
+        view.appearance = NSAppearance(named: .aqua)
         view.textContainer?.widthTracksTextView = true
-        view.linkTextAttributes = [.foregroundColor: NSColor.systemCyan,
+        view.linkTextAttributes = [.foregroundColor: NotionPanelTheme.link,
                                    .underlineStyle: NSUnderlineStyle.single.rawValue]
         return view
     }
@@ -146,7 +160,7 @@ private struct NotionReplyText: NSViewRepresentable {
         let value = (try? AttributedString(markdown: source,
                                            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(source)
         let text = NSMutableAttributedString(attributedString: NSAttributedString(value))
-        text.addAttributes([.font: NSFont.systemFont(ofSize: 14), .foregroundColor: NSColor.labelColor],
+        text.addAttributes([.font: NSFont.systemFont(ofSize: 14), .foregroundColor: NotionPanelTheme.text],
                            range: NSRange(location: 0, length: text.length))
         if view.attributedString() != text { view.textStorage?.setAttributedString(text) }
     }
@@ -197,18 +211,17 @@ struct NotionMessageView: View {
                         }
                     case .artifact:
                         Label("表データはNotionで確認できます", systemImage: "tablecells")
-                            .font(.caption).foregroundStyle(.secondary)
+                            .font(.caption).foregroundStyle(NotionPanelTheme.muted)
                             .padding(9).frame(maxWidth: .infinity, alignment: .leading)
-                            .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+                            .background(NotionPanelTheme.softSurface, in: RoundedRectangle(cornerRadius: 8))
                     }
                 }
                 }
                 .padding(.horizontal, 15)
                 .padding(.vertical, 11)
-                .background(isUser ? Color.accentColor.opacity(0.24) : Color.white.opacity(0.075),
-                            in: RoundedRectangle(cornerRadius: 17))
-                .overlay(RoundedRectangle(cornerRadius: 17)
-                    .stroke(.white.opacity(isUser ? 0.12 : 0.06)))
+                .background(isUser ? NotionPanelTheme.lavender.opacity(0.62) : NotionPanelTheme.canvas,
+                            in: RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(NotionPanelTheme.hairline))
                 HStack(spacing: 8) {
                     Text(timestamp).font(.caption2).foregroundStyle(.tertiary)
                     if !isUser {

@@ -611,15 +611,23 @@ struct NotionAgentsPanel: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Image(systemName: "sparkles.rectangle.stack").foregroundStyle(.purple)
-                Text("Notionエージェント").font(.headline)
+            HStack(spacing: 10) {
+                Image(systemName: "sparkles.rectangle.stack")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(NotionPanelTheme.purple)
+                    .frame(width: 28, height: 28)
+                    .background(NotionPanelTheme.lavender.opacity(0.55),
+                                in: RoundedRectangle(cornerRadius: 8))
+                Text("Notionエージェント").font(.system(size: 15, weight: .semibold))
                 Spacer()
-            }.buttonStyle(.plain).padding(14)
+            }.buttonStyle(.plain).padding(.horizontal, 20).padding(.vertical, 14)
             if let notice = store.noticeText {
                 HStack { Image(systemName: "bell.badge.fill"); Text(notice); Spacer() }
-                    .font(.caption.weight(.medium)).foregroundStyle(.orange)
-                    .padding(.horizontal, 14).padding(.bottom, 8)
+                    .font(.caption.weight(.medium)).foregroundStyle(NotionPanelTheme.ink)
+                    .padding(.horizontal, 14).padding(.vertical, 8)
+                    .background(Color(red: 0.996, green: 0.969, blue: 0.839),
+                                in: RoundedRectangle(cornerRadius: 8))
+                    .padding(.horizontal, 20).padding(.bottom, 10)
             }
             Divider()
             if !store.hasToken {
@@ -640,56 +648,88 @@ struct NotionAgentsPanel: View {
                 .padding(28)
             } else {
                 HStack(spacing: 0) {
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text("エージェント").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 9)
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("エージェント")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(NotionPanelTheme.muted)
+                            .padding(.horizontal, 10).padding(.top, 10)
                         ScrollView {
-                            LazyVStack(spacing: 3) {
+                            LazyVStack(spacing: 4) {
                                 ForEach(store.visibleAgents) { agent in
                                     Button { Task { @MainActor in await store.selectAgent(agent.id) } } label: {
-                                        HStack(spacing: 7) {
-                                            NotionAgentAvatar(agent: agent, size: 22)
-                                            Text(agent.name).lineLimit(1)
+                                        HStack(spacing: 9) {
+                                            NotionAgentAvatar(agent: agent, size: 24)
+                                            Text(agent.name)
+                                                .font(.system(size: 13, weight: store.selectedAgentID == agent.id ? .semibold : .regular))
+                                                .lineLimit(1)
                                             Spacer(minLength: 0)
                                             if store.busyAgentIDs.contains(agent.id) { ProgressView().controlSize(.mini) }
-                                        }.padding(7).background(store.selectedAgentID == agent.id ? Color.white.opacity(0.14) : .clear, in: RoundedRectangle(cornerRadius: 9))
+                                        }
+                                        .padding(.horizontal, 10).padding(.vertical, 8)
+                                        .background(store.selectedAgentID == agent.id ? NotionPanelTheme.canvas : .clear,
+                                                    in: RoundedRectangle(cornerRadius: 8))
+                                        .overlay(RoundedRectangle(cornerRadius: 8)
+                                            .stroke(store.selectedAgentID == agent.id ? NotionPanelTheme.hairline : .clear))
                                     }.buttonStyle(.plain)
                                 }
                             }
                         }
-                    }.frame(width: 210).padding(8)
+                    }
+                    .frame(width: 216).padding(10)
+                    .background(NotionPanelTheme.surface)
                     Divider()
                     VStack(spacing: 0) {
                         if let agent = store.visibleAgents.first(where: { $0.id == store.selectedAgentID }) {
-                            HStack {
-                                Text(agent.name).font(.subheadline.weight(.semibold)).lineLimit(1)
+                            HStack(spacing: 10) {
+                                NotionAgentAvatar(agent: agent, size: 26)
+                                Text(agent.name).font(.system(size: 15, weight: .semibold)).lineLimit(1)
                                 Spacer()
-                                Button { store.showHistory() } label: { Image(systemName: "square.and.pencil") }.help("新しいチャット")
-                            }.buttonStyle(.plain).padding(11)
+                                Button { store.showHistory() } label: {
+                                    Label("新しいチャット", systemImage: "square.and.pencil")
+                                        .font(.system(size: 12, weight: .medium))
+                                }
+                                .buttonStyle(.plain)
+                                .padding(.horizontal, 9).padding(.vertical, 7)
+                                .background(NotionPanelTheme.softSurface, in: RoundedRectangle(cornerRadius: 8))
+                                .help("新しいチャット")
+                            }.padding(.horizontal, 20).padding(.vertical, 14)
                             Divider()
                             if store.selectedThreadID == nil {
                                 ScrollView {
-                                    LazyVStack(alignment: .leading, spacing: 4) {
+                                    LazyVStack(alignment: .leading, spacing: 6) {
                                         ForEach(store.threads) { thread in
                                             Button { Task { @MainActor in await store.selectThread(thread.id) } } label: {
-                                                HStack {
+                                                HStack(spacing: 10) {
                                                     Image(systemName: thread.status == "requires_action" ? "exclamationmark.circle.fill" : "bubble.left")
                                                         .foregroundStyle(thread.status == "requires_action" ? .orange : .secondary)
                                                     VStack(alignment: .leading, spacing: 2) {
-                                                        Text(thread.title.isEmpty ? "無題のチャット" : thread.title).lineLimit(2)
+                                                        Text(thread.title.isEmpty ? "無題のチャット" : thread.title)
+                                                            .font(.system(size: 13, weight: .medium)).lineLimit(2)
                                                         Text(thread.status == "requires_action" ? "確認待ち" : thread.isRunning ? "稼働中" : "履歴").font(.caption2).foregroundStyle(.secondary)
                                                     }
                                                     Spacer()
-                                                }.padding(9)
+                                                }
+                                                .padding(12)
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                                .background(NotionPanelTheme.softSurface,
+                                                            in: RoundedRectangle(cornerRadius: 10))
+                                                .overlay(RoundedRectangle(cornerRadius: 10)
+                                                    .stroke(NotionPanelTheme.hairline))
                                             }.buttonStyle(.plain)
                                         }
-                                    }
+                                    }.padding(20)
                                 }
                             } else {
                                 ScrollViewReader { proxy in
                                 GeometryReader { geometry in
                                 ScrollView {
                                     LazyVStack(alignment: .leading, spacing: 17) {
-                                        Button("‹ 履歴に戻る") { store.showHistory() }.font(.caption)
+                                        Button { store.showHistory() } label: {
+                                            Label("履歴に戻る", systemImage: "chevron.left")
+                                                .font(.system(size: 12, weight: .medium))
+                                        }
+                                        .buttonStyle(.plain)
+                                        .foregroundStyle(NotionPanelTheme.muted)
                                         if store.messages.isEmpty {
                                             if store.isLoadingMessages {
                                                 HStack(spacing: 8) { ProgressView().controlSize(.small); Text("会話を読み込み中…") }
@@ -730,7 +770,7 @@ struct NotionAgentsPanel: View {
                                     }
                                     .frame(maxWidth: 720)
                                     .frame(maxWidth: .infinity)
-                                    .padding(.horizontal, 24).padding(.vertical, 18)
+                                    .padding(.horizontal, 24).padding(.vertical, 22)
                                 }
                                 .coordinateSpace(name: "conversation")
                                 .onPreferenceChange(ConversationBottomKey.self) { bottom in
@@ -752,7 +792,8 @@ struct NotionAgentsPanel: View {
                                             Label("最新のメッセージへ", systemImage: "arrow.down")
                                                 .font(.caption.weight(.medium))
                                         }
-                                        .buttonStyle(.borderedProminent)
+                                        .buttonStyle(.bordered)
+                                        .tint(NotionPanelTheme.purple)
                                         .controlSize(.small)
                                         .padding(.bottom, 12)
                                     }
@@ -763,6 +804,7 @@ struct NotionAgentsPanel: View {
                             HStack(alignment: .bottom, spacing: 12) {
                                 TextField("エージェントにメッセージ", text: $draft, axis: .vertical)
                                     .lineLimit(1...5).textFieldStyle(.plain)
+                                    .font(.system(size: 14))
                                     .onKeyPress(.return, phases: .down) { key in
                                         if key.modifiers.contains(.command) { send(); return .handled }
                                         return .ignored
@@ -771,13 +813,17 @@ struct NotionAgentsPanel: View {
                                     if store.isSending { ProgressView().controlSize(.small) }
                                     else { Image(systemName: "arrow.up").font(.system(size: 13, weight: .bold)) }
                                 }
-                                    .buttonStyle(.borderedProminent)
-                                    .clipShape(Circle())
+                                    .buttonStyle(.plain)
+                                    .foregroundStyle(.white)
+                                    .frame(width: 30, height: 30)
+                                    .background(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                                ? NotionPanelTheme.muted : NotionPanelTheme.purple,
+                                                in: RoundedRectangle(cornerRadius: 8))
                                     .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.isSending)
                             }
-                            .padding(.horizontal, 16).padding(.vertical, 12)
-                            .background(Color.white.opacity(0.075), in: RoundedRectangle(cornerRadius: 20))
-                            .overlay(RoundedRectangle(cornerRadius: 20).stroke(.white.opacity(0.11)))
+                            .padding(.horizontal, 14).padding(.vertical, 10)
+                            .background(NotionPanelTheme.canvas, in: RoundedRectangle(cornerRadius: 12))
+                            .overlay(RoundedRectangle(cornerRadius: 12).stroke(NotionPanelTheme.hairline))
                             .padding(.horizontal, 20)
                             Text("⌘↩ で送信")
                                 .font(.caption2).foregroundStyle(.tertiary)
@@ -810,11 +856,15 @@ struct NotionAgentsPanel: View {
                 .disabled(!store.hasToken || store.visibleAgents.isEmpty || store.isRefreshing)
                 .help("エージェントと会話を強制取得")
             }
-            .buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)
+            .buttonStyle(.plain).font(.caption).foregroundStyle(NotionPanelTheme.muted)
             .frame(height: 38).padding(.horizontal, 16)
+            .background(NotionPanelTheme.softSurface)
         }
-        .background(.ultraThickMaterial, in: RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.12)))
+        .foregroundStyle(NotionPanelTheme.ink)
+        .tint(Color(red: 0, green: 0.459, blue: 0.871))
+        .environment(\.colorScheme, .light)
+        .background(NotionPanelTheme.canvas, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(NotionPanelTheme.hairline))
         .onAppear { store.start() }
     }
 
@@ -850,7 +900,8 @@ private struct NotionThinkingView: View {
                 Text(phrases[phraseIndex]).font(.callout).foregroundStyle(.secondary)
             }
             .padding(.horizontal, 15).padding(.vertical, 12)
-            .background(Color.white.opacity(0.075), in: RoundedRectangle(cornerRadius: 17))
+            .background(NotionPanelTheme.softSurface, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(NotionPanelTheme.hairline))
             Spacer()
         }
         .task {
