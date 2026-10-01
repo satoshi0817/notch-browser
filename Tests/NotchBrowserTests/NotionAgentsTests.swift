@@ -5,6 +5,36 @@ import XCTest
 @testable import NotchBrowser
 
 final class NotionAgentsTests: XCTestCase {
+    @MainActor
+    func testNewChatOpensAnEmptyConversationAndHistorySelectionLeavesDraftMode() async {
+        let settings = SettingsStore.shared
+        let saved = settings.data
+        defer { settings.data = saved }
+        settings.data.notionEnabled = false
+        settings.data.notionSavedAgents = [SavedNotionAgent(id: "agent-1", name: "Writer")]
+        let cacheURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NotionAgentsCache-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: cacheURL) }
+        let store = NotionAgentsStore(tokenProvider: { "test-token" },
+            pendingRepliesKey: "notion-new-chat-test-\(UUID().uuidString)", cache: NotionAgentsCache(url: cacheURL))
+
+        await store.selectAgent("agent-1")
+        XCTAssertNil(store.selectedThreadID)
+        XCTAssertFalse(store.isNewChat)
+        store.beginNewChat()
+        XCTAssertTrue(store.isNewChat)
+        XCTAssertNil(store.selectedThreadID)
+        XCTAssertTrue(store.visibleMessages.isEmpty)
+
+        await store.selectThread("thread-1")
+        XCTAssertEqual(store.selectedThreadID, "thread-1")
+        XCTAssertFalse(store.isNewChat)
+        store.beginNewChat()
+        store.showHistory()
+        XCTAssertNil(store.selectedThreadID)
+        XCTAssertFalse(store.isNewChat)
+    }
+
     func testMessagesSortByActualTimeAcrossFractionalAndWholeSecondTimestamps() throws {
         func message(_ id: String, _ time: String) throws -> NotionMessage {
             try JSONDecoder().decode(NotionMessage.self, from: Data("""

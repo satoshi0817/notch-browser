@@ -453,6 +453,7 @@ final class NotionAgentsStore: ObservableObject {
     @Published private(set) var noticeText: String?
     @Published var selectedAgentID: String?
     @Published var selectedThreadID: String?
+    @Published private(set) var isNewChat = false
     @Published var error: String?
     @Published var isSending = false
     @Published private(set) var isResponding = false
@@ -500,6 +501,12 @@ final class NotionAgentsStore: ObservableObject {
     var hasPendingMessageForSelectedAgent: Bool {
         pendingMessages.contains { $0.agentID == selectedAgentID && $0.threadID == selectedThreadID }
     }
+    var isSelectedConversationBusy: Bool {
+        guard let agentID = selectedAgentID else { return false }
+        guard let threadID = selectedThreadID else { return hasPendingMessageForSelectedAgent }
+        return pendingReplies["\(agentID):\(threadID)"] != nil || hasPendingMessageForSelectedAgent ||
+            threads.first(where: { $0.id == threadID }).map(isThreadBusy) == true
+    }
     var visibleMessages: [NotionMessage] {
         NotionConversation.display(messages,
             pending: pendingMessages.filter { $0.agentID == selectedAgentID && $0.threadID == selectedThreadID })
@@ -527,7 +534,7 @@ final class NotionAgentsStore: ObservableObject {
         threads = []; messages = []; pendingMessages = []; busyAgentIDs = []; observed = [:]; metadataChecked = []; baselinedAgentIDs = []; error = nil
         cache.clear()
         pendingReplies = [:]; savePendingReplies()
-        selectedAgentID = nil; selectedThreadID = nil
+        selectedAgentID = nil; selectedThreadID = nil; isNewChat = false
         start()
     }
 
@@ -544,6 +551,7 @@ final class NotionAgentsStore: ObservableObject {
         if !ids.contains(selectedAgentID ?? "") {
             selectedAgentID = visibleAgents.first?.id
             selectedThreadID = nil
+            isNewChat = false
             threads = selectedAgentID.map { cache.threads(for: $0) } ?? []
             messages = []
         }
@@ -634,6 +642,7 @@ final class NotionAgentsStore: ObservableObject {
         if !registered.contains(where: { $0.id == selectedAgentID }) {
             selectedAgentID = registered.first?.id
             selectedThreadID = nil
+            isNewChat = false
             threads = selectedAgentID.map { cache.threads(for: $0) } ?? []
             messages = []
         }
@@ -741,7 +750,7 @@ final class NotionAgentsStore: ObservableObject {
     }
 
     func selectAgent(_ id: String) async {
-        selectedAgentID = id; selectedThreadID = nil; messages = []
+        selectedAgentID = id; selectedThreadID = nil; isNewChat = false; messages = []
         threads = cache.threads(for: id)
         guard SettingsStore.shared.data.notionEnabled else { return }
         guard let token = tokenProvider() else { return }
@@ -758,7 +767,7 @@ final class NotionAgentsStore: ObservableObject {
     }
 
     func selectThread(_ id: String) async {
-        selectedThreadID = id; messages = cache.messages(for: id)
+        selectedThreadID = id; isNewChat = false; messages = cache.messages(for: id)
         guard SettingsStore.shared.data.notionEnabled else { return }
         guard let agentID = selectedAgentID else { return }
         guard let token = tokenProvider() else { return }
@@ -774,13 +783,20 @@ final class NotionAgentsStore: ObservableObject {
         catch { self.error = error.localizedDescription }
     }
 
-    func showHistory() { selectedThreadID = nil; messages = [] }
+    func showHistory() { selectedThreadID = nil; isNewChat = false; messages = [] }
+
+    func beginNewChat() {
+        selectedThreadID = nil
+        messages = []
+        isNewChat = true
+    }
 
     func openThread(agentID: String, threadID: String) {
         guard SettingsStore.shared.data.notionEnabled else { return }
         selectedAgentID = agentID
         threads = cache.threads(for: agentID)
         selectedThreadID = threadID
+        isNewChat = false
         messages = cache.messages(for: threadID)
         Task { @MainActor in await refresh(forceFull: true) }
     }
@@ -823,6 +839,7 @@ final class NotionAgentsStore: ObservableObject {
             }
             if selectedAgentID == agentID && selectedThreadID == sendingThreadID {
                 selectedThreadID = invocation.thread_id
+                isNewChat = false
                 messages = cache.messages(for: invocation.thread_id)
             }
             busyAgentIDs.insert(agentID)
@@ -871,6 +888,8 @@ struct NotionAgentsPanel: View {
     @State private var draft = ""
     @State private var tokenDraft = ""
     @State private var showJumpToBottom = false
+    @State private var historyPeekOpen = false
+    @FocusState private var composerFocused: Bool
     let onOpenSettings: () -> Void
     private var canSend: Bool {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !store.isSending
@@ -878,16 +897,6 @@ struct NotionAgentsPanel: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Image(systemName: "sparkles.rectangle.stack")
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(NotionPanelTheme.blue)
-                    .frame(width: 28, height: 28)
-                    .background(NotionPanelTheme.blueWash,
-                                in: RoundedRectangle(cornerRadius: 8))
-                Text("Notionエージェント").font(.system(size: 15, weight: .semibold))
-                Spacer()
-            }.buttonStyle(.plain).padding(.horizontal, 20).padding(.vertical, 14)
             if let notice = store.noticeText {
                 HStack { Image(systemName: "bell.badge.fill"); Text(notice); Spacer() }
                     .font(.caption.weight(.medium)).foregroundStyle(NotionPanelTheme.ink)
@@ -896,7 +905,6 @@ struct NotionAgentsPanel: View {
                                 in: RoundedRectangle(cornerRadius: 8))
                     .padding(.horizontal, 20).padding(.bottom, 10)
             }
-            Divider()
             if !store.hasToken {
                 VStack(alignment: .leading, spacing: 12) {
                     Label("Notionを接続", systemImage: "key").font(.headline)
@@ -951,7 +959,20 @@ struct NotionAgentsPanel: View {
                                 NotionAgentAvatar(agent: agent, size: 26)
                                 Text(agent.name).font(.system(size: 15, weight: .semibold)).lineLimit(1)
                                 Spacer()
-                                Button { store.showHistory() } label: {
+                                Button { historyPeekOpen.toggle() } label: {
+                                    Label("履歴", systemImage: "sidebar.right")
+                                        .font(.system(size: 12, weight: .medium))
+                                }
+                                .buttonStyle(.plain)
+                                .padding(.horizontal, 9).padding(.vertical, 7)
+                                .background(historyPeekOpen ? NotionPanelTheme.blueWash : NotionPanelTheme.softSurface,
+                                            in: RoundedRectangle(cornerRadius: 8))
+                                .help("チャット履歴を横に表示")
+                                Button {
+                                    draft = ""
+                                    store.beginNewChat()
+                                    DispatchQueue.main.async { composerFocused = true }
+                                } label: {
                                     Label("新しいチャット", systemImage: "square.and.pencil")
                                         .font(.system(size: 12, weight: .medium))
                                 }
@@ -961,43 +982,15 @@ struct NotionAgentsPanel: View {
                                 .help("新しいチャット")
                             }.padding(.horizontal, 20).padding(.vertical, 14)
                             Divider()
-                            if store.selectedThreadID == nil && !store.hasPendingMessageForSelectedAgent {
-                                ScrollView {
-                                    LazyVStack(alignment: .leading, spacing: 6) {
-                                        ForEach(store.threads) { thread in
-                                            Button { Task { @MainActor in await store.selectThread(thread.id) } } label: {
-                                                HStack(spacing: 10) {
-                                                    Image(systemName: thread.status == "requires_action" ? "exclamationmark.circle.fill" : "bubble.left")
-                                                        .foregroundStyle(thread.status == "requires_action" ? .orange : .secondary)
-                                                    VStack(alignment: .leading, spacing: 2) {
-                                                        Text(thread.title.isEmpty ? "無題のチャット" : thread.title)
-                                                            .font(.system(size: 13, weight: .medium)).lineLimit(2)
-                                                        Text(thread.status == "requires_action" ? "確認待ち" : store.isThreadBusy(thread) ? "稼働中" : "履歴")
-                                                            .font(.caption2).foregroundStyle(.secondary)
-                                                    }
-                                                    Spacer()
-                                                }
-                                                .padding(12)
-                                                .frame(maxWidth: .infinity, alignment: .leading)
-                                                .background(NotionPanelTheme.softSurface,
-                                                            in: RoundedRectangle(cornerRadius: 10))
-                                                .overlay(RoundedRectangle(cornerRadius: 10)
-                                                    .stroke(NotionPanelTheme.hairline))
-                                            }.buttonStyle(.plain)
-                                        }
-                                    }.padding(20)
-                                }
+                            HStack(spacing: 0) {
+                            VStack(spacing: 0) {
+                            if store.selectedThreadID == nil && !store.isNewChat && !store.hasPendingMessageForSelectedAgent {
+                                historyList
                             } else {
                                 ScrollViewReader { proxy in
                                 GeometryReader { geometry in
                                 ScrollView {
                                     LazyVStack(alignment: .leading, spacing: 17) {
-                                        Button { store.showHistory() } label: {
-                                            Label("履歴に戻る", systemImage: "chevron.left")
-                                                .font(.system(size: 12, weight: .medium))
-                                        }
-                                        .buttonStyle(.plain)
-                                        .foregroundStyle(NotionPanelTheme.muted)
                                         if store.visibleMessages.isEmpty && store.isLoadingMessages {
                                             HStack(spacing: 8) { ProgressView().controlSize(.small); Text("会話を読み込み中…") }
                                                 .foregroundStyle(.secondary).padding(.top, 20)
@@ -1005,7 +998,7 @@ struct NotionAgentsPanel: View {
                                         ForEach(store.visibleMessages) { message in
                                             NotionMessageView(message: message, agent: agent)
                                         }
-                                        if store.busyAgentIDs.contains(agent.id) {
+                                        if store.isSelectedConversationBusy {
                                             NotionThinkingView(agent: agent)
                                         }
                                         ForEach(store.threads.first(where: { $0.id == store.selectedThreadID })?.pending_user_actions ?? []) { action in
@@ -1038,9 +1031,10 @@ struct NotionAgentsPanel: View {
                                 .coordinateSpace(name: "conversation")
                                 .overlay {
                                     if store.visibleMessages.isEmpty && !store.isLoadingMessages &&
-                                        !store.busyAgentIDs.contains(agent.id) {
-                                        ContentUnavailableView("メッセージがありません", systemImage: "bubble.left",
-                                                               description: Text("このチャットには表示できるメッセージがありません。"))
+                                        !store.isSelectedConversationBusy {
+                                        ContentUnavailableView(store.isNewChat ? "新しいチャット" : "メッセージがありません",
+                                                               systemImage: "bubble.left",
+                                                               description: Text(store.isNewChat ? "下の入力欄からメッセージを送信してください。" : "このチャットには表示できるメッセージがありません。"))
                                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                                     }
                                 }
@@ -1072,11 +1066,13 @@ struct NotionAgentsPanel: View {
                                 }
                                 }
                             }
+                            if store.selectedThreadID != nil || store.isNewChat || store.hasPendingMessageForSelectedAgent {
                             HStack(alignment: .center, spacing: 12) {
                                 TextField("エージェントにメッセージ", text: $draft, axis: .vertical)
                                     .lineLimit(1...5).textFieldStyle(.plain)
                                     .font(.system(size: 14))
                                     .frame(minHeight: 30, alignment: .center)
+                                    .focused($composerFocused)
                                     .onKeyPress(.return, phases: .down) { key in
                                         if key.modifiers.contains(.command) { send(); return .handled }
                                         return .ignored
@@ -1101,6 +1097,16 @@ struct NotionAgentsPanel: View {
                                 .font(.caption2).foregroundStyle(.tertiary)
                                 .frame(maxWidth: .infinity, alignment: .trailing)
                                 .padding(.horizontal, 24).padding(.bottom, 12)
+                            }
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            if historyPeekOpen {
+                                Divider()
+                                historyPeek
+                                    .frame(width: 236)
+                                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                            }
+                            }
                         } else {
                             VStack(spacing: 10) {
                                 ContentUnavailableView("エージェントが未登録です", systemImage: "sparkles", description: Text("URL・IDまたは名前検索で追加してください。"))
@@ -1137,6 +1143,89 @@ struct NotionAgentsPanel: View {
         .background(NotionPanelTheme.canvas, in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(NotionPanelTheme.hairline))
         .onAppear { store.start() }
+        .onChange(of: store.selectedAgentID) { _, _ in
+            draft = ""
+            historyPeekOpen = false
+        }
+    }
+
+    private var historyList: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 8) {
+                if store.threads.isEmpty {
+                    ContentUnavailableView("まだチャットがありません", systemImage: "bubble.left",
+                                           description: Text("新しいチャットから会話を始めてください。"))
+                        .frame(maxWidth: .infinity, minHeight: 300)
+                } else {
+                    Text("最近のチャット")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(NotionPanelTheme.muted)
+                        .padding(.bottom, 4)
+                    ForEach(store.threads) { thread in threadRow(thread) }
+                }
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var historyPeek: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("チャット履歴").font(.system(size: 13, weight: .semibold))
+                Spacer()
+                Button { historyPeekOpen = false } label: {
+                    Image(systemName: "xmark").font(.system(size: 11, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .help("履歴を閉じる")
+            }
+            .padding(.horizontal, 14).padding(.vertical, 12)
+            Divider()
+            ScrollView {
+                LazyVStack(spacing: 6) {
+                    Button {
+                        draft = ""
+                        store.beginNewChat()
+                        DispatchQueue.main.async { composerFocused = true }
+                    } label: {
+                        Label("新しいチャット", systemImage: "square.and.pencil")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(10)
+                    }
+                    .buttonStyle(.plain)
+                    ForEach(store.threads) { thread in threadRow(thread) }
+                }
+                .padding(10)
+            }
+        }
+        .background(NotionPanelTheme.surface)
+    }
+
+    private func threadRow(_ thread: NotionThread) -> some View {
+        Button {
+            historyPeekOpen = true
+            Task { @MainActor in await store.selectThread(thread.id) }
+        } label: {
+            HStack(alignment: .top, spacing: 9) {
+                Image(systemName: thread.status == "requires_action" ? "exclamationmark.circle.fill" : "bubble.left")
+                    .foregroundStyle(thread.status == "requires_action" ? .orange : NotionPanelTheme.muted)
+                    .padding(.top, 2)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(thread.title.isEmpty ? "無題のチャット" : thread.title)
+                        .font(.system(size: 12, weight: .medium)).lineLimit(2)
+                    Text(thread.status == "requires_action" ? "確認待ち" : store.isThreadBusy(thread) ? "稼働中" : "履歴")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(store.selectedThreadID == thread.id ? NotionPanelTheme.blueWash : NotionPanelTheme.softSurface,
+                        in: RoundedRectangle(cornerRadius: 9))
+            .overlay(RoundedRectangle(cornerRadius: 9).stroke(NotionPanelTheme.hairline))
+        }
+        .buttonStyle(.plain)
     }
 
     private func saveToken() {
