@@ -84,17 +84,116 @@ final class NotionAgentsTests: XCTestCase {
         XCTAssertTrue(NotionReplyTracking.shouldPoll(hasToken: true, panelVisible: false, pendingCount: 1))
         XCTAssertFalse(NotionReplyTracking.shouldPoll(hasToken: false, panelVisible: true, pendingCount: 1))
         XCTAssertNil(NotionReplyTracking.notificationTitle(status: "completed", baselineSignature: nil,
-            currentSignature: "completed:new", isPending: false))
+            currentSignature: "completed:new", reply: nil), "Thread completion alone must not stop polling")
         XCTAssertNil(NotionReplyTracking.notificationTitle(status: "completed", baselineSignature: "completed:old",
-            currentSignature: "completed:old", isPending: true))
+            currentSignature: "completed:old", reply: nil))
         XCTAssertNil(NotionReplyTracking.notificationTitle(status: "in_progress", baselineSignature: "completed:old",
-            currentSignature: "in_progress:new", isPending: true))
-        XCTAssertEqual(NotionReplyTracking.notificationTitle(status: "completed", baselineSignature: "completed:old",
-            currentSignature: "completed:new", isPending: true), "返信が届きました")
+            currentSignature: "in_progress:new", reply: nil))
         XCTAssertEqual(NotionReplyTracking.notificationTitle(status: "requires_action", baselineSignature: nil,
-            currentSignature: "requires_action:new", isPending: true), "確認が必要です")
+            currentSignature: "requires_action:new", reply: nil), "確認が必要です")
         XCTAssertTrue(NotionReplyTracking.hasStoppedWithoutReply(status: "failed"))
         XCTAssertFalse(NotionReplyTracking.hasStoppedWithoutReply(status: "in_progress"))
+    }
+
+    func testReplyTrackingWaitsForTheAnswerToOurQuestion() {
+        let sentAt = ISO8601DateFormatter().date(from: "2026-10-01T02:00:00Z")!
+        let ownHash = NotionReplyTracking.fingerprint("自分の質問")
+        let messages = [
+            NotionMessage(id: "old-user", role: "user", content: "他人の質問",
+                          created_time: "2026-10-01T01:59:00Z", pending_user_actions: nil),
+            NotionMessage(id: "old-reply", role: "agent", content: "前の返信",
+                          created_time: "2026-10-01T01:59:05Z", pending_user_actions: nil),
+            NotionMessage(id: "own-user", role: "user", content: "自分の質問",
+                          created_time: "2026-10-01T02:00:01Z", pending_user_actions: nil),
+        ]
+        XCTAssertNil(NotionReplyTracking.reply(in: messages, messageFingerprint: ownHash,
+                                               sentAt: sentAt, baselineSignature: nil))
+        let otherQuestion = NotionMessage(id: "other-user", role: "user", content: "別の質問",
+                                          created_time: "2026-10-01T02:00:05Z", pending_user_actions: nil)
+        let answer = NotionMessage(id: "own-reply", role: "agent", content: "回答",
+                                   created_time: "2026-10-01T02:00:10Z", pending_user_actions: nil)
+        XCTAssertNil(NotionReplyTracking.reply(in: messages + [otherQuestion, answer],
+            messageFingerprint: ownHash, sentAt: sentAt, baselineSignature: nil),
+            "Another user's later question must not turn its answer into our notification")
+        XCTAssertEqual(NotionReplyTracking.reply(in: messages + [answer], messageFingerprint: ownHash,
+                                                sentAt: sentAt, baselineSignature: nil)?.id, answer.id)
+        XCTAssertEqual(NotionReplyTracking.notificationTitle(status: nil, baselineSignature: nil,
+            currentSignature: nil, reply: answer), "返信が届きました",
+            "A reply must be noticed even when the thread falls outside the first history page")
+    }
+
+    func testPendingReplySavedByPreviousReleaseStillLoads() {
+        let key = "notion-legacy-poll-test-\(UUID().uuidString)"
+        defer { UserDefaults.standard.removeObject(forKey: key) }
+        UserDefaults.standard.set(Data("""
+        {"agent-1:thread-1":{"agentID":"agent-1","threadID":"thread-1","baselineSignature":null}}
+        """.utf8), forKey: key)
+        let store = NotionAgentsStore(tokenProvider: { nil }, pendingRepliesKey: key)
+        XCTAssertEqual(store.pendingReplyCount, 1)
+    }
+
+    @MainActor
+    func testCompletedThreadKeepsPollingUntilReplyAppearsEvenWhenHistoryOmitsIt() async throws {
+        let settings = SettingsStore.shared
+        let saved = settings.data
+        defer { settings.data = saved }
+        settings.data.notionSavedAgents = [SavedNotionAgent(id: "agent-1", name: "Test agent")]
+        settings.data.notionNotificationsEnabled = true
+        let persistenceKey = "notion-poll-test-\(UUID().uuidString)"
+        defer { UserDefaults.standard.removeObject(forKey: persistenceKey) }
+        final class ResponseState { var phase = 0 }
+        let state = ResponseState()
+        let questionTime = ISO8601DateFormatter().string(from: Date())
+        let replyTime = ISO8601DateFormatter().string(from: Date().addingTimeInterval(1))
+        let api = NotionAgentsAPI(token: "test-token") { request in
+            let path = request.url!.path
+            let json: String
+            switch (path, request.httpMethod) {
+            case ("/v1/agents", _):
+                json = """
+                {"results":[{"id":"agent-1","name":"Test agent","agent_type":"custom_agent","status":"active"}],"has_more":false,"next_cursor":null}
+                """
+            case ("/v1/agents/agent-1/threads", _):
+                let results = state.phase == 2 ? "[]" : """
+                [{"id":"thread-1","title":"Chat","status":"completed","last_edited_time":"2026-10-01T02:00:0\(state.phase)Z"}]
+                """
+                json = "{\"results\":\(results),\"has_more\":false,\"next_cursor\":null}"
+            case ("/v1/threads/thread-1/messages", "POST"):
+                state.phase = 1
+                json = "{\"thread_id\":\"thread-1\",\"status\":\"queued\"}"
+            case ("/v1/threads/thread-1/messages", _):
+                let question = "{\"id\":\"question\",\"role\":\"user\",\"content\":\"自分の質問\",\"created_time\":\"\(questionTime)\"}"
+                let answer = "{\"id\":\"answer\",\"role\":\"agent\",\"content\":\"自分への回答\",\"created_time\":\"\(replyTime)\"}"
+                json = "{\"results\":[\(question)\(state.phase == 2 ? "," + answer : "")],\"has_more\":false,\"next_cursor\":null}"
+            default:
+                throw NotionAPIError.invalidResponse
+            }
+            return (Data(json.utf8), HTTPURLResponse(url: request.url!, statusCode: 200,
+                                                       httpVersion: nil, headerFields: nil)!)
+        }
+        let store = NotionAgentsStore(tokenProvider: { "test-token" }, apiFactory: { _ in api },
+                                      pendingRepliesKey: persistenceKey)
+        await store.refresh(forceFull: true)
+        store.selectedThreadID = "thread-1"
+        let sent = await store.send("自分の質問")
+        XCTAssertTrue(sent)
+        await store.refresh(forceFull: true)
+        XCTAssertEqual(store.pendingReplyCount, 1, "A completed status without an agent message is still waiting")
+        XCTAssertTrue(store.isPolling)
+        let restored = NotionAgentsStore(tokenProvider: { "test-token" }, apiFactory: { _ in api },
+                                         pendingRepliesKey: persistenceKey)
+        restored.start()
+        XCTAssertEqual(restored.pendingReplyCount, 1, "Pending replies must survive an app restart")
+        XCTAssertTrue(restored.isPolling)
+        state.phase = 2
+        for _ in 0..<20 where restored.pendingReplyCount > 0 {
+            await restored.refresh()
+            if restored.pendingReplyCount > 0 { try await Task.sleep(for: .milliseconds(20)) }
+        }
+        XCTAssertEqual(restored.alert?.title, "返信が届きました")
+        XCTAssertEqual(restored.alert?.preview, "自分への回答")
+        XCTAssertEqual(restored.pendingReplyCount, 0)
+        XCTAssertFalse(restored.isPolling)
     }
 
     func testReplyAlertCoversNewAndCompletedThreadsWithoutRealertingOnSameState() throws {

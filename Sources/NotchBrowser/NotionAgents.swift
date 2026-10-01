@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CryptoKit
 import Security
 import SwiftUI
 
@@ -101,14 +102,47 @@ enum NotionReplyTracking {
         hasToken && (panelVisible || pendingCount > 0)
     }
 
-    static func notificationTitle(status: String, baselineSignature: String?, currentSignature: String,
-                                  isPending: Bool) -> String? {
-        guard isPending, baselineSignature != currentSignature else { return nil }
-        switch status {
-        case "requires_action": return "確認が必要です"
-        case "completed": return "返信が届きました"
-        default: return nil
+    static func fingerprint(_ content: String) -> String {
+        SHA256.hash(data: Data(content.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func reply(in messages: [NotionMessage], messageFingerprint: String?,
+                      sentAt: Date?, baselineSignature: String?) -> NotionMessage? {
+        let ordered = NotionMessage.oldestFirst(messages)
+        let baselineTime = baselineSignature.flatMap { signature -> Date? in
+            guard let separator = signature.firstIndex(of: ":") else { return nil }
+            return NotionMessage.parseDate(String(signature[signature.index(after: separator)...]))
         }
+        let earliest = baselineTime ?? sentAt?.addingTimeInterval(-120)
+        if let messageFingerprint {
+            guard let questionIndex = ordered.lastIndex(where: { message in
+                guard message.role == "user", fingerprint(message.content) == messageFingerprint else { return false }
+                guard let earliest else { return true }
+                return message.date.map { $0 >= earliest } == true
+            }) else { return nil }
+            for message in ordered.dropFirst(questionIndex + 1) {
+                if message.role == "user" { return nil }
+                if !message.content.isEmpty { return message }
+            }
+            return nil
+        }
+        // Action responses have no new user message. Older persisted pending records also lack a fingerprint.
+        let cutoff = [sentAt?.addingTimeInterval(-5), baselineTime].compactMap { $0 }.max()
+        guard let cutoff else {
+            // Pending records saved before this version have no send time or fingerprint.
+            guard let latestQuestion = ordered.lastIndex(where: { $0.role == "user" }) else { return nil }
+            return ordered.dropFirst(latestQuestion + 1).first { $0.role != "user" && !$0.content.isEmpty }
+        }
+        return ordered.last { $0.role != "user" && !$0.content.isEmpty && $0.date.map { $0 > cutoff } == true }
+    }
+
+    static func notificationTitle(status: String?, baselineSignature: String?, currentSignature: String?,
+                                  reply: NotionMessage?) -> String? {
+        if reply != nil { return "返信が届きました" }
+        if status == "requires_action", let currentSignature, baselineSignature != currentSignature {
+            return "確認が必要です"
+        }
+        return nil
     }
 
     static func hasStoppedWithoutReply(status: String) -> Bool {
@@ -122,6 +156,13 @@ struct NotionMessage: Decodable, Identifiable {
     let content: String
     let created_time: String
     let pending_user_actions: [NotionAction]?
+
+    static func parseDate(_ value: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+    }
+    var date: Date? { Self.parseDate(created_time) }
 
     func confirms(_ pending: NotionMessage) -> Bool {
         guard role == "user", content == pending.content else { return false }
@@ -334,13 +375,17 @@ final class NotionAgentsStore: ObservableObject {
         var threadID: String?
         var id: String { message.id }
     }
-    private struct PendingReply: Codable {
+    private struct PendingReply: Codable, Equatable {
         let agentID: String
         let threadID: String
         let baselineSignature: String?
+        let sentAt: Date?
+        let messageFingerprint: String?
     }
-    private static let pendingRepliesKey = "notionPendingReplies"
     static let shared = NotionAgentsStore()
+    private let tokenProvider: () -> String?
+    private let apiFactory: (String) -> NotionAgentsAPI
+    private let pendingRepliesKey: String
     @Published private(set) var threads: [NotionThread] = []
     @Published private(set) var messages: [NotionMessage] = []
     @Published private(set) var pendingMessages: [PendingOutbound] = []
@@ -356,20 +401,33 @@ final class NotionAgentsStore: ObservableObject {
     @Published private(set) var isLoadingMessages = false
     @Published private(set) var activityText: String?
     @Published private(set) var lastUpdatedAt: Date?
-    @Published private(set) var hasToken = NotionTokenStore.read() != nil
+    @Published private(set) var hasToken = false
     private var timer: Timer?
     private var timerInterval: TimeInterval?
     private var isPanelVisible = false
-    private var pendingReplies: [String: PendingReply] = {
-        guard let data = UserDefaults.standard.data(forKey: pendingRepliesKey) else { return [:] }
-        return (try? JSONDecoder().decode([String: PendingReply].self, from: data)) ?? [:]
-    }()
+    private var pendingReplies: [String: PendingReply] = [:]
     private var observed: [String: String] = [:]
     private var metadataChecked: Set<String> = []
     private var baselinedAgentIDs: Set<String> = []
     private var refreshInProgress = false
     private var refreshQueued = false
     private var refreshQueuedFull = false
+    var pendingReplyCount: Int { pendingReplies.count }
+    var isPolling: Bool { timer != nil }
+
+    init(tokenProvider: @escaping () -> String? = { NotionTokenStore.read() },
+         apiFactory: @escaping (String) -> NotionAgentsAPI = { NotionAgentsAPI(token: $0) },
+         pendingRepliesKey: String = "notionPendingReplies") {
+        self.tokenProvider = tokenProvider
+        self.apiFactory = apiFactory
+        self.pendingRepliesKey = pendingRepliesKey
+        hasToken = tokenProvider() != nil
+        if let data = UserDefaults.standard.data(forKey: pendingRepliesKey) {
+            pendingReplies = (try? JSONDecoder().decode([String: PendingReply].self, from: data)) ?? [:]
+        }
+    }
+
+    deinit { timer?.invalidate() }
     var visibleAgents: [SavedNotionAgent] { SettingsStore.shared.data.notionSavedAgents }
     var hasPendingMessageForSelectedAgent: Bool {
         pendingMessages.contains { $0.agentID == selectedAgentID && $0.threadID == selectedThreadID }
@@ -395,7 +453,7 @@ final class NotionAgentsStore: ObservableObject {
         guard NotionTokenStore.save(token.trimmingCharacters(in: .whitespacesAndNewlines)) else {
             error = "トークンをキーチェーンに保存できませんでした。"; return
         }
-        hasToken = NotionTokenStore.read() != nil
+        hasToken = tokenProvider() != nil
         threads = []; messages = []; pendingMessages = []; busyAgentIDs = []; observed = [:]; metadataChecked = []; baselinedAgentIDs = []; error = nil
         pendingReplies = [:]; savePendingReplies()
         selectedAgentID = nil; selectedThreadID = nil
@@ -422,6 +480,7 @@ final class NotionAgentsStore: ObservableObject {
     }
 
     func start() {
+        hasToken = tokenProvider() != nil
         let ids = Set(visibleAgents.map(\.id))
         let valid = pendingReplies.filter { ids.contains($0.value.agentID) }
         if valid.count != pendingReplies.count { pendingReplies = valid; savePendingReplies() }
@@ -447,22 +506,24 @@ final class NotionAgentsStore: ObservableObject {
         let wasPolling = timer != nil
         timer?.invalidate()
         timerInterval = interval
-        timer = .scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+        timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.refresh() }
         }
+        if let timer { RunLoop.main.add(timer, forMode: .common) }
         if !wasPolling {
             Task { @MainActor in await refresh() }
         }
     }
 
     private func savePendingReplies() {
-        UserDefaults.standard.set(try? JSONEncoder().encode(pendingReplies), forKey: Self.pendingRepliesKey)
+        UserDefaults.standard.set(try? JSONEncoder().encode(pendingReplies), forKey: pendingRepliesKey)
     }
 
     func refresh(forceFull: Bool = false) async {
-        guard hasToken, let token = NotionTokenStore.read() else { return }
+        guard hasToken, let token = tokenProvider() else { return }
         if refreshInProgress {
-            if forceFull { refreshQueued = true; refreshQueuedFull = true }
+            refreshQueued = true
+            refreshQueuedFull = refreshQueuedFull || forceFull
             return
         }
         refreshInProgress = true
@@ -486,7 +547,7 @@ final class NotionAgentsStore: ObservableObject {
             selectedAgentID = registered.first?.id
             selectedThreadID = nil; threads = []; messages = []
         }
-        let api = NotionAgentsAPI(token: token)
+        let api = apiFactory(token)
         do {
             var running = Set<String>()
             var failures: [String] = []
@@ -513,38 +574,44 @@ final class NotionAgentsStore: ObservableObject {
                         }
                     } catch { failures.append("\(agent.name): 名前の取得に失敗しました（\(error.localizedDescription)）") }
                 }
-                let list: [NotionThread]
+                let list: [NotionThread]?
                 do { list = try await api.threads(agentID: agent.id, allPages: false) }
-                catch { failures.append("\(agent.name): \(error.localizedDescription)"); continue }
-                if agent.id == selectedAgentID { threads = list }
-                for thread in list {
+                catch { list = nil; failures.append("\(agent.name): \(error.localizedDescription)") }
+                if agent.id == selectedAgentID, let list { threads = list }
+                for thread in list ?? [] {
                     let key = "\(agent.id):\(thread.id)"
                     if thread.isRunning && (isPanelVisible || pendingReplies[key] != nil) { running.insert(agent.id) }
-                    let signature = "\(thread.status):\(thread.last_edited_time)"
-                    if let pending = pendingReplies[key],
-                       let title = NotionReplyTracking.notificationTitle(status: thread.status,
-                           baselineSignature: pending.baselineSignature, currentSignature: signature,
-                           isPending: true) {
+                    observed[key] = "\(thread.status):\(thread.last_edited_time)"
+                }
+                // Track our own outstanding threads directly: they can fall off the first history page.
+                let waiting = pendingReplies.filter { $0.value.agentID == agent.id }
+                for (key, pending) in waiting {
+                    guard pendingReplies[key] == pending else { continue }
+                    let thread = list?.first { $0.id == pending.threadID }
+                    let signature = thread.map { "\($0.status):\($0.last_edited_time)" }
+                    let fetched = try? await api.messages(threadID: pending.threadID)
+                    guard pendingReplies[key] == pending else { continue }
+                    if let fetched, selectedThreadID == pending.threadID {
+                        applyMessages(fetched, threadID: pending.threadID)
+                    }
+                    let reply = fetched.flatMap { NotionReplyTracking.reply(in: $0,
+                        messageFingerprint: pending.messageFingerprint, sentAt: pending.sentAt,
+                        baselineSignature: pending.baselineSignature) }
+                    if let title = NotionReplyTracking.notificationTitle(status: thread?.status,
+                        baselineSignature: pending.baselineSignature, currentSignature: signature, reply: reply) {
                         pendingReplies.removeValue(forKey: key)
                         savePendingReplies()
                         if SettingsStore.shared.data.notionNotificationsEnabled {
                             let name = visibleAgents.first(where: { $0.id == agent.id })?.name ?? agent.name
-                            let preview: String
-                            if let fetched = try? await api.messages(threadID: thread.id),
-                               let reply = fetched.last(where: { $0.role != "user" }) {
-                                preview = NotionReplyFormatter.preview(reply.content)
-                            } else {
-                                preview = thread.title
-                            }
+                            let preview = reply.map { NotionReplyFormatter.preview($0.content) } ?? thread?.title ?? ""
                             noticeText = "\(name): \(title)"
-                            alert = (agent.id, thread.id, title, preview.isEmpty ? thread.title : preview)
+                            alert = (agent.id, pending.threadID, title, preview.isEmpty ? title : preview)
                         }
-                    } else if pendingReplies[key] != nil,
-                              NotionReplyTracking.hasStoppedWithoutReply(status: thread.status) {
+                    } else if let status = thread?.status,
+                              NotionReplyTracking.hasStoppedWithoutReply(status: status) {
                         pendingReplies.removeValue(forKey: key)
                         savePendingReplies()
                     }
-                    observed[key] = signature
                 }
                 baselinedAgentIDs.insert(agent.id)
             }
@@ -562,11 +629,11 @@ final class NotionAgentsStore: ObservableObject {
 
     func selectAgent(_ id: String) async {
         selectedAgentID = id; selectedThreadID = nil; messages = []; threads = []
-        guard let token = NotionTokenStore.read() else { return }
+        guard let token = tokenProvider() else { return }
         activityText = "チャット履歴を読み込み中…"
         defer { activityText = nil }
         do {
-            let fetched = try await NotionAgentsAPI(token: token).threads(agentID: id, allPages: false)
+            let fetched = try await apiFactory(token).threads(agentID: id, allPages: false)
             if selectedAgentID == id { threads = fetched }
             lastUpdatedAt = Date()
             error = nil
@@ -576,12 +643,12 @@ final class NotionAgentsStore: ObservableObject {
 
     func selectThread(_ id: String) async {
         selectedThreadID = id; messages = []
-        guard let token = NotionTokenStore.read() else { return }
+        guard let token = tokenProvider() else { return }
         isLoadingMessages = true
         activityText = "会話を読み込み中…"
         defer { isLoadingMessages = false; activityText = nil }
         do {
-            let fetched = try await NotionAgentsAPI(token: token).messages(threadID: id)
+            let fetched = try await apiFactory(token).messages(threadID: id)
             applyMessages(fetched, threadID: id)
             lastUpdatedAt = Date()
             error = nil
@@ -593,24 +660,28 @@ final class NotionAgentsStore: ObservableObject {
 
     @discardableResult
     func send(_ text: String) async -> Bool {
-        guard let agentID = selectedAgentID, let token = NotionTokenStore.read(),
+        guard let agentID = selectedAgentID, let token = tokenProvider(),
               !isSending, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
         let sendingThreadID = selectedThreadID
+        let sentAt = Date()
+        let baseline = sendingThreadID.flatMap { id in
+            observed["\(agentID):\(id)"] ?? threads.first(where: { $0.id == id })
+                .map { "\($0.status):\($0.last_edited_time)" }
+        }
         let outbound = PendingOutbound(
             message: NotionMessage(id: "pending-\(UUID().uuidString)", role: "user", content: text,
-                                   created_time: ISO8601DateFormatter().string(from: Date()),
+                                   created_time: ISO8601DateFormatter().string(from: sentAt),
                                    pending_user_actions: nil),
             agentID: agentID, threadID: sendingThreadID)
         pendingMessages.append(outbound)
         isSending = true; activityText = "メッセージを送信中…"
         defer { isSending = false; activityText = nil }
         do {
-            let invocation = try await NotionAgentsAPI(token: token).send(text, agentID: agentID, threadID: sendingThreadID)
+            let invocation = try await apiFactory(token).send(text, agentID: agentID, threadID: sendingThreadID)
             let key = "\(agentID):\(invocation.thread_id)"
-            let baseline = observed[key] ?? threads.first(where: { $0.id == invocation.thread_id })
-                .map { "\($0.status):\($0.last_edited_time)" }
             pendingReplies[key] = PendingReply(agentID: agentID, threadID: invocation.thread_id,
-                                               baselineSignature: baseline)
+                                               baselineSignature: baseline, sentAt: sentAt,
+                                               messageFingerprint: NotionReplyTracking.fingerprint(text))
             savePendingReplies()
             updatePolling()
             if let index = pendingMessages.firstIndex(where: { $0.id == outbound.id }) {
@@ -630,18 +701,20 @@ final class NotionAgentsStore: ObservableObject {
     }
 
     func respond(_ action: NotionAction, option: NotionAction.Option) async {
-        guard let threadID = selectedThreadID, let token = NotionTokenStore.read() else { return }
+        guard let threadID = selectedThreadID, let agentID = selectedAgentID,
+              let token = tokenProvider() else { return }
+        let sentAt = Date()
+        let key = "\(agentID):\(threadID)"
+        let baseline = observed[key]
         isResponding = true; activityText = "アクションを送信中…"
         defer { isResponding = false; activityText = nil }
         do {
-            _ = try await NotionAgentsAPI(token: token).respond(actionID: action.id, optionID: option.id, threadID: threadID)
-            if let agentID = selectedAgentID {
-                let key = "\(agentID):\(threadID)"
-                pendingReplies[key] = PendingReply(agentID: agentID, threadID: threadID,
-                                                   baselineSignature: observed[key])
-                savePendingReplies()
-                updatePolling()
-            }
+            _ = try await apiFactory(token).respond(actionID: action.id, optionID: option.id, threadID: threadID)
+            pendingReplies[key] = PendingReply(agentID: agentID, threadID: threadID,
+                                               baselineSignature: baseline, sentAt: sentAt,
+                                               messageFingerprint: nil)
+            savePendingReplies()
+            updatePolling()
             alert = nil
             await refresh()
         } catch { self.error = error.localizedDescription }
