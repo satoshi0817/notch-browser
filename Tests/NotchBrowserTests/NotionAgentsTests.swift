@@ -161,7 +161,8 @@ final class NotionAgentsTests: XCTestCase {
         let pending = NotionAgentsStore.PendingOutbound(
             message: NotionMessage(id: "pending", role: "user", content: "質問",
                                    created_time: "2026-10-01T02:00:10Z", pending_user_actions: nil),
-            agentID: "agent-1", threadID: "thread-1", baselineTime: baseline)
+            agentID: "agent-1", threadID: "thread-1", baselineTime: baseline,
+            knownMessageIDs: ["old-reply"])
         let oldReply = NotionMessage(id: "old-reply", role: "agent", content: "前の回答",
                                      created_time: "2026-10-01T02:00:00Z", pending_user_actions: nil)
         let newReply = NotionMessage(id: "new-reply", role: "agent", content: "新しい回答",
@@ -173,6 +174,36 @@ final class NotionAgentsTests: XCTestCase {
         XCTAssertEqual(NotionConversation.display([newReply, serverQuestion, oldReply, newReply],
                                                   pending: [pending]).map(\.id),
                        ["old-reply", "server-question", "new-reply"])
+    }
+
+    func testNewMessageIDsConfirmAReplyEvenWhenThreadTimestampIsAheadOfMessages() {
+        let baseline = NotionMessage.parseDate("2026-10-01T02:01:00Z")!
+        let oldQuestion = NotionMessage(id: "old-question", role: "user", content: "同じ質問",
+                                        created_time: "2026-10-01T02:00:00Z", pending_user_actions: nil)
+        let oldReply = NotionMessage(id: "old-reply", role: "agent", content: "前回の回答",
+                                     created_time: "2026-10-01T02:00:01Z", pending_user_actions: nil)
+        let newQuestion = NotionMessage(id: "new-question", role: "user", content: "同じ質問",
+                                        created_time: "2026-10-01T02:00:02Z", pending_user_actions: nil)
+        let newReply = NotionMessage(id: "new-reply", role: "agent", content: "今回の回答",
+                                     created_time: "2026-10-01T02:00:03Z", pending_user_actions: nil)
+        let pending = NotionAgentsStore.PendingOutbound(
+            message: NotionMessage(id: "pending", role: "user", content: "同じ質問",
+                                   created_time: "2026-10-01T02:01:00Z", pending_user_actions: nil),
+            agentID: "agent-1", threadID: "thread-1", baselineTime: baseline,
+            knownMessageIDs: ["old-question", "old-reply"])
+        XCTAssertEqual(NotionConversation.display([oldQuestion, oldReply], pending: [pending]).map(\.id),
+                       ["old-question", "old-reply", "pending"])
+        XCTAssertEqual(NotionConversation.display([oldQuestion, oldReply, newQuestion, newReply],
+                                                  pending: [pending]).map(\.id),
+                       ["old-question", "old-reply", "new-question", "new-reply"])
+        XCTAssertEqual(NotionReplyTracking.reply(in: [oldQuestion, oldReply, newQuestion, newReply],
+            messageFingerprint: NotionReplyTracking.fingerprint("同じ質問"), sentAt: baseline,
+            baselineSignature: "completed:2026-10-01T02:01:00Z",
+            knownMessageIDs: ["old-question", "old-reply"])?.id, "new-reply")
+        XCTAssertEqual(NotionReplyTracking.reply(in: [newQuestion, newReply],
+            messageFingerprint: NotionReplyTracking.fingerprint("同じ質問"), sentAt: baseline,
+            baselineSignature: "completed:2026-10-01T02:01:00Z")?.id, "new-reply",
+            "Pending replies saved before message IDs were tracked must also recover")
     }
 
     @MainActor
@@ -192,6 +223,7 @@ final class NotionAgentsTests: XCTestCase {
         let state = ResponseState()
         let questionTime = ISO8601DateFormatter().string(from: Date())
         let replyTime = ISO8601DateFormatter().string(from: Date().addingTimeInterval(1))
+        let threadTime = ISO8601DateFormatter().string(from: Date().addingTimeInterval(60))
         let api = NotionAgentsAPI(token: "test-token") { request in
             let path = request.url!.path
             let json: String
@@ -202,7 +234,7 @@ final class NotionAgentsTests: XCTestCase {
                 """
             case ("/v1/agents/agent-1/threads", _):
                 let results = state.phase == 2 ? "[]" : """
-                [{"id":"thread-1","title":"Chat","status":"completed","last_edited_time":"2026-10-01T02:00:0\(state.phase)Z"}]
+                [{"id":"thread-1","title":"Chat","status":"completed","last_edited_time":"\(threadTime)"}]
                 """
                 json = "{\"results\":\(results),\"has_more\":false,\"next_cursor\":null}"
             case ("/v1/threads/thread-1/messages", "POST"):
@@ -233,6 +265,15 @@ final class NotionAgentsTests: XCTestCase {
         XCTAssertEqual(restored.pendingReplyCount, 1, "Pending replies must survive an app restart")
         XCTAssertTrue(restored.isPolling)
         state.phase = 2
+        for _ in 0..<20 where store.pendingReplyCount > 0 {
+            await store.refresh(forceFull: true)
+            if store.pendingReplyCount > 0 { try await Task.sleep(for: .milliseconds(20)) }
+        }
+        XCTAssertEqual(store.alert?.preview, "自分への回答")
+        XCTAssertEqual(store.pendingReplyCount, 0)
+        XCTAssertTrue(store.pendingMessages.isEmpty, "The server's question must replace the optimistic bubble")
+        XCTAssertEqual(store.visibleMessages.map(\.id), ["question", "answer"])
+        XCTAssertFalse(store.busyAgentIDs.contains("agent-1"), "The notch activity ring must stop")
         for _ in 0..<20 where restored.pendingReplyCount > 0 {
             await restored.refresh()
             if restored.pendingReplyCount > 0 { try await Task.sleep(for: .milliseconds(20)) }
