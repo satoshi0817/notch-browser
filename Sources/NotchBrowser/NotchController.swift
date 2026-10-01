@@ -476,11 +476,8 @@ final class NotchController: NSObject, NSWindowDelegate {
 
     private func openNotificationChat() {
         guard let notice = notification else { return }
+        manager.notion.openThread(agentID: notice.agentID, threadID: notice.threadID)
         manager.showNotion(on: self, focus: true)
-        Task { @MainActor in
-            await manager.notion.selectAgent(notice.agentID)
-            await manager.notion.selectThread(notice.threadID)
-        }
     }
 
     func showShelf() {

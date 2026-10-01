@@ -133,6 +133,49 @@ final class NotionAgentsTests: XCTestCase {
     }
 
     @MainActor
+    func testCachedHistoryAndNotificationConversationAppearBeforeNetwork() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NotionAgentsCache-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let cache = NotionAgentsCache(url: url)
+        let thread = NotionThread(id: "thread-1", title: "以前のチャット", status: "completed",
+                                  last_edited_time: "2026-10-01T02:00:00Z", pending_user_actions: nil)
+        let reply = NotionMessage(id: "reply-1", role: "agent", content: "届いた返信",
+                                  created_time: "2026-10-01T02:00:00Z", pending_user_actions: nil)
+        cache.rememberThreads([thread], agentID: "agent-1")
+        cache.rememberMessages([reply], agentID: "agent-1", threadID: thread.id)
+        let restored = NotionAgentsCache(url: url)
+        XCTAssertEqual(restored.threads(for: "agent-1").map(\.id), [thread.id])
+        XCTAssertEqual(restored.messages(for: thread.id).map(\.id), [reply.id])
+        XCTAssertEqual(restored.rememberThreads([], agentID: "agent-1").map(\.id), [thread.id])
+        XCTAssertEqual(restored.rememberMessages([], agentID: "agent-1", threadID: thread.id).map(\.id), [reply.id])
+        let store = NotionAgentsStore(tokenProvider: { nil },
+            pendingRepliesKey: "notion-cache-test-\(UUID().uuidString)", cache: restored)
+        store.openThread(agentID: "agent-1", threadID: thread.id)
+        XCTAssertEqual(store.threads.map(\.id), [thread.id])
+        XCTAssertEqual(store.visibleMessages.map(\.id), [reply.id])
+    }
+
+    func testPendingMessageIsOrderedBeforeItsReplyAndRemovedAfterServerConfirmation() {
+        let baseline = NotionMessage.parseDate("2026-10-01T02:00:00Z")!
+        let pending = NotionAgentsStore.PendingOutbound(
+            message: NotionMessage(id: "pending", role: "user", content: "質問",
+                                   created_time: "2026-10-01T02:00:10Z", pending_user_actions: nil),
+            agentID: "agent-1", threadID: "thread-1", baselineTime: baseline)
+        let oldReply = NotionMessage(id: "old-reply", role: "agent", content: "前の回答",
+                                     created_time: "2026-10-01T02:00:00Z", pending_user_actions: nil)
+        let newReply = NotionMessage(id: "new-reply", role: "agent", content: "新しい回答",
+                                     created_time: "2026-10-01T02:00:05Z", pending_user_actions: nil)
+        XCTAssertEqual(NotionConversation.display([newReply, oldReply], pending: [pending]).map(\.id),
+                       ["old-reply", "pending", "new-reply"])
+        let serverQuestion = NotionMessage(id: "server-question", role: "user", content: "質問",
+                                           created_time: "2026-10-01T02:00:02Z", pending_user_actions: nil)
+        XCTAssertEqual(NotionConversation.display([newReply, serverQuestion, oldReply, newReply],
+                                                  pending: [pending]).map(\.id),
+                       ["old-reply", "server-question", "new-reply"])
+    }
+
+    @MainActor
     func testCompletedThreadKeepsPollingUntilReplyAppearsEvenWhenHistoryOmitsIt() async throws {
         let settings = SettingsStore.shared
         let saved = settings.data
@@ -141,6 +184,10 @@ final class NotionAgentsTests: XCTestCase {
         settings.data.notionNotificationsEnabled = true
         let persistenceKey = "notion-poll-test-\(UUID().uuidString)"
         defer { UserDefaults.standard.removeObject(forKey: persistenceKey) }
+        let cacheURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NotionAgentsCache-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: cacheURL) }
+        let cache = NotionAgentsCache(url: cacheURL)
         final class ResponseState { var phase = 0 }
         let state = ResponseState()
         let questionTime = ISO8601DateFormatter().string(from: Date())
@@ -172,7 +219,7 @@ final class NotionAgentsTests: XCTestCase {
                                                        httpVersion: nil, headerFields: nil)!)
         }
         let store = NotionAgentsStore(tokenProvider: { "test-token" }, apiFactory: { _ in api },
-                                      pendingRepliesKey: persistenceKey)
+                                      pendingRepliesKey: persistenceKey, cache: cache)
         await store.refresh(forceFull: true)
         store.selectedThreadID = "thread-1"
         let sent = await store.send("自分の質問")
@@ -181,7 +228,7 @@ final class NotionAgentsTests: XCTestCase {
         XCTAssertEqual(store.pendingReplyCount, 1, "A completed status without an agent message is still waiting")
         XCTAssertTrue(store.isPolling)
         let restored = NotionAgentsStore(tokenProvider: { "test-token" }, apiFactory: { _ in api },
-                                         pendingRepliesKey: persistenceKey)
+                                         pendingRepliesKey: persistenceKey, cache: cache)
         restored.start()
         XCTAssertEqual(restored.pendingReplyCount, 1, "Pending replies must survive an app restart")
         XCTAssertTrue(restored.isPolling)
@@ -194,6 +241,9 @@ final class NotionAgentsTests: XCTestCase {
         XCTAssertEqual(restored.alert?.preview, "自分への回答")
         XCTAssertEqual(restored.pendingReplyCount, 0)
         XCTAssertFalse(restored.isPolling)
+        restored.openThread(agentID: "agent-1", threadID: "thread-1")
+        XCTAssertEqual(restored.visibleMessages.map(\.id), ["question", "answer"],
+                       "Opening the notification must show the reply already fetched by polling")
     }
 
     func testReplyAlertCoversNewAndCompletedThreadsWithoutRealertingOnSameState() throws {

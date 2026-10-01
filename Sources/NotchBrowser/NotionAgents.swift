@@ -69,16 +69,16 @@ struct NotionAgent: Decodable, Identifiable {
     var iconURL: String? { icon?.imageURL }
 }
 
-struct NotionAction: Decodable, Identifiable {
+struct NotionAction: Codable, Identifiable {
     let id: String
     let title: String
     let options: [Option]
     let requirements: [Requirement]?
-    struct Option: Decodable, Identifiable { let id: String; let label: String }
-    struct Requirement: Decodable { let type: String; let handoff_url: String? }
+    struct Option: Codable, Identifiable { let id: String; let label: String }
+    struct Requirement: Codable { let type: String; let handoff_url: String? }
 }
 
-struct NotionThread: Decodable, Identifiable {
+struct NotionThread: Codable, Identifiable {
     let id: String
     let title: String
     let status: String
@@ -150,7 +150,7 @@ enum NotionReplyTracking {
     }
 }
 
-struct NotionMessage: Decodable, Identifiable {
+struct NotionMessage: Codable, Identifiable {
     let id: String
     let role: String
     let content: String
@@ -368,11 +368,41 @@ struct NotionAgentsAPI {
     }
 }
 
+enum NotionConversation {
+    static func confirms(_ server: NotionMessage, _ outbound: NotionAgentsStore.PendingOutbound) -> Bool {
+        guard server.role == "user", server.content == outbound.message.content else { return false }
+        if let baseline = outbound.baselineTime, let date = server.date {
+            return date > baseline
+        }
+        return server.confirms(outbound.message)
+    }
+
+    static func display(_ server: [NotionMessage], pending: [NotionAgentsStore.PendingOutbound]) -> [NotionMessage] {
+        var seen = Set<String>()
+        var result = NotionMessage.oldestFirst(server.filter { seen.insert($0.id).inserted })
+        var unmatchedUsers = result.filter { $0.role == "user" }
+        for outbound in pending.sorted(by: { ($0.message.date ?? .distantFuture) < ($1.message.date ?? .distantFuture) }) {
+            if let match = unmatchedUsers.firstIndex(where: { confirms($0, outbound) }) {
+                unmatchedUsers.remove(at: match)
+                continue
+            }
+            let sentAt = outbound.message.date ?? .distantFuture
+            let cutoff = [outbound.baselineTime, sentAt.addingTimeInterval(-120)].compactMap { $0 }.max() ?? sentAt
+            let index = result.firstIndex(where: { $0.role != "user" && $0.date.map { $0 > cutoff } == true })
+                ?? result.firstIndex(where: { ($0.date ?? .distantFuture) > sentAt })
+                ?? result.endIndex
+            result.insert(outbound.message, at: index)
+        }
+        return result
+    }
+}
+
 final class NotionAgentsStore: ObservableObject {
     struct PendingOutbound: Identifiable {
         let message: NotionMessage
         let agentID: String
         var threadID: String?
+        let baselineTime: Date?
         var id: String { message.id }
     }
     private struct PendingReply: Codable, Equatable {
@@ -386,6 +416,7 @@ final class NotionAgentsStore: ObservableObject {
     private let tokenProvider: () -> String?
     private let apiFactory: (String) -> NotionAgentsAPI
     private let pendingRepliesKey: String
+    private let cache: NotionAgentsCache
     @Published private(set) var threads: [NotionThread] = []
     @Published private(set) var messages: [NotionMessage] = []
     @Published private(set) var pendingMessages: [PendingOutbound] = []
@@ -417,10 +448,12 @@ final class NotionAgentsStore: ObservableObject {
 
     init(tokenProvider: @escaping () -> String? = { NotionTokenStore.read() },
          apiFactory: @escaping (String) -> NotionAgentsAPI = { NotionAgentsAPI(token: $0) },
-         pendingRepliesKey: String = "notionPendingReplies") {
+         pendingRepliesKey: String = "notionPendingReplies",
+         cache: NotionAgentsCache = .live) {
         self.tokenProvider = tokenProvider
         self.apiFactory = apiFactory
         self.pendingRepliesKey = pendingRepliesKey
+        self.cache = cache
         hasToken = tokenProvider() != nil
         if let data = UserDefaults.standard.data(forKey: pendingRepliesKey) {
             pendingReplies = (try? JSONDecoder().decode([String: PendingReply].self, from: data)) ?? [:]
@@ -433,20 +466,20 @@ final class NotionAgentsStore: ObservableObject {
         pendingMessages.contains { $0.agentID == selectedAgentID && $0.threadID == selectedThreadID }
     }
     var visibleMessages: [NotionMessage] {
-        messages + pendingMessages.filter { $0.agentID == selectedAgentID && $0.threadID == selectedThreadID }
-            .map(\.message)
+        NotionConversation.display(messages,
+            pending: pendingMessages.filter { $0.agentID == selectedAgentID && $0.threadID == selectedThreadID })
     }
 
-    private func applyMessages(_ fetched: [NotionMessage], threadID: String) {
-        guard selectedThreadID == threadID else { return }
-        messages = fetched
+    private func applyMessages(_ fetched: [NotionMessage], agentID: String, threadID: String) {
+        let merged = cache.rememberMessages(fetched, agentID: agentID, threadID: threadID)
         var unmatched = fetched.filter { $0.role == "user" }
         pendingMessages.removeAll { pending in
-            guard pending.agentID == selectedAgentID, pending.threadID == threadID,
-                  let index = unmatched.firstIndex(where: { $0.confirms(pending.message) }) else { return false }
+            guard pending.agentID == agentID, pending.threadID == threadID,
+                  let index = unmatched.firstIndex(where: { NotionConversation.confirms($0, pending) }) else { return false }
             unmatched.remove(at: index)
             return true
         }
+        if selectedAgentID == agentID && selectedThreadID == threadID { messages = merged }
     }
 
     func saveToken(_ token: String) {
@@ -455,6 +488,7 @@ final class NotionAgentsStore: ObservableObject {
         }
         hasToken = tokenProvider() != nil
         threads = []; messages = []; pendingMessages = []; busyAgentIDs = []; observed = [:]; metadataChecked = []; baselinedAgentIDs = []; error = nil
+        cache.clear()
         pendingReplies = [:]; savePendingReplies()
         selectedAgentID = nil; selectedThreadID = nil
         start()
@@ -462,6 +496,7 @@ final class NotionAgentsStore: ObservableObject {
 
     func registrationChanged() {
         let ids = Set(visibleAgents.map(\.id))
+        cache.retainAgents(ids)
         pendingReplies = pendingReplies.filter { ids.contains($0.value.agentID) }
         savePendingReplies()
         updatePolling()
@@ -471,7 +506,9 @@ final class NotionAgentsStore: ObservableObject {
         observed = observed.filter { ids.contains(String($0.key.split(separator: ":").first ?? "")) }
         if !ids.contains(selectedAgentID ?? "") {
             selectedAgentID = visibleAgents.first?.id
-            selectedThreadID = nil; threads = []; messages = []
+            selectedThreadID = nil
+            threads = selectedAgentID.map { cache.threads(for: $0) } ?? []
+            messages = []
         }
         if hasToken {
             if refreshInProgress { refreshQueued = true; refreshQueuedFull = true }
@@ -545,7 +582,9 @@ final class NotionAgentsStore: ObservableObject {
         }
         if !registered.contains(where: { $0.id == selectedAgentID }) {
             selectedAgentID = registered.first?.id
-            selectedThreadID = nil; threads = []; messages = []
+            selectedThreadID = nil
+            threads = selectedAgentID.map { cache.threads(for: $0) } ?? []
+            messages = []
         }
         let api = apiFactory(token)
         do {
@@ -577,7 +616,10 @@ final class NotionAgentsStore: ObservableObject {
                 let list: [NotionThread]?
                 do { list = try await api.threads(agentID: agent.id, allPages: false) }
                 catch { list = nil; failures.append("\(agent.name): \(error.localizedDescription)") }
-                if agent.id == selectedAgentID, let list { threads = list }
+                if let list {
+                    let merged = cache.rememberThreads(list, agentID: agent.id)
+                    if agent.id == selectedAgentID { threads = merged }
+                }
                 for thread in list ?? [] {
                     let key = "\(agent.id):\(thread.id)"
                     if thread.isRunning && (isPanelVisible || pendingReplies[key] != nil) { running.insert(agent.id) }
@@ -591,8 +633,8 @@ final class NotionAgentsStore: ObservableObject {
                     let signature = thread.map { "\($0.status):\($0.last_edited_time)" }
                     let fetched = try? await api.messages(threadID: pending.threadID)
                     guard pendingReplies[key] == pending else { continue }
-                    if let fetched, selectedThreadID == pending.threadID {
-                        applyMessages(fetched, threadID: pending.threadID)
+                    if let fetched {
+                        applyMessages(fetched, agentID: agent.id, threadID: pending.threadID)
                     }
                     let reply = fetched.flatMap { NotionReplyTracking.reply(in: $0,
                         messageFingerprint: pending.messageFingerprint, sentAt: pending.sentAt,
@@ -620,7 +662,7 @@ final class NotionAgentsStore: ObservableObject {
             if isPanelVisible || forceFull, let selectedThreadID {
                 activityText = "会話を読み込み中…"
                 let fetched = try await api.messages(threadID: selectedThreadID)
-                applyMessages(fetched, threadID: selectedThreadID)
+                if let selectedAgentID { applyMessages(fetched, agentID: selectedAgentID, threadID: selectedThreadID) }
             }
             error = failures.first.map { failures.count == 1 ? $0 : "\($0) ほか\(failures.count - 1)件" }
             lastUpdatedAt = Date()
@@ -628,13 +670,15 @@ final class NotionAgentsStore: ObservableObject {
     }
 
     func selectAgent(_ id: String) async {
-        selectedAgentID = id; selectedThreadID = nil; messages = []; threads = []
+        selectedAgentID = id; selectedThreadID = nil; messages = []
+        threads = cache.threads(for: id)
         guard let token = tokenProvider() else { return }
         activityText = "チャット履歴を読み込み中…"
         defer { activityText = nil }
         do {
             let fetched = try await apiFactory(token).threads(agentID: id, allPages: false)
-            if selectedAgentID == id { threads = fetched }
+            let merged = cache.rememberThreads(fetched, agentID: id)
+            if selectedAgentID == id { threads = merged }
             lastUpdatedAt = Date()
             error = nil
         }
@@ -642,14 +686,15 @@ final class NotionAgentsStore: ObservableObject {
     }
 
     func selectThread(_ id: String) async {
-        selectedThreadID = id; messages = []
+        selectedThreadID = id; messages = cache.messages(for: id)
+        guard let agentID = selectedAgentID else { return }
         guard let token = tokenProvider() else { return }
         isLoadingMessages = true
         activityText = "会話を読み込み中…"
         defer { isLoadingMessages = false; activityText = nil }
         do {
             let fetched = try await apiFactory(token).messages(threadID: id)
-            applyMessages(fetched, threadID: id)
+            applyMessages(fetched, agentID: agentID, threadID: id)
             lastUpdatedAt = Date()
             error = nil
         }
@@ -657,6 +702,14 @@ final class NotionAgentsStore: ObservableObject {
     }
 
     func showHistory() { selectedThreadID = nil; messages = [] }
+
+    func openThread(agentID: String, threadID: String) {
+        selectedAgentID = agentID
+        threads = cache.threads(for: agentID)
+        selectedThreadID = threadID
+        messages = cache.messages(for: threadID)
+        Task { @MainActor in await refresh(forceFull: true) }
+    }
 
     @discardableResult
     func send(_ text: String) async -> Bool {
@@ -672,7 +725,11 @@ final class NotionAgentsStore: ObservableObject {
             message: NotionMessage(id: "pending-\(UUID().uuidString)", role: "user", content: text,
                                    created_time: ISO8601DateFormatter().string(from: sentAt),
                                    pending_user_actions: nil),
-            agentID: agentID, threadID: sendingThreadID)
+            agentID: agentID, threadID: sendingThreadID,
+            baselineTime: baseline.flatMap { signature in
+                guard let separator = signature.firstIndex(of: ":") else { return nil }
+                return NotionMessage.parseDate(String(signature[signature.index(after: separator)...]))
+            })
         pendingMessages.append(outbound)
         isSending = true; activityText = "メッセージを送信中…"
         defer { isSending = false; activityText = nil }
@@ -689,6 +746,7 @@ final class NotionAgentsStore: ObservableObject {
             }
             if selectedAgentID == agentID && selectedThreadID == sendingThreadID {
                 selectedThreadID = invocation.thread_id
+                messages = cache.messages(for: invocation.thread_id)
             }
             busyAgentIDs.insert(agentID)
             await refresh(forceFull: true)
