@@ -151,6 +151,26 @@ enum NotionReplyTracking {
     static func hasStoppedWithoutReply(status: String) -> Bool {
         ["failed", "cancelled", "canceled", "expired"].contains(status)
     }
+
+    static func completedWaitExpired(status: String?, sentAt: Date?, now: Date = Date()) -> Bool {
+        guard status == "completed", let sentAt else { return false }
+        return now.timeIntervalSince(sentAt) >= 30 * 60
+    }
+}
+
+enum NotionAgentActivity {
+    static func isBusy(_ thread: NotionThread, waitingForReply: Bool,
+                       cachedMessages: [NotionMessage], now: Date = Date()) -> Bool {
+        if waitingForReply { return true }
+        guard thread.isRunning,
+              let editedAt = NotionMessage.parseDate(thread.last_edited_time),
+              now.timeIntervalSince(editedAt) < 15 * 60 else { return false }
+        // Notion can leave a thread marked in_progress after delivering its answer.
+        let latest = NotionMessage.oldestFirst(cachedMessages).last {
+            !$0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        return latest?.role == "user" || latest == nil
+    }
 }
 
 struct NotionMessage: Codable, Identifiable {
@@ -454,6 +474,13 @@ final class NotionAgentsStore: ObservableObject {
     var pendingReplyCount: Int { pendingReplies.count }
     var isPolling: Bool { timer != nil }
 
+    func isThreadBusy(_ thread: NotionThread) -> Bool {
+        guard let agentID = selectedAgentID else { return false }
+        return NotionAgentActivity.isBusy(thread,
+            waitingForReply: pendingReplies["\(agentID):\(thread.id)"] != nil,
+            cachedMessages: cache.messages(for: thread.id))
+    }
+
     init(tokenProvider: @escaping () -> String? = { NotionTokenStore.read() },
          apiFactory: @escaping (String) -> NotionAgentsAPI = { NotionAgentsAPI(token: $0) },
          pendingRepliesKey: String = "notionPendingReplies",
@@ -539,6 +566,7 @@ final class NotionAgentsStore: ObservableObject {
         let wasPolling = timer != nil
         isPanelVisible = visible
         updatePolling()
+        if !visible { busyAgentIDs = Set(pendingReplies.values.map(\.agentID)) }
         if visible && wasPolling { Task { @MainActor in await refresh(forceFull: true) } }
     }
 
@@ -597,86 +625,103 @@ final class NotionAgentsStore: ObservableObject {
             messages = []
         }
         let api = apiFactory(token)
-        do {
-            var running = Set<String>()
-            var failures: [String] = []
-            let targets = registered.filter { agent in
-                isPanelVisible || forceFull || pendingReplies.values.contains(where: { $0.agentID == agent.id })
-            }
-            for (index, agent) in targets.enumerated() {
-                guard visibleAgents.contains(where: { $0.id == agent.id }) else { continue }
-                if isPanelVisible { activityText = "エージェントを確認中（\(index + 1)/\(targets.count)）" }
-                let placeholder = "エージェント \(agent.id.prefix(8))"
-                if !metadataChecked.contains(agent.id) {
-                    do {
-                        if let metadata = try await api.agent(id: agent.id) {
-                            metadataChecked.insert(agent.id)
-                            if let savedIndex = SettingsStore.shared.data.notionSavedAgents.firstIndex(where: { $0.id == agent.id }) {
-                                if SettingsStore.shared.data.notionSavedAgents[savedIndex].name == placeholder {
-                                    SettingsStore.shared.data.notionSavedAgents[savedIndex].name = metadata.name
-                                }
-                                SettingsStore.shared.data.notionSavedAgents[savedIndex].glyph = metadata.glyph
-                                SettingsStore.shared.data.notionSavedAgents[savedIndex].iconURL = metadata.iconURL
+        var running = Set<String>()
+        var checkedThreadsByAgent: [String: [NotionThread]] = [:]
+        var failures: [String] = []
+        let targets = registered.filter { agent in
+            isPanelVisible || forceFull || pendingReplies.values.contains(where: { $0.agentID == agent.id })
+        }
+        for (index, agent) in targets.enumerated() {
+            guard visibleAgents.contains(where: { $0.id == agent.id }) else { continue }
+            if isPanelVisible { activityText = "エージェントを確認中（\(index + 1)/\(targets.count)）" }
+            let placeholder = "エージェント \(agent.id.prefix(8))"
+            if !metadataChecked.contains(agent.id) {
+                do {
+                    if let metadata = try await api.agent(id: agent.id) {
+                        metadataChecked.insert(agent.id)
+                        if let savedIndex = SettingsStore.shared.data.notionSavedAgents.firstIndex(where: { $0.id == agent.id }) {
+                            if SettingsStore.shared.data.notionSavedAgents[savedIndex].name == placeholder {
+                                SettingsStore.shared.data.notionSavedAgents[savedIndex].name = metadata.name
                             }
-                        } else {
-                            failures.append("\(agent.name): NotionでIDが見つかりません。IDと共有権限を確認してください。")
+                            SettingsStore.shared.data.notionSavedAgents[savedIndex].glyph = metadata.glyph
+                            SettingsStore.shared.data.notionSavedAgents[savedIndex].iconURL = metadata.iconURL
                         }
-                    } catch { failures.append("\(agent.name): 名前の取得に失敗しました（\(error.localizedDescription)）") }
-                }
-                let list: [NotionThread]?
-                do { list = try await api.threads(agentID: agent.id, allPages: false) }
-                catch { list = nil; failures.append("\(agent.name): \(error.localizedDescription)") }
-                if let list {
-                    let merged = cache.rememberThreads(list, agentID: agent.id)
-                    if agent.id == selectedAgentID { threads = merged }
-                }
-                for thread in list ?? [] {
-                    let key = "\(agent.id):\(thread.id)"
-                    if thread.isRunning && (isPanelVisible || pendingReplies[key] != nil) { running.insert(agent.id) }
-                    observed[key] = "\(thread.status):\(thread.last_edited_time)"
-                }
-                // Track our own outstanding threads directly: they can fall off the first history page.
-                let waiting = pendingReplies.filter { $0.value.agentID == agent.id }
-                for (key, pending) in waiting {
-                    guard pendingReplies[key] == pending else { continue }
-                    let thread = list?.first { $0.id == pending.threadID }
-                    let signature = thread.map { "\($0.status):\($0.last_edited_time)" }
-                    let fetched = try? await api.messages(threadID: pending.threadID)
-                    guard pendingReplies[key] == pending else { continue }
-                    let available = fetched.map { applyMessages($0, agentID: agent.id, threadID: pending.threadID) }
-                        ?? cache.messages(for: pending.threadID)
-                    let reply = NotionReplyTracking.reply(in: available,
-                        messageFingerprint: pending.messageFingerprint, sentAt: pending.sentAt,
-                        baselineSignature: pending.baselineSignature,
-                        knownMessageIDs: pending.knownMessageIDs)
-                    if let title = NotionReplyTracking.notificationTitle(status: thread?.status,
-                        baselineSignature: pending.baselineSignature, currentSignature: signature, reply: reply) {
-                        pendingReplies.removeValue(forKey: key)
-                        savePendingReplies()
-                        if SettingsStore.shared.data.notionNotificationsEnabled {
-                            let name = visibleAgents.first(where: { $0.id == agent.id })?.name ?? agent.name
-                            let preview = reply.map { NotionReplyFormatter.preview($0.content) } ?? thread?.title ?? ""
-                            noticeText = "\(name): \(title)"
-                            alert = (agent.id, pending.threadID, title, preview.isEmpty ? title : preview)
-                        }
-                    } else if let status = thread?.status,
-                              NotionReplyTracking.hasStoppedWithoutReply(status: status) {
-                        pendingReplies.removeValue(forKey: key)
-                        savePendingReplies()
+                    } else {
+                        failures.append("\(agent.name): NotionでIDが見つかりません。IDと共有権限を確認してください。")
                     }
-                }
-                baselinedAgentIDs.insert(agent.id)
+                } catch { failures.append("\(agent.name): 名前の取得に失敗しました（\(error.localizedDescription)）") }
             }
-            busyAgentIDs = running.union(pendingReplies.values.map(\.agentID))
-                .intersection(Set(visibleAgents.map(\.id)))
-            if isPanelVisible || forceFull, let selectedThreadID {
-                activityText = "会話を読み込み中…"
+            let list: [NotionThread]?
+            do { list = try await api.threads(agentID: agent.id, allPages: false) }
+            catch { list = nil; failures.append("\(agent.name): \(error.localizedDescription)") }
+            if let list { checkedThreadsByAgent[agent.id] = list }
+            if let list {
+                let merged = cache.rememberThreads(list, agentID: agent.id)
+                if agent.id == selectedAgentID { threads = merged }
+            }
+            for thread in list ?? [] {
+                let key = "\(agent.id):\(thread.id)"
+                observed[key] = "\(thread.status):\(thread.last_edited_time)"
+            }
+            // Track our own outstanding threads directly: they can fall off the first history page.
+            let waiting = pendingReplies.filter { $0.value.agentID == agent.id }
+            for (key, pending) in waiting {
+                guard pendingReplies[key] == pending else { continue }
+                let thread = list?.first { $0.id == pending.threadID }
+                    ?? cache.threads(for: agent.id).first { $0.id == pending.threadID }
+                let signature = thread.map { "\($0.status):\($0.last_edited_time)" }
+                let fetched = try? await api.messages(threadID: pending.threadID)
+                guard pendingReplies[key] == pending else { continue }
+                let available = fetched.map { applyMessages($0, agentID: agent.id, threadID: pending.threadID) }
+                    ?? cache.messages(for: pending.threadID)
+                let reply = NotionReplyTracking.reply(in: available,
+                    messageFingerprint: pending.messageFingerprint, sentAt: pending.sentAt,
+                    baselineSignature: pending.baselineSignature,
+                    knownMessageIDs: pending.knownMessageIDs)
+                if let title = NotionReplyTracking.notificationTitle(status: thread?.status,
+                    baselineSignature: pending.baselineSignature, currentSignature: signature, reply: reply) {
+                    pendingReplies.removeValue(forKey: key)
+                    savePendingReplies()
+                    if SettingsStore.shared.data.notionNotificationsEnabled {
+                        let name = visibleAgents.first(where: { $0.id == agent.id })?.name ?? agent.name
+                        let preview = reply.map { NotionReplyFormatter.preview($0.content) } ?? thread?.title ?? ""
+                        noticeText = "\(name): \(title)"
+                        alert = (agent.id, pending.threadID, title, preview.isEmpty ? title : preview)
+                    }
+                } else if let status = thread?.status,
+                          NotionReplyTracking.hasStoppedWithoutReply(status: status) {
+                    pendingReplies.removeValue(forKey: key)
+                    pendingMessages.removeAll { $0.agentID == agent.id && $0.threadID == pending.threadID }
+                    savePendingReplies()
+                } else if NotionReplyTracking.completedWaitExpired(status: thread?.status,
+                                                                    sentAt: pending.sentAt) {
+                    pendingReplies.removeValue(forKey: key)
+                    pendingMessages.removeAll { $0.agentID == agent.id && $0.threadID == pending.threadID }
+                    savePendingReplies()
+                }
+            }
+            baselinedAgentIDs.insert(agent.id)
+        }
+        if isPanelVisible || forceFull, let selectedThreadID {
+            activityText = "会話を読み込み中…"
+            do {
                 let fetched = try await api.messages(threadID: selectedThreadID)
                 if let selectedAgentID { applyMessages(fetched, agentID: selectedAgentID, threadID: selectedThreadID) }
+            } catch { failures.append("会話: \(error.localizedDescription)") }
+        }
+        if isPanelVisible {
+            for (agentID, list) in checkedThreadsByAgent {
+                if list.contains(where: { thread in
+                    NotionAgentActivity.isBusy(thread,
+                        waitingForReply: pendingReplies["\(agentID):\(thread.id)"] != nil,
+                        cachedMessages: cache.messages(for: thread.id))
+                }) { running.insert(agentID) }
             }
-            error = failures.first.map { failures.count == 1 ? $0 : "\($0) ほか\(failures.count - 1)件" }
-            lastUpdatedAt = Date()
-        } catch { self.error = error.localizedDescription }
+        }
+        busyAgentIDs = running.union(pendingReplies.values.map(\.agentID))
+            .intersection(Set(visibleAgents.map(\.id)))
+        error = failures.first.map { failures.count == 1 ? $0 : "\($0) ほか\(failures.count - 1)件" }
+        lastUpdatedAt = Date()
     }
 
     func selectAgent(_ id: String) async {
@@ -906,7 +951,8 @@ struct NotionAgentsPanel: View {
                                                     VStack(alignment: .leading, spacing: 2) {
                                                         Text(thread.title.isEmpty ? "無題のチャット" : thread.title)
                                                             .font(.system(size: 13, weight: .medium)).lineLimit(2)
-                                                        Text(thread.status == "requires_action" ? "確認待ち" : thread.isRunning ? "稼働中" : "履歴").font(.caption2).foregroundStyle(.secondary)
+                                                        Text(thread.status == "requires_action" ? "確認待ち" : store.isThreadBusy(thread) ? "稼働中" : "履歴")
+                                                            .font(.caption2).foregroundStyle(.secondary)
                                                     }
                                                     Spacer()
                                                 }

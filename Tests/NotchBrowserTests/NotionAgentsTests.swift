@@ -95,6 +95,32 @@ final class NotionAgentsTests: XCTestCase {
         XCTAssertFalse(NotionReplyTracking.hasStoppedWithoutReply(status: "in_progress"))
     }
 
+    func testDeliveredReplyAndStaleStatusDoNotKeepTheAgentBusy() {
+        let now = NotionMessage.parseDate("2026-10-01T04:00:00Z")!
+        let recent = NotionThread(id: "thread", title: "Chat", status: "in_progress",
+                                  last_edited_time: "2026-10-01T03:59:00Z", pending_user_actions: nil)
+        let stale = NotionThread(id: "thread", title: "Chat", status: "in_progress",
+                                 last_edited_time: "2026-10-01T03:00:00Z", pending_user_actions: nil)
+        let question = NotionMessage(id: "question", role: "user", content: "質問",
+                                     created_time: "2026-10-01T03:59:01Z", pending_user_actions: nil)
+        let answer = NotionMessage(id: "answer", role: "agent", content: "回答",
+                                   created_time: "2026-10-01T03:59:02Z", pending_user_actions: nil)
+        XCTAssertTrue(NotionAgentActivity.isBusy(recent, waitingForReply: true,
+                                                 cachedMessages: [question, answer], now: now))
+        XCTAssertTrue(NotionAgentActivity.isBusy(recent, waitingForReply: false,
+                                                 cachedMessages: [question], now: now))
+        XCTAssertFalse(NotionAgentActivity.isBusy(recent, waitingForReply: false,
+                                                  cachedMessages: [question, answer], now: now))
+        XCTAssertFalse(NotionAgentActivity.isBusy(stale, waitingForReply: false,
+                                                  cachedMessages: [], now: now))
+        XCTAssertFalse(NotionReplyTracking.completedWaitExpired(status: "completed",
+            sentAt: now.addingTimeInterval(-29 * 60), now: now))
+        XCTAssertTrue(NotionReplyTracking.completedWaitExpired(status: "completed",
+            sentAt: now.addingTimeInterval(-30 * 60), now: now))
+        XCTAssertFalse(NotionReplyTracking.completedWaitExpired(status: "in_progress",
+            sentAt: now.addingTimeInterval(-60 * 60), now: now))
+    }
+
     func testReplyTrackingWaitsForTheAnswerToOurQuestion() {
         let sentAt = ISO8601DateFormatter().date(from: "2026-10-01T02:00:00Z")!
         let ownHash = NotionReplyTracking.fingerprint("自分の質問")
@@ -233,8 +259,9 @@ final class NotionAgentsTests: XCTestCase {
                 {"results":[{"id":"agent-1","name":"Test agent","agent_type":"custom_agent","status":"active"}],"has_more":false,"next_cursor":null}
                 """
             case ("/v1/agents/agent-1/threads", _):
+                let status = state.phase == 3 ? "in_progress" : "completed"
                 let results = state.phase == 2 ? "[]" : """
-                [{"id":"thread-1","title":"Chat","status":"completed","last_edited_time":"\(threadTime)"}]
+                [{"id":"thread-1","title":"Chat","status":"\(status)","last_edited_time":"\(threadTime)"}]
                 """
                 json = "{\"results\":\(results),\"has_more\":false,\"next_cursor\":null}"
             case ("/v1/threads/thread-1/messages", "POST"):
@@ -285,6 +312,11 @@ final class NotionAgentsTests: XCTestCase {
         restored.openThread(agentID: "agent-1", threadID: "thread-1")
         XCTAssertEqual(restored.visibleMessages.map(\.id), ["question", "answer"],
                        "Opening the notification must show the reply already fetched by polling")
+        state.phase = 3
+        store.setPanelVisible(true)
+        await store.refresh(forceFull: true)
+        XCTAssertFalse(store.busyAgentIDs.contains("agent-1"),
+                       "A lagging in_progress status must not restart the notch spinner after the answer")
     }
 
     func testReplyAlertCoversNewAndCompletedThreadsWithoutRealertingOnSameState() throws {
