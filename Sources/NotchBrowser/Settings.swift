@@ -103,6 +103,7 @@ enum ToolbarAction: String, Codable, CaseIterable, Identifiable {
     case zoomIn, zoomOut, resetZoom, autoRefresh, restore, tabSearch, closeTab, shelf, notes, notion, external, settings, quit
     case spacer
     var id: Self { self }
+    var isAvailable: Bool { self != .shelf }
     var title: String {
         switch self {
         case .back: "戻る"

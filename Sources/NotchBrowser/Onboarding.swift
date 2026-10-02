@@ -27,7 +27,6 @@ struct OnboardingChoices {
     var displayPreset: DisplayPreset?
     var displayPresetChanged = false
     var motion: MotionSettings
-    var automaticShelf: Bool
     var calendarCountdown: Bool
     var notionButton: Bool
     var hideFromCapture: Bool
@@ -45,7 +44,6 @@ struct OnboardingChoices {
             }
         } else { displayPreset = nil }
         motion = settings.motion
-        automaticShelf = settings.shelfTrigger != .manual
         calendarCountdown = settings.countdownEnabled
         notionButton = settings.notionEnabled
         hideFromCapture = settings.hideFromScreenCapture
@@ -105,8 +103,6 @@ struct OnboardingChoices {
             settings.displays[id] = current
         }
         settings.motion = motion
-        if !automaticShelf { settings.shelfTrigger = .manual }
-        else if settings.shelfTrigger == .manual { settings.shelfTrigger = .automatic }
         settings.countdownEnabled = calendarCountdown
         settings.hideFromScreenCapture = hideFromCapture
         settings.externalBrowserBundleID = externalBrowserBundleID
@@ -305,9 +301,9 @@ private struct OnboardingView: View {
     private var welcome: some View {
         VStack(alignment: .leading, spacing: 16) {
             NotchIllustration()
-            Text("ブラウザと、ちょっとした道具をノッチに。")
+            Text("ブラウザとNotionをノッチに。")
                 .font(.system(size: 22, weight: .semibold, design: .rounded))
-            Text("いつものページ、ファイル棚、メモ、Notionエージェント。まずはよく使うページとノッチの見え方を決めましょう。")
+            Text("いつものページとNotionエージェントを、ノッチからすぐ開けます。まずはページとノッチの見え方を決めましょう。")
                 .font(.callout).foregroundStyle(.secondary).lineSpacing(5)
             HStack(alignment: .top, spacing: 10) {
                 instruction("cursorarrow.motionlines", title: "カーソルで開く", detail: "画面上端に乗せ、クリックで入力")
@@ -454,7 +450,6 @@ private struct OnboardingView: View {
 
     private var personalize: some View {
         VStack(alignment: .leading, spacing: 11) {
-            option("tray", title: "ファイル棚を自動で出す", detail: "ドラッグを始めたときに棚を開きます。手動でもいつでも開けます。", isOn: $choices.automaticShelf)
             option("calendar", title: "次の予定を表示", detail: "カレンダーへのアクセスは、完了後に必要なときだけ確認します。", isOn: $choices.calendarCountdown)
             option("bubble.left", title: "Notionエージェントを使う", detail: "通常の設定「Notion」でトークンを確認してから有効にできます。", isOn: $choices.notionButton)
             option("eye.slash", title: "画面共有から隠す", detail: "対応する画面共有・録画ではノッチを映しません。", isOn: $choices.hideFromCapture)
@@ -511,7 +506,6 @@ private struct OnboardingView: View {
                 summary("固定ページ", "\(choices.pinnedTabs.count)件")
                 summary("サイズ", choices.displayPreset?.title ?? "現在の設定")
                 summary("動き", MotionPreset.allCases.first(where: { $0.settings == choices.motion })?.title ?? "現在の設定")
-                summary("ファイル棚", choices.automaticShelf ? "ドラッグ時に自動で表示" : "メニューから手動で開く")
                 summary("次の予定", choices.calendarCountdown ? "表示する" : "表示しない")
                 if choices.notionButton {
                     summary("Notionエージェント", "設定からトークンを登録して接続")
@@ -560,7 +554,6 @@ private struct NotchIllustration: View {
                     Image(systemName: "house")
                     Spacer()
                     Image(nsImage: NotionTabIcon.image(for: NSAppearance(named: .darkAqua)!))
-                    Image(systemName: "tray")
                     Image(systemName: "gearshape")
                 }
                 .font(.system(size: 13, weight: .medium))

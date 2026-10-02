@@ -305,7 +305,8 @@ final class NotchController: NSObject, NSWindowDelegate {
             else { self.expand(focus: true) }
         }
         root.onFileDrag = { [weak self] in
-            guard let self, SettingsStore.shared.data.shelfTrigger != .manual || self.shelfVisible else { return false }
+            guard let self, ShelfFeature.isAvailable,
+                  SettingsStore.shared.data.shelfTrigger != .manual || self.shelfVisible else { return false }
             if !self.shelfVisible { self.manager.showShelf(on: self) }
             return true
         }
@@ -324,9 +325,6 @@ final class NotchController: NSObject, NSWindowDelegate {
         open.target = self
         let settings = NSMenuItem(title: "設定…", action: #selector(openSettingsFromMenu), keyEquivalent: "")
         settings.target = self
-        let shelf = NSMenuItem(title: "ファイル棚", action: #selector(openShelfFromMenu), keyEquivalent: "")
-        shelf.target = self
-        shelf.image = NSImage(systemSymbolName: "tray", accessibilityDescription: nil)
         let quit = NSMenuItem(title: "NotchBrowser を終了", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
         quit.target = NSApp
         quit.image = NSImage(systemSymbolName: "power", accessibilityDescription: nil)
@@ -334,7 +332,7 @@ final class NotchController: NSObject, NSWindowDelegate {
         notion.target = self
         notion.image = NotionTabIcon.image(for: NSApp.effectiveAppearance, size: 16)
         menu.items = [open] + (SettingsStore.shared.data.notionEnabled ? [notion] : [])
-            + [shelf, settings, .separator(), quit]
+            + [settings, .separator(), quit]
         return menu
     }
 
@@ -348,7 +346,6 @@ final class NotchController: NSObject, NSWindowDelegate {
         }
     }
 
-    @objc private func openShelfFromMenu() { manager.showShelf(on: self) }
     @objc private func openNotionFromMenu() { manager.showNotion(on: self) }
     @objc private func openFromMenu() { expand(focus: true) }
     @objc private func openSettingsFromMenu() { manager.browser.onOpenSettings?() }
@@ -440,7 +437,7 @@ final class NotchController: NSObject, NSWindowDelegate {
             manager.browser.prepareForOpen()
             manager.willExpand(self)
             isExpanded = true
-            if !manager.shelf.store.entries.isEmpty { manager.showShelf(on: self) }
+            if ShelfFeature.isAvailable && !manager.shelf.store.entries.isEmpty { manager.showShelf(on: self) }
             panel.hasShadow = true
             root.setBadge(minutes: manager.minutesToNextEvent, visible: false)
             root.setRunningAgent(nil)
@@ -686,7 +683,7 @@ final class NotchManager {
         }
         shelf.store.$entries.receive(on: RunLoop.main).sink { [weak self] entries in
             guard let self else { return }
-            if !entries.isEmpty && !self.controllers.values.contains(where: \.shelfVisible) { self.showShelf() }
+            if ShelfFeature.isAvailable && !entries.isEmpty && !self.controllers.values.contains(where: \.shelfVisible) { self.showShelf() }
             if entries.isEmpty { self.controllers.values.forEach { $0.resumeHoverCloseIfNeeded() } }
         }.store(in: &cancellables)
         dragMonitor.onChange = { [weak self] active in self?.dragChanged(active) }
@@ -743,8 +740,7 @@ final class NotchManager {
         calendar.start()
         notion.start()
         databaseMonitor.start()
-        dragMonitor.start()
-        if !shelf.store.entries.isEmpty { showShelf() }
+        if ShelfFeature.isAvailable { dragMonitor.start() }
     }
 
     private func settingsChanged() {
@@ -790,7 +786,7 @@ final class NotchManager {
                 controller.show()
             }
         }
-        if !shelf.store.entries.isEmpty && !controllers.values.contains(where: \.shelfVisible) { showShelf() }
+        if ShelfFeature.isAvailable && !shelf.store.entries.isEmpty && !controllers.values.contains(where: \.shelfVisible) { showShelf() }
     }
 
     private var orderedControllers: [NotchController] {
@@ -823,6 +819,7 @@ final class NotchManager {
     }
 
     func showShelf(on target: NotchController? = nil) {
+        guard ShelfFeature.isAvailable else { return }
         let target = target ?? orderedControllers.first { $0.screen.frame.contains(NSEvent.mouseLocation) } ?? orderedControllers.first
         guard let target else { return }
         for other in controllers.values where other !== target && other.shelfVisible { other.hideShelf() }

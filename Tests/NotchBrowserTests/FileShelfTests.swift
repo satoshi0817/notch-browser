@@ -117,6 +117,22 @@ final class FileShelfTests: XCTestCase {
         XCTAssertTrue(controller.isExpanded)
         XCTAssertEqual(manager.browser.view.frame.size, browserSize)
     }
+
+    @MainActor func testPausedShelfKeepsEntriesWithoutOpeningFromManager() throws {
+        _ = NSApplication.shared
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ShelfStore(file: directory.appendingPathComponent("items.json"))
+        let file = directory.appendingPathComponent("saved.txt")
+        XCTAssertTrue(store.add([file]))
+        let manager = NotchManager(shelfStore: store)
+        let controller = NotchController(screen: try XCTUnwrap(NSScreen.screens.first), manager: manager)
+        defer { controller.close() }
+        controller.show()
+        manager.showShelf(on: controller)
+        XCTAssertFalse(controller.shelfVisible)
+        XCTAssertEqual(ShelfStore(file: directory.appendingPathComponent("items.json")).entries.map(\.url), [file])
+    }
     func testDropBatchesFormSeparateStacksAndPartialClearCanBeRestored() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -193,7 +209,7 @@ final class FileShelfTests: XCTestCase {
         XCTAssertTrue(controller.pasteboardItems(forRows: [0]).isEmpty, "Do not silently drag a partial stack")
     }
 
-    @MainActor func testNonemptyShelfSurvivesMouseExitAndBrowserCollapse() throws {
+    @MainActor func testPausedShelfDoesNotReopenWhenBrowserExpands() throws {
         _ = NSApplication.shared
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -214,10 +230,11 @@ final class FileShelfTests: XCTestCase {
         XCTAssertTrue(controller.shelfOnly)
         XCTAssertTrue(controller.isExpanded)
         controller.expand(focus: false)
-        XCTAssertTrue(controller.shelfVisible)
+        XCTAssertFalse(controller.shelfVisible)
         XCTAssertFalse(controller.shelfOnly)
         controller.root.onHoverChange?(false)
-        XCTAssertTrue(controller.shelfOnly, "Only the browser collapses; the populated shelf stays open")
+        XCTAssertFalse(controller.shelfOnly)
+        XCTAssertEqual(shelfStore.entries.count, 1, "Pausing the shelf must retain its saved items")
         shelfStore.clearAll()
         controller.root.onHoverChange?(false)
         XCTAssertFalse(controller.isExpanded)

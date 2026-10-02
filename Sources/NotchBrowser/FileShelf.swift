@@ -5,6 +5,11 @@ import Quartz
 import QuickLookThumbnailing
 import UniformTypeIdentifiers
 
+/// The shelf is temporarily removed from the product UI; its saved entries remain intact.
+enum ShelfFeature {
+    static let isAvailable = false
+}
+
 enum ShelfTrigger: String, Codable, CaseIterable {
     case automatic, nearby, manual
     var title: String {

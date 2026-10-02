@@ -62,7 +62,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 }
 
 enum SettingsSection: String, CaseIterable, Identifiable {
-    case tabs = "固定ページ", notion = "Notion", profiles = "プロファイル", displays = "ディスプレイ", motion = "動き", shelf = "ファイル棚", toolbar = "ボタン配置", general = "一般"
+    case tabs = "固定ページ", notion = "Notion", profiles = "プロファイル", displays = "ディスプレイ", motion = "動き", toolbar = "ボタン配置", general = "一般"
     var id: Self { self }
     var symbol: String {
         switch self {
@@ -72,7 +72,6 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .displays: "display"
         case .motion: "waveform.path"
         case .general: "slider.horizontal.3"
-        case .shelf: "tray"
         case .toolbar: "rectangle.topthird.inset.filled"
         }
     }
@@ -125,7 +124,6 @@ struct SettingsView: View {
                     case .displays: DisplaysSettings()
                     case .motion: MotionSettingsView()
                     case .general: GeneralSettings()
-                    case .shelf: ShelfSettingsView()
                     case .toolbar: ToolbarSettingsView()
                     }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -457,8 +455,8 @@ struct GeneralSettings: View {
 struct ToolbarSettingsView: View {
     @EnvironmentObject var store: SettingsStore
 
-    private var placed: [ToolbarAction] { store.data.toolbarActions.filter { $0 != .notion } }
-    private var available: [ToolbarAction] { ToolbarAction.allCases.filter { $0 != .notion && !placed.contains($0) } }
+    private var placed: [ToolbarAction] { store.data.toolbarActions.filter { $0 != .notion && $0.isAvailable } }
+    private var available: [ToolbarAction] { ToolbarAction.allCases.filter { $0 != .notion && $0.isAvailable && !placed.contains($0) } }
     private var previewActions: [ToolbarAction] { Array(placed.filter { $0 != .spacer }.prefix(10)) }
 
     var body: some View {

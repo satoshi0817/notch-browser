@@ -141,7 +141,6 @@ final class BrowserViewController: NSViewController {
             (.restore, "arrow.uturn.backward", #selector(reopenClosedTab)),
             (.tabSearch, "square.stack", #selector(showTabSwitcher)),
             (.closeTab, "xmark", #selector(closeCurrentTab)),
-            (.shelf, "tray", #selector(openShelf)),
             (.notes, "square.and.pencil", #selector(toggleNotes)),
             (.external, "safari", #selector(openExternally)),
             (.settings, "gearshape", #selector(openSettings)),
@@ -337,7 +336,7 @@ final class BrowserViewController: NSViewController {
     private func updateCompactControls() {
         let available = view.bounds.width / 2 - controlLeadingConstraint.constant - 12
         let capacity = max(0, Int((available - 32) / 32))
-        let requested = store.data.toolbarActions.filter { $0 != .notion }
+        let requested = store.data.toolbarActions.filter { $0 != .notion && $0.isAvailable }
         let visible = Set(requested.filter { $0 != .spacer }.prefix(capacity))
         var changed = arrangeToolbar(ifNeeded: requested)
         for (action, button) in toolbarButtons {
@@ -352,7 +351,7 @@ final class BrowserViewController: NSViewController {
         guard arrangedToolbarActions != requested else { return false }
         arrangedToolbarActions = requested
         controlStack.arrangedSubviews.forEach { controlStack.removeArrangedSubview($0); $0.removeFromSuperview() }
-        let ordered = requested + ToolbarAction.allCases.filter { !requested.contains($0) && $0 != .spacer && $0 != .notion }
+        let ordered = requested + ToolbarAction.allCases.filter { !requested.contains($0) && $0 != .spacer && $0 != .notion && $0.isAvailable }
         for action in ordered {
             if action == .spacer {
                 placedToolbarSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -1389,7 +1388,7 @@ extension BrowserViewController: WKDownloadDelegate {
 
     func downloadDidFinish(_ download: WKDownload) {
         guard let url = downloadDestinations.removeValue(forKey: ObjectIdentifier(download)) else { return }
-        if SettingsStore.shared.data.shelfDownloads { ShelfStore.shared.add([url]) }
+        if ShelfFeature.isAvailable && SettingsStore.shared.data.shelfDownloads { ShelfStore.shared.add([url]) }
         // Bounces the Downloads stack in the Dock, like Safari.
         DistributedNotificationCenter.default().post(name: .init("com.apple.DownloadFileFinished"), object: url.path)
     }

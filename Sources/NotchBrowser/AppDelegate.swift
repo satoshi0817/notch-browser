@@ -66,7 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         defer { isConfirmingQuit = false }
         let alert = NSAlert()
         alert.messageText = "NotchBrowser を終了しますか？"
-        alert.informativeText = "ブラウザとファイル棚を閉じます。"
+        alert.informativeText = "ブラウザを閉じます。"
         alert.addButton(withTitle: "キャンセル")
         alert.addButton(withTitle: "終了")
         alert.showsSuppressionButton = true
@@ -95,7 +95,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(item("開く / 閉じる", #selector(toggleNotch), "n", [.control, .option], target: self))
         keepOpenItem = item("開いたままにする", #selector(toggleKeepOpen), target: self)
         menu.addItem(keepOpenItem)
-        menu.addItem(item("ファイル棚", #selector(openShelf), target: self))
         notionItem = item("Notionエージェント", #selector(openNotion), target: self)
         menu.addItem(notionItem)
         menu.addItem(item("使い方ガイド…", #selector(openOnboarding), target: self))
@@ -108,7 +107,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
 
-    @objc private func openShelf() { notch.showShelf() }
     @objc private func openNotion() { notch.showNotion() }
 
     @objc private func checkForUpdates() { Task { await UpdateChecker.shared.check() } }

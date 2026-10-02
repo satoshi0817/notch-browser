@@ -35,12 +35,11 @@ final class OnboardingTests: XCTestCase {
         settings.toolbarActions = [.back, .settings, .quit]
         settings.pinnedTabs = [PinnedTab(name: "My page", url: "https://example.com")]
         var choices = OnboardingChoices(settings: settings)
-        choices.automaticShelf = false
         choices.calendarCountdown = false
         choices.notionButton = true
         choices.hideFromCapture = false
         choices.apply(to: &settings)
-        XCTAssertEqual(settings.shelfTrigger, .manual)
+        XCTAssertEqual(settings.shelfTrigger, .automatic)
         XCTAssertFalse(settings.countdownEnabled)
         XCTAssertFalse(settings.hideFromScreenCapture)
         XCTAssertFalse(settings.notionEnabled, "Agent activation requires a verified Notion connection")
@@ -54,9 +53,8 @@ final class OnboardingTests: XCTestCase {
         XCTAssertEqual(settings.toolbarActions, [.back, .settings, .quit])
 
         settings.shelfTrigger = .nearby
-        choices.automaticShelf = true
         choices.apply(to: &settings)
-        XCTAssertEqual(settings.shelfTrigger, .nearby, "Reopening the guide must preserve a more specific shelf preference")
+        XCTAssertEqual(settings.shelfTrigger, .nearby, "The guide must preserve dormant shelf preferences")
     }
 
     func testAddingPinnedPagesValidatesAndAvoidsDuplicates() {
