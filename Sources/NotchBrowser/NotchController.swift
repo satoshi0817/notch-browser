@@ -2,10 +2,19 @@ import AppKit
 import Combine
 import SwiftUI
 
+private enum CalendarHelperLayout {
+    static let calendarHelperRowGapPts: CGFloat = 4
+    static let rowHeight: CGFloat = 18
+    static let horizontalInset: CGFloat = 6
+    static let primaryFontSize: CGFloat = 13
+    static let secondaryFontSize = primaryFontSize * 0.88
+    static let height = rowHeight * 2 + calendarHelperRowGapPts
+}
+
 /// A single clipped line with automatic overflow motion and no scroll controls.
 private final class CalendarHelperView: NSView {
     private let attributes: [NSAttributedString.Key: Any] = [
-        .font: NSFont.systemFont(ofSize: 11),
+        .font: NSFont.systemFont(ofSize: CalendarHelperLayout.secondaryFontSize),
         .foregroundColor: NSColor.white.withAlphaComponent(0.6)
     ]
     private var text = ""
@@ -190,16 +199,15 @@ final class NotchRootView: NSView {
     var contentSize: NSSize = .zero { didSet { positionContent() } }
     private var trackingArea: NSTrackingArea?
 
-    /// Width of each "wing" beside the notch that shows the next-event countdown.
+    /// Keep the existing wing width so the collapsed notch does not widen.
     static let wingWidth: CGFloat = 40
-    static let helperHeight: CGFloat = 18
+    static let helperHeight = CalendarHelperLayout.height
     private let calendarHelper = CalendarHelperView()
     private var showsCalendarHelper = false
     private let badgeIcon = NSImageView()
     private let badgeLabel = NSTextField(labelWithString: "")
     private let agentBadge = NSHostingView(rootView: RunningAgentBadge(agent: nil))
     private var notificationBanner: NSHostingView<NotionNotificationBanner>?
-    private var hasRunningAgent = false
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -212,8 +220,8 @@ final class NotchRootView: NSView {
         addSubview(content)
 
         badgeIcon.image = NSImage(systemSymbolName: "calendar", accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 13, weight: .semibold))
-        badgeLabel.font = .monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
+            .withSymbolConfiguration(.init(pointSize: CalendarHelperLayout.primaryFontSize, weight: .semibold))
+        badgeLabel.font = .monospacedDigitSystemFont(ofSize: CalendarHelperLayout.primaryFontSize, weight: .semibold)
         badgeLabel.alignment = .center
         agentBadge.isHidden = true
         addSubview(agentBadge)
@@ -232,7 +240,7 @@ final class NotchRootView: NSView {
         set { layer?.cornerRadius = newValue }
     }
 
-    /// Minutes until the next event, or nil to hide the wings.
+    /// Minutes until the next event, or nil to hide the calendar helper.
     func setBadge(event: CalendarBadge?, visible: Bool) {
         let minutes = event?.minutes
         showsCalendarHelper = event != nil && visible
@@ -245,16 +253,14 @@ final class NotchRootView: NSView {
             badgeIcon.contentTintColor = tint
         }
         let alpha: CGFloat = minutes != nil && visible ? 1 : 0
-        badgeIcon.alphaValue = hasRunningAgent ? 0 : alpha
+        badgeIcon.alphaValue = alpha
         badgeLabel.alphaValue = alpha
         positionContent()
     }
 
     func setRunningAgent(_ agent: SavedNotionAgent?) {
-        hasRunningAgent = agent != nil
         agentBadge.rootView = RunningAgentBadge(agent: agent)
         agentBadge.isHidden = agent == nil
-        badgeIcon.alphaValue = agent == nil && badgeLabel.alphaValue > 0 ? 1 : 0
     }
 
     func setNotification(agent: SavedNotionAgent?, name: String = "", title: String = "", preview: String = "",
@@ -307,14 +313,20 @@ final class NotchRootView: NSView {
     }
 
     private func positionContent() {
-        let wing = Self.wingWidth
         let helperHeight = showsCalendarHelper ? Self.helperHeight : 0
         let primaryHeight = bounds.height - helperHeight
-        calendarHelper.frame = NSRect(x: 4, y: 0, width: max(0, bounds.width - 8), height: helperHeight)
-        let labelHeight = badgeLabel.intrinsicContentSize.height
-        badgeIcon.frame = NSRect(x: 4, y: helperHeight + ((primaryHeight - 18) / 2).rounded(), width: wing - 4, height: 18)
+        let inset = CalendarHelperLayout.horizontalInset
+        let rowHeight = CalendarHelperLayout.rowHeight
+        calendarHelper.frame = NSRect(x: inset, y: 0, width: max(0, bounds.width - inset * 2), height: rowHeight)
+        let topRowY = rowHeight + CalendarHelperLayout.calendarHelperRowGapPts
+        let labelWidth = badgeLabel.intrinsicContentSize.width
+        let iconWidth = rowHeight
+        let topRowWidth = iconWidth + CalendarHelperLayout.calendarHelperRowGapPts + labelWidth
+        let topRowX = ((bounds.width - topRowWidth) / 2).rounded()
+        badgeIcon.frame = NSRect(x: topRowX, y: topRowY, width: iconWidth, height: rowHeight)
         agentBadge.frame = NSRect(x: 8, y: helperHeight + ((primaryHeight - 24) / 2).rounded(), width: 24, height: 24)
-        badgeLabel.frame = NSRect(x: bounds.width - wing, y: helperHeight + ((primaryHeight - labelHeight) / 2).rounded(), width: wing - 4, height: labelHeight)
+        badgeLabel.frame = NSRect(x: topRowX + iconWidth + CalendarHelperLayout.calendarHelperRowGapPts,
+                                 y: topRowY, width: labelWidth, height: rowHeight)
         content.frame = NSRect(
             x: ((bounds.width - contentSize.width) / 2).rounded(),
             y: bounds.height - contentSize.height,
