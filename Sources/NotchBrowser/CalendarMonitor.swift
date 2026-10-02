@@ -3,8 +3,20 @@ import Foundation
 
 /// Watches the system calendars (EventKit) and reports minutes until the next event
 /// that starts within `thresholdMinutes`, or nil when there is none.
+struct CalendarBadge: Equatable {
+    let minutes: Int
+    let title: String
+    let startDate: Date
+
+    var startTime: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter.string(from: startDate)
+    }
+}
+
 final class CalendarMonitor {
-    var onChange: ((Int?) -> Void)?
+    var onChange: ((CalendarBadge?) -> Void)?
     var isEnabled = true {
         didSet {
             requestAccessIfNeeded()
@@ -18,7 +30,7 @@ final class CalendarMonitor {
     private var hasAccess = false
     private var isStarted = false
     private var didRequestAccess = false
-    private var lastValue: Int??
+    private var lastValue: CalendarBadge??
 
     func start() {
         isStarted = true
@@ -43,21 +55,20 @@ final class CalendarMonitor {
     }
 
     @objc func refresh() {
-        var minutes: Int?
+        var badge: CalendarBadge?
         if hasAccess, isEnabled {
             let now = Date()
             let end = now.addingTimeInterval(TimeInterval(thresholdMinutes * 60))
             let predicate = store.predicateForEvents(withStart: now, end: end, calendars: nil)
             let next = store.events(matching: predicate)
                 .filter { !$0.isAllDay && $0.startDate > now && !isDeclined($0) }
-                .map(\.startDate)
-                .min()
-            minutes = next.map { Int(($0.timeIntervalSince(now) / 60).rounded(.up)) }
+                .min { $0.startDate < $1.startDate }
+            badge = next.map { CalendarBadge(minutes: Int(($0.startDate.timeIntervalSince(now) / 60).rounded(.up)), title: $0.title ?? "", startDate: $0.startDate) }
         }
 
-        if lastValue != .some(minutes) {
-            lastValue = .some(minutes)
-            onChange?(minutes)
+        if lastValue != .some(badge) {
+            lastValue = .some(badge)
+            onChange?(badge)
         }
     }
 

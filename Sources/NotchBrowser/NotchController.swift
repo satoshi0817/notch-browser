@@ -2,6 +2,74 @@ import AppKit
 import Combine
 import SwiftUI
 
+/// A single clipped line with automatic overflow motion and no scroll controls.
+private final class CalendarHelperView: NSView {
+    private let attributes: [NSAttributedString.Key: Any] = [
+        .font: NSFont.systemFont(ofSize: 11),
+        .foregroundColor: NSColor.white.withAlphaComponent(0.6)
+    ]
+    private var text = ""
+    private var textWidth: CGFloat = 0
+    private var startedAt = Date()
+    private var timer: Timer?
+
+    func setText(_ value: String, visible: Bool) {
+        if value != text || isHidden == visible { startedAt = Date() }
+        text = value
+        textWidth = (text as NSString).size(withAttributes: attributes).width
+        isHidden = !visible
+        updateTimer()
+        needsDisplay = true
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        let widthChanged = newSize.width != frame.width
+        super.setFrameSize(newSize)
+        if widthChanged { startedAt = Date() }
+        updateTimer()
+        needsDisplay = true
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateTimer()
+    }
+
+    private func updateTimer() {
+        guard !isHidden, window != nil, bounds.width > 0, textWidth > bounds.width else {
+            timer?.invalidate()
+            timer = nil
+            return
+        }
+        guard timer == nil else { return }
+        let timer = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
+            self?.needsDisplay = true
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: bounds).addClip()
+        var offset: CGFloat = 0
+        if textWidth > bounds.width {
+            let travel = textWidth - bounds.width
+            let duration = Double(travel / 24)
+            let elapsed = Date().timeIntervalSince(startedAt).truncatingRemainder(dividingBy: duration + 4)
+            // Pause at the leading edge and at the end before restarting.
+            offset = min(travel, CGFloat(max(0, elapsed - 2)) * 24)
+        }
+        let height = (text as NSString).size(withAttributes: attributes).height
+        (text as NSString).draw(at: NSPoint(x: -offset, y: (bounds.height - height) / 2), withAttributes: attributes)
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    deinit { timer?.invalidate() }
+}
+
 private struct RunningAgentBadge: View {
     let agent: SavedNotionAgent?
     @State private var rotating = false
@@ -124,6 +192,9 @@ final class NotchRootView: NSView {
 
     /// Width of each "wing" beside the notch that shows the next-event countdown.
     static let wingWidth: CGFloat = 40
+    static let helperHeight: CGFloat = 18
+    private let calendarHelper = CalendarHelperView()
+    private var showsCalendarHelper = false
     private let badgeIcon = NSImageView()
     private let badgeLabel = NSTextField(labelWithString: "")
     private let agentBadge = NSHostingView(rootView: RunningAgentBadge(agent: nil))
@@ -146,6 +217,8 @@ final class NotchRootView: NSView {
         badgeLabel.alignment = .center
         agentBadge.isHidden = true
         addSubview(agentBadge)
+        calendarHelper.isHidden = true
+        addSubview(calendarHelper)
         for view in [badgeIcon, badgeLabel] as [NSView] {
             view.alphaValue = 0
             addSubview(view)
@@ -160,7 +233,11 @@ final class NotchRootView: NSView {
     }
 
     /// Minutes until the next event, or nil to hide the wings.
-    func setBadge(minutes: Int?, visible: Bool) {
+    func setBadge(event: CalendarBadge?, visible: Bool) {
+        let minutes = event?.minutes
+        showsCalendarHelper = event != nil && visible
+        let title = event?.title.components(separatedBy: .newlines).joined(separator: " ") ?? ""
+        calendarHelper.setText(event.map { "\($0.startTime) · \(title)" } ?? "", visible: showsCalendarHelper)
         if let minutes {
             badgeLabel.stringValue = "\(minutes)分"
             let tint: NSColor = minutes <= 5 ? .systemOrange : .white
@@ -170,6 +247,7 @@ final class NotchRootView: NSView {
         let alpha: CGFloat = minutes != nil && visible ? 1 : 0
         badgeIcon.alphaValue = hasRunningAgent ? 0 : alpha
         badgeLabel.alphaValue = alpha
+        positionContent()
     }
 
     func setRunningAgent(_ agent: SavedNotionAgent?) {
@@ -230,10 +308,13 @@ final class NotchRootView: NSView {
 
     private func positionContent() {
         let wing = Self.wingWidth
+        let helperHeight = showsCalendarHelper ? Self.helperHeight : 0
+        let primaryHeight = bounds.height - helperHeight
+        calendarHelper.frame = NSRect(x: 4, y: 0, width: max(0, bounds.width - 8), height: helperHeight)
         let labelHeight = badgeLabel.intrinsicContentSize.height
-        badgeIcon.frame = NSRect(x: 4, y: ((bounds.height - 18) / 2).rounded(), width: wing - 4, height: 18)
-        agentBadge.frame = NSRect(x: 8, y: ((bounds.height - 24) / 2).rounded(), width: 24, height: 24)
-        badgeLabel.frame = NSRect(x: bounds.width - wing, y: ((bounds.height - labelHeight) / 2).rounded(), width: wing - 4, height: labelHeight)
+        badgeIcon.frame = NSRect(x: 4, y: helperHeight + ((primaryHeight - 18) / 2).rounded(), width: wing - 4, height: 18)
+        agentBadge.frame = NSRect(x: 8, y: helperHeight + ((primaryHeight - 24) / 2).rounded(), width: 24, height: 24)
+        badgeLabel.frame = NSRect(x: bounds.width - wing, y: helperHeight + ((primaryHeight - labelHeight) / 2).rounded(), width: wing - 4, height: labelHeight)
         content.frame = NSRect(
             x: ((bounds.width - contentSize.width) / 2).rounded(),
             y: bounds.height - contentSize.height,
@@ -393,6 +474,7 @@ final class NotchController: NSObject, NSWindowDelegate {
         var size = notchSize
         size.height = stripHeight
         if manager.minutesToNextEvent != nil || !manager.notion.busyAgentIDs.isEmpty { size.width += NotchRootView.wingWidth * 2 }
+        if manager.nextCalendarEvent != nil { size.height += NotchRootView.helperHeight }
         return topCenteredFrame(size)
     }
 
@@ -413,7 +495,7 @@ final class NotchController: NSObject, NSWindowDelegate {
     func relayout(animated: Bool = true) {
         root.contentSize = expandedSize
         layoutContent()
-        root.setBadge(minutes: manager.minutesToNextEvent, visible: !isExpanded && notification == nil)
+        root.setBadge(event: manager.nextCalendarEvent, visible: !isExpanded && notification == nil)
         root.setRunningAgent(isExpanded || notification != nil ? nil : manager.runningAgent)
         animate(to: isExpanded ? expandedFrame : notification != nil ? notificationFrame : collapsedFrame,
                 radius: isExpanded || notification != nil ? 18 : 10,
@@ -439,7 +521,7 @@ final class NotchController: NSObject, NSWindowDelegate {
             isExpanded = true
             if ShelfFeature.isAvailable && !manager.shelf.store.entries.isEmpty { manager.showShelf(on: self) }
             panel.hasShadow = true
-            root.setBadge(minutes: manager.minutesToNextEvent, visible: false)
+            root.setBadge(event: manager.nextCalendarEvent, visible: false)
             root.setRunningAgent(nil)
             animate(to: expandedFrame, radius: 18, contentAlpha: 1)
         }
@@ -469,7 +551,7 @@ final class NotchController: NSObject, NSWindowDelegate {
             panel.orderFrontRegardless()
         }
         panel.hasShadow = false
-        root.setBadge(minutes: manager.minutesToNextEvent, visible: true)
+        root.setBadge(event: manager.nextCalendarEvent, visible: true)
         root.setRunningAgent(manager.runningAgent)
         animate(to: collapsedFrame, radius: 10, contentAlpha: 0, animated: animated)
         manager.didCollapse()
@@ -656,7 +738,8 @@ final class NotchManager {
     private let calendar = CalendarMonitor()
     private let launcherWatcher = LauncherWatcher()
     private var cancellables: Set<AnyCancellable> = []
-    private(set) var minutesToNextEvent: Int?
+    private(set) var nextCalendarEvent: CalendarBadge?
+    var minutesToNextEvent: Int? { nextCalendarEvent?.minutes }
     var isShowingModal = false
 
     var keepOpen = false {
@@ -692,8 +775,8 @@ final class NotchManager {
             self?.isShowingModal = showing
             if !showing { self?.controllers.values.forEach { $0.resumeHoverCloseIfNeeded() } }
         }
-        calendar.onChange = { [weak self] minutes in
-            self?.minutesToNextEvent = minutes
+        calendar.onChange = { [weak self] event in
+            self?.nextCalendarEvent = event
             self?.controllers.values.forEach { $0.relayout() }
         }
         notion.$busyAgentIDs.receive(on: RunLoop.main).sink { [weak self] _ in
