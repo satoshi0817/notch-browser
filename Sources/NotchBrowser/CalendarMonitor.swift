@@ -1,8 +1,7 @@
 import EventKit
 import Foundation
 
-/// Watches the system calendars (EventKit) and reports minutes until the next event
-/// that starts within `thresholdMinutes`, or nil when there is none.
+/// Countdown to the current event's end or the next event's start.
 struct CalendarBadge: Equatable {
     let minutes: Int
     let title: String
@@ -60,10 +59,7 @@ final class CalendarMonitor {
             let now = Date()
             let end = now.addingTimeInterval(TimeInterval(thresholdMinutes * 60))
             let predicate = store.predicateForEvents(withStart: now, end: end, calendars: nil)
-            let next = store.events(matching: predicate)
-                .filter { !$0.isAllDay && $0.startDate > now && !isDeclined($0) }
-                .min { $0.startDate < $1.startDate }
-            badge = next.map { CalendarBadge(minutes: Int(($0.startDate.timeIntervalSince(now) / 60).rounded(.up)), title: $0.title ?? "", startDate: $0.startDate) }
+            badge = Self.badge(for: store.events(matching: predicate), now: now, upcomingEnd: end)
         }
 
         if lastValue != .some(badge) {
@@ -72,7 +68,20 @@ final class CalendarMonitor {
         }
     }
 
-    private func isDeclined(_ event: EKEvent) -> Bool {
+    static func badge(for events: [EKEvent], now: Date, upcomingEnd: Date) -> CalendarBadge? {
+        let candidates = events.filter {
+            !$0.isAllDay && $0.endDate > now && $0.startDate <= upcomingEnd && !isDeclined($0)
+        }
+        let current = candidates.filter { $0.startDate <= now }.min { $0.startDate < $1.startDate }
+        let next = current ?? candidates.min { $0.startDate < $1.startDate }
+        return next.map {
+            let target = $0.startDate <= now ? $0.endDate! : $0.startDate!
+            return CalendarBadge(minutes: Int((target.timeIntervalSince(now) / 60).rounded(.up)),
+                                 title: $0.title ?? "", startDate: $0.startDate)
+        }
+    }
+
+    private static func isDeclined(_ event: EKEvent) -> Bool {
         event.attendees?.first(where: \.isCurrentUser)?.participantStatus == .declined
     }
 }
