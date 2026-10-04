@@ -3,9 +3,18 @@ import Foundation
 
 /// Countdown to the current event's end or the next event's start.
 struct CalendarBadge: Equatable {
+    struct Identity: Equatable {
+        let identifier: String
+        let startDate: Date
+    }
+    let identity: Identity
     let minutes: Int
     let title: String
     let startDate: Date
+
+    var helperText: String {
+        "\(startTime) · \(title.components(separatedBy: .newlines).joined(separator: " "))"
+    }
 
     var startTime: String {
         let formatter = DateFormatter()
@@ -76,7 +85,8 @@ final class CalendarMonitor {
         let next = current ?? candidates.min { $0.startDate < $1.startDate }
         return next.map {
             let target = $0.startDate <= now ? $0.endDate! : $0.startDate!
-            return CalendarBadge(minutes: Int((target.timeIntervalSince(now) / 60).rounded(.up)),
+            return CalendarBadge(identity: .init(identifier: $0.eventIdentifier ?? $0.calendarItemIdentifier, startDate: $0.startDate),
+                                 minutes: Int((target.timeIntervalSince(now) / 60).rounded(.up)),
                                  title: $0.title ?? "", startDate: $0.startDate)
         }
     }
@@ -84,4 +94,19 @@ final class CalendarMonitor {
     private static func isDeclined(_ event: EKEvent) -> Bool {
         event.attendees?.first(where: \.isCurrentUser)?.participantStatus == .declined
     }
+}
+
+/// Session-only dismissal, independent of countdown updates.
+struct CalendarBadgePresentation {
+    private(set) var selected: CalendarBadge?
+    private var dismissedIdentity: CalendarBadge.Identity?
+    var visible: CalendarBadge? {
+        guard selected?.identity != dismissedIdentity else { return nil }
+        return selected
+    }
+    mutating func update(_ event: CalendarBadge?) {
+        if selected?.identity != event?.identity { dismissedIdentity = nil }
+        selected = event
+    }
+    mutating func dismiss() { dismissedIdentity = selected?.identity }
 }

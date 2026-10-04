@@ -193,6 +193,7 @@ final class NotchPanel: NSPanel {
 final class NotchRootView: NSView {
     var onHoverChange: ((Bool) -> Void)?
     var onClick: (() -> Void)?
+    var onCalendarClick: (() -> Void)?
     var onFileDrag: (() -> Bool)?
     var onFileDrop: (([URL]) -> Bool)?
     let content = NSView()
@@ -244,8 +245,7 @@ final class NotchRootView: NSView {
     func setBadge(event: CalendarBadge?, visible: Bool) {
         let minutes = event?.minutes
         showsCalendarHelper = event != nil && visible
-        let title = event?.title.components(separatedBy: .newlines).joined(separator: " ") ?? ""
-        calendarHelper.setText(event.map { "\($0.startTime) · \(title)" } ?? "", visible: showsCalendarHelper)
+        calendarHelper.setText(event?.helperText ?? "", visible: showsCalendarHelper)
         if let minutes {
             badgeLabel.stringValue = "\(minutes)分"
             let tint: NSColor = minutes <= 5 ? .systemOrange : .white
@@ -288,7 +288,20 @@ final class NotchRootView: NSView {
 
     override func mouseEntered(with event: NSEvent) { onHoverChange?(true) }
     override func mouseExited(with event: NSEvent) { onHoverChange?(false) }
-    override func mouseDown(with event: NSEvent) { onClick?() }
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = convert(point, from: superview)
+        if calendarHit(local) { return self }
+        return super.hitTest(point)
+    }
+
+    private func calendarHit(_ point: NSPoint) -> Bool {
+        showsCalendarHelper && (badgeIcon.frame.contains(point) || badgeLabel.frame.contains(point) || calendarHelper.frame.contains(point))
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if calendarHit(convert(event.locationInWindow, from: nil)) { onCalendarClick?() }
+        else { onClick?() }
+    }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
         guard sender.draggingPasteboard.availableType(from: [ShelfDragMonitor.originType]) == nil,
@@ -318,15 +331,11 @@ final class NotchRootView: NSView {
         let inset = CalendarHelperLayout.horizontalInset
         let rowHeight = CalendarHelperLayout.rowHeight
         calendarHelper.frame = NSRect(x: inset, y: 0, width: max(0, bounds.width - inset * 2), height: rowHeight)
-        let topRowY = rowHeight + CalendarHelperLayout.calendarHelperRowGapPts
-        let labelWidth = badgeLabel.intrinsicContentSize.width
-        let iconWidth = rowHeight
-        let topRowWidth = iconWidth + CalendarHelperLayout.calendarHelperRowGapPts + labelWidth
-        let topRowX = ((bounds.width - topRowWidth) / 2).rounded()
-        badgeIcon.frame = NSRect(x: topRowX, y: topRowY, width: iconWidth, height: rowHeight)
+        // Align both wings beside the physical notch, above the helper line.
+        let topRowY = helperHeight + ((primaryHeight - rowHeight) / 2).rounded()
+        badgeIcon.frame = NSRect(x: (Self.wingWidth - rowHeight) / 2, y: topRowY, width: rowHeight, height: rowHeight)
+        badgeLabel.frame = NSRect(x: bounds.width - Self.wingWidth, y: topRowY, width: Self.wingWidth, height: rowHeight)
         agentBadge.frame = NSRect(x: 8, y: helperHeight + ((primaryHeight - 24) / 2).rounded(), width: 24, height: 24)
-        badgeLabel.frame = NSRect(x: topRowX + iconWidth + CalendarHelperLayout.calendarHelperRowGapPts,
-                                 y: topRowY, width: labelWidth, height: rowHeight)
         content.frame = NSRect(
             x: ((bounds.width - contentSize.width) / 2).rounded(),
             y: bounds.height - contentSize.height,
@@ -392,6 +401,7 @@ final class NotchController: NSObject, NSWindowDelegate {
         }
 
         root.onHoverChange = { [weak self] inside in self?.hoverChanged(inside) }
+        root.onCalendarClick = { [weak self] in self?.manager.dismissCalendarEvent() }
         root.onClick = { [weak self] in
             guard let self else { return }
             if self.notification != nil { self.openNotificationChat() }
@@ -750,9 +760,15 @@ final class NotchManager {
     private let calendar = CalendarMonitor()
     private let launcherWatcher = LauncherWatcher()
     private var cancellables: Set<AnyCancellable> = []
-    private(set) var nextCalendarEvent: CalendarBadge?
+    private var calendarPresentation = CalendarBadgePresentation()
+    var nextCalendarEvent: CalendarBadge? { calendarPresentation.visible }
     var minutesToNextEvent: Int? { nextCalendarEvent?.minutes }
     var isShowingModal = false
+
+    func dismissCalendarEvent() {
+        calendarPresentation.dismiss()
+        controllers.values.forEach { $0.relayout() }
+    }
 
     var keepOpen = false {
         didSet {
@@ -788,7 +804,7 @@ final class NotchManager {
             if !showing { self?.controllers.values.forEach { $0.resumeHoverCloseIfNeeded() } }
         }
         calendar.onChange = { [weak self] event in
-            self?.nextCalendarEvent = event
+            self?.calendarPresentation.update(event)
             self?.controllers.values.forEach { $0.relayout() }
         }
         notion.$busyAgentIDs.receive(on: RunLoop.main).sink { [weak self] _ in

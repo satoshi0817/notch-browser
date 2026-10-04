@@ -1,3 +1,4 @@
+import AppKit
 import EventKit
 import XCTest
 @testable import NotchBrowser
@@ -54,5 +55,61 @@ final class CalendarMonitorTests: XCTestCase {
         let earlier = event(start: -600, end: 120)
         let later = event(start: -300, end: 600)
         XCTAssertEqual(try XCTUnwrap(badge([later, earlier])).minutes, 2)
+    }
+
+    func testDismissalSurvivesCountdownUpdatesAndResetsOnReplacement() throws {
+        let first = try XCTUnwrap(badge([event(start: 60, end: 600)]))
+        var presentation = CalendarBadgePresentation()
+        presentation.update(first)
+        presentation.dismiss()
+        XCTAssertNil(presentation.visible)
+        let updated = CalendarBadge(identity: first.identity, minutes: 1, title: "Renamed", startDate: first.startDate)
+        presentation.update(updated)
+        XCTAssertNil(presentation.visible)
+        let replacement = try XCTUnwrap(badge([event(start: 120, end: 900)]))
+        presentation.update(replacement)
+        XCTAssertEqual(presentation.visible, replacement)
+        presentation.update(first)
+        XCTAssertEqual(presentation.visible, first)
+        presentation.dismiss()
+        presentation.update(nil)
+        presentation.update(first)
+        XCTAssertEqual(presentation.visible, first)
+        var relaunched = CalendarBadgePresentation()
+        relaunched.update(first)
+        XCTAssertEqual(relaunched.visible, first)
+    }
+
+    func testHelperStartsWithTimeAndNormalizesTitle() throws {
+        let meeting = event(start: 60, end: 600)
+        meeting.title = "Planning\nmeeting"
+        let result = try XCTUnwrap(badge([meeting]))
+        XCTAssertEqual(result.helperText, "\(result.startTime) · Planning meeting")
+    }
+
+    @MainActor
+    func testCalendarWingsAndClicks() throws {
+        let root = NotchRootView(frame: NSRect(x: 0, y: 0, width: 280, height: 72))
+        root.setBadge(event: try XCTUnwrap(badge([event(start: 60, end: 600)])), visible: true)
+        let icon = try XCTUnwrap(root.subviews.compactMap { $0 as? NSImageView }.first)
+        let label = try XCTUnwrap(root.subviews.compactMap { $0 as? NSTextField }.first)
+        XCTAssertLessThanOrEqual(icon.frame.maxX, 40)
+        XCTAssertGreaterThanOrEqual(label.frame.minX, 240)
+        XCTAssertEqual(icon.frame.midY, label.frame.midY)
+        XCTAssertGreaterThanOrEqual(icon.frame.minY, NotchRootView.helperHeight)
+        var dismissals = 0
+        var opens = 0
+        root.onCalendarClick = { dismissals += 1 }
+        root.onClick = { opens += 1 }
+        for point in [NSPoint(x: icon.frame.midX, y: icon.frame.midY),
+                      NSPoint(x: label.frame.midX, y: label.frame.midY), NSPoint(x: 10, y: 9)] {
+            XCTAssertTrue(root.hitTest(point) === root)
+            let click = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseDown, location: point,
+                modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+            root.mouseDown(with: click)
+        }
+        XCTAssertEqual(dismissals, 3)
+        XCTAssertEqual(opens, 0)
+        XCTAssertEqual(root.frame.width, 280)
     }
 }
