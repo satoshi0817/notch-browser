@@ -172,6 +172,7 @@ struct SettingsData: Codable {
     /// Keyed by display UUID.
     var displays: [String: DisplaySettings] = [:]
     var countdownEnabled = true
+    var calendarMarqueeEnabled = true
     var countdownMinutes = 30
     var openTabBehavior = OpenTabBehavior.lastViewed
     var grayscaleIcons = false
@@ -217,6 +218,7 @@ struct SettingsData: Codable {
         newTabProfileID = try c.decodeIfPresent(UUID.self, forKey: .newTabProfileID) ?? fallback.newTabProfileID
         displays = try c.decodeIfPresent([String: DisplaySettings].self, forKey: .displays) ?? fallback.displays
         countdownEnabled = try c.decodeIfPresent(Bool.self, forKey: .countdownEnabled) ?? fallback.countdownEnabled
+        calendarMarqueeEnabled = try c.decodeIfPresent(Bool.self, forKey: .calendarMarqueeEnabled) ?? fallback.calendarMarqueeEnabled
         countdownMinutes = try c.decodeIfPresent(Int.self, forKey: .countdownMinutes) ?? fallback.countdownMinutes
         hideFromScreenCapture = try c.decodeIfPresent(Bool.self, forKey: .hideFromScreenCapture) ?? fallback.hideFromScreenCapture
         openTabBehavior = try c.decodeIfPresent(OpenTabBehavior.self, forKey: .openTabBehavior) ?? fallback.openTabBehavior

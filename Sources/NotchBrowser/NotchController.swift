@@ -2,13 +2,14 @@ import AppKit
 import Combine
 import SwiftUI
 
-private enum CalendarHelperLayout {
-    static let calendarHelperRowGapPts: CGFloat = 4
+enum CalendarHelperLayout {
+    static let calendarHelperRowGapPts: CGFloat = 2
+    static let bottomPadding: CGFloat = 4
     static let rowHeight: CGFloat = 18
     static let horizontalInset: CGFloat = 6
     static let primaryFontSize: CGFloat = 13
     static let secondaryFontSize = primaryFontSize * 0.88
-    static let height = rowHeight * 2 + calendarHelperRowGapPts
+    static let height = rowHeight + calendarHelperRowGapPts + bottomPadding
 }
 
 /// A single clipped line with automatic overflow motion and no scroll controls.
@@ -205,6 +206,7 @@ final class NotchRootView: NSView {
     static let helperHeight = CalendarHelperLayout.height
     private let calendarHelper = CalendarHelperView()
     private var showsCalendarHelper = false
+    private var showsCalendarBadge = false
     private let badgeIcon = NSImageView()
     private let badgeLabel = NSTextField(labelWithString: "")
     private let agentBadge = NSHostingView(rootView: RunningAgentBadge(agent: nil))
@@ -242,9 +244,10 @@ final class NotchRootView: NSView {
     }
 
     /// Minutes until the next event, or nil to hide the calendar helper.
-    func setBadge(event: CalendarBadge?, visible: Bool) {
+    func setBadge(event: CalendarBadge?, visible: Bool, marqueeEnabled: Bool = true) {
         let minutes = event?.minutes
-        showsCalendarHelper = event != nil && visible
+        showsCalendarBadge = event != nil && visible
+        showsCalendarHelper = showsCalendarBadge && marqueeEnabled
         calendarHelper.setText(event?.helperText ?? "", visible: showsCalendarHelper)
         if let minutes {
             badgeLabel.stringValue = "\(minutes)分"
@@ -295,7 +298,8 @@ final class NotchRootView: NSView {
     }
 
     private func calendarHit(_ point: NSPoint) -> Bool {
-        showsCalendarHelper && (badgeIcon.frame.contains(point) || badgeLabel.frame.contains(point) || calendarHelper.frame.contains(point))
+        showsCalendarBadge && (badgeIcon.frame.contains(point) || badgeLabel.frame.contains(point)
+            || (showsCalendarHelper && calendarHelper.frame.contains(point)))
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -330,7 +334,8 @@ final class NotchRootView: NSView {
         let primaryHeight = bounds.height - helperHeight
         let inset = CalendarHelperLayout.horizontalInset
         let rowHeight = CalendarHelperLayout.rowHeight
-        calendarHelper.frame = NSRect(x: inset, y: 0, width: max(0, bounds.width - inset * 2), height: rowHeight)
+        calendarHelper.frame = NSRect(x: inset, y: CalendarHelperLayout.bottomPadding,
+                                      width: max(0, bounds.width - inset * 2), height: rowHeight)
         // Align both wings beside the physical notch, above the helper line.
         let topRowY = helperHeight + ((primaryHeight - rowHeight) / 2).rounded()
         badgeIcon.frame = NSRect(x: (Self.wingWidth - rowHeight) / 2, y: topRowY, width: rowHeight, height: rowHeight)
@@ -496,7 +501,9 @@ final class NotchController: NSObject, NSWindowDelegate {
         var size = notchSize
         size.height = stripHeight
         if manager.minutesToNextEvent != nil || !manager.notion.busyAgentIDs.isEmpty { size.width += NotchRootView.wingWidth * 2 }
-        if manager.nextCalendarEvent != nil { size.height += NotchRootView.helperHeight }
+        if manager.nextCalendarEvent != nil && SettingsStore.shared.data.calendarMarqueeEnabled {
+            size.height += NotchRootView.helperHeight
+        }
         return topCenteredFrame(size)
     }
 
@@ -517,7 +524,8 @@ final class NotchController: NSObject, NSWindowDelegate {
     func relayout(animated: Bool = true) {
         root.contentSize = expandedSize
         layoutContent()
-        root.setBadge(event: manager.nextCalendarEvent, visible: !isExpanded && notification == nil)
+        root.setBadge(event: manager.nextCalendarEvent, visible: !isExpanded && notification == nil,
+                      marqueeEnabled: SettingsStore.shared.data.calendarMarqueeEnabled)
         root.setRunningAgent(isExpanded || notification != nil ? nil : manager.runningAgent)
         animate(to: isExpanded ? expandedFrame : notification != nil ? notificationFrame : collapsedFrame,
                 radius: isExpanded || notification != nil ? 18 : 10,
@@ -573,7 +581,8 @@ final class NotchController: NSObject, NSWindowDelegate {
             panel.orderFrontRegardless()
         }
         panel.hasShadow = false
-        root.setBadge(event: manager.nextCalendarEvent, visible: true)
+        root.setBadge(event: manager.nextCalendarEvent, visible: true,
+                      marqueeEnabled: SettingsStore.shared.data.calendarMarqueeEnabled)
         root.setRunningAgent(manager.runningAgent)
         animate(to: collapsedFrame, radius: 10, contentAlpha: 0, animated: animated)
         manager.didCollapse()
@@ -761,7 +770,9 @@ final class NotchManager {
     private let launcherWatcher = LauncherWatcher()
     private var cancellables: Set<AnyCancellable> = []
     private var calendarPresentation = CalendarBadgePresentation()
-    var nextCalendarEvent: CalendarBadge? { calendarPresentation.visible }
+    var nextCalendarEvent: CalendarBadge? {
+        SettingsStore.shared.data.countdownEnabled ? calendarPresentation.visible : nil
+    }
     var minutesToNextEvent: Int? { nextCalendarEvent?.minutes }
     var isShowingModal = false
 

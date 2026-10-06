@@ -411,11 +411,15 @@ struct GeneralSettings: View {
             }
 
             Section("次の予定") {
-                Toggle("次の予定までの分数をノッチに表示", isOn: $store.data.countdownEnabled)
+                Toggle("次の予定を表示", isOn: $store.data.countdownEnabled)
+                Toggle("予定名をスクロール表示", isOn: $store.data.calendarMarqueeEnabled)
+                    .disabled(!store.data.countdownEnabled)
+                    .opacity(store.data.countdownEnabled ? 1 : 0.5)
                 Stepper(value: $store.data.countdownMinutes, in: 5...120, step: 5) {
                     LabeledContent("表示し始めるタイミング", value: "\(store.data.countdownMinutes) 分前から")
                 }
                 .disabled(!store.data.countdownEnabled)
+                .opacity(store.data.countdownEnabled ? 1 : 0.5)
                 Text("Mac の「カレンダー」アプリの予定を使うため、オンのときだけカレンダーへのアクセスを求めます。タブで開くカレンダーのサイトとは別です。Google カレンダーは システム設定 › インターネットアカウント で追加できます。")
                     .font(.caption).foregroundStyle(.secondary)
             }
