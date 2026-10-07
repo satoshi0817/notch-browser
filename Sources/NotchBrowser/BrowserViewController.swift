@@ -846,6 +846,13 @@ final class BrowserViewController: NSViewController {
             let button = TabButton(title: iconOnly ? "" : tab.displayName, image: tab.icon(grayscale: !colored), target: self, action: #selector(tabClicked))
             button.onDragBegan = { [weak self] _ in self?.isDraggingTab = true }
             button.onDragEnded = { [weak self] button in self?.tabDragEnded(button) }
+            if tab.pinnedID == nil {
+                button.onClose = { [weak self, weak tab] in
+                    guard let self, let tab, let index = self.tabs.firstIndex(where: { $0 === tab }),
+                          tab.pinnedID == nil else { return }
+                    self.closeTab(at: index)
+                }
+            }
             button.bezelStyle = .recessed
             button.setButtonType(.pushOnPushOff)
             let active = i == selectedIndex && notionPanel?.isHidden != false
@@ -1453,6 +1460,17 @@ extension BrowserViewController: WKUIDelegate {
 /// Hover opening deliberately leaves the panel non-key. AppKit's recessed bezel
 /// desaturates in that state, so draw the selected tab independently of focus.
 final class TabButtonCell: NSButtonCell {
+    override func drawInterior(withFrame frame: NSRect, in controlView: NSView) {
+        var contentFrame = frame
+        if let button = controlView as? TabButton, button.onClose != nil {
+            contentFrame.size.width = max(0, frame.width - 20)
+        }
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: contentFrame).addClip()
+        super.drawInterior(withFrame: contentFrame, in: controlView)
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
     override func drawBezel(withFrame frame: NSRect, in controlView: NSView) {
         guard state == .on else {
             super.drawBezel(withFrame: frame, in: controlView)
@@ -1472,6 +1490,60 @@ final class TabButton: NSButton {
 
     var onDragBegan: ((TabButton) -> Void)?
     var onDragEnded: ((TabButton) -> Void)?
+    var onClose: (() -> Void)? {
+        didSet {
+            if onClose != nil, closeButton.superview == nil { addSubview(closeButton) }
+            if onClose == nil { closeButton.removeFromSuperview() }
+            needsLayout = true
+            needsDisplay = true
+        }
+    }
+    private var hoverTrackingArea: NSTrackingArea?
+    private var isHovered = false
+    private lazy var closeButton: NSButton = {
+        let button = TabCloseButton()
+        button.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "タブを閉じる")?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 12, weight: .regular))
+        button.imagePosition = .imageOnly
+        button.isBordered = false
+        button.contentTintColor = .white
+        button.target = self
+        button.action = #selector(closeClicked)
+        button.setAccessibilityLabel("タブを閉じる")
+        button.alphaValue = 0
+        button.isEnabled = false
+        return button
+    }()
+
+    override func layout() {
+        super.layout()
+        closeButton.frame = NSRect(x: bounds.maxX - 20, y: bounds.midY - 10, width: 20, height: 20)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverTrackingArea { removeTrackingArea(hoverTrackingArea) }
+        let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self)
+        addTrackingArea(area)
+        hoverTrackingArea = area
+        let hovered = window.map { bounds.contains(convert($0.mouseLocationOutsideOfEventStream, from: nil)) } ?? false
+        setHovered(hovered)
+    }
+
+    override func mouseEntered(with event: NSEvent) { setHovered(true) }
+    override func mouseExited(with event: NSEvent) { setHovered(false) }
+
+    private func setHovered(_ hovered: Bool) {
+        guard isHovered != hovered else { return }
+        isHovered = hovered
+        closeButton.isEnabled = hovered
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.12
+            closeButton.animator().alphaValue = hovered ? 1 : 0
+        }
+    }
+
+    @objc private func closeClicked(_ sender: NSButton) { onClose?() }
 
     override func mouseDown(with event: NSEvent) {
         guard let window else { return super.mouseDown(with: event) }
@@ -1498,6 +1570,17 @@ final class TabButton: NSButton {
                 frame.origin.x = originX + dx
             }
         }
+    }
+}
+
+/// Hidden close controls leave the entire tab body available for selection/dragging.
+private final class TabCloseButton: NSButton {
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        isEnabled ? super.hitTest(point) : nil
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        superview?.rightMouseDown(with: event)
     }
 }
 
