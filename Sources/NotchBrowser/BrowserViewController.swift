@@ -52,6 +52,15 @@ final class Tab {
 }
 
 final class BrowserViewController: NSViewController {
+    var onToggleDetached: (() -> Void)?
+    var isDetached = false { didSet {
+        guard isViewLoaded else { return }
+        detachButton.image = symbol(isDetached ? "arrow.down.backward" : "arrow.up.forward.app")
+        detachButton.toolTip = isDetached ? "ノッチに戻す" : "ウインドウで開く"
+        detachButton.setAccessibilityLabel(detachButton.toolTip!)
+        updateCompactControls()
+        rebuildToolsMenu()
+    } }
     var onToggleKeepOpen: (() -> Void)?
     var onModalChange: ((Bool) -> Void)?
     var onOpenShelf: (() -> Void)?
@@ -61,6 +70,13 @@ final class BrowserViewController: NSViewController {
     var keepOpen = false { didSet { updateChrome() } }
     var hideFromScreenCapture = true
 
+    private var preservingWebState = false
+    private var detachedTrafficInset: CGFloat = 80
+    private let titlebarDrag = BrowserTitlebarDragView()
+    private var tabLeadingConstraint: NSLayoutConstraint!
+    private var detachedTabTrailingConstraint: NSLayoutConstraint!
+    private var detachedControlWidthConstraint: NSLayoutConstraint!
+    private var notchStripHeight: CGFloat = 32
     private var tabs: [Tab] = []
     private var tabButtons: [TabButton] = []
     private var isDraggingTab = false
@@ -124,6 +140,7 @@ final class BrowserViewController: NSViewController {
     private lazy var backButton = iconButton("chevron.left", "戻る", #selector(goBack))
     private lazy var forwardButton = iconButton("chevron.right", "進む", #selector(goForward))
     private lazy var reloadButton = iconButton("arrow.clockwise", "再読み込み", #selector(reloadOrStop))
+    private lazy var detachButton = iconButton("arrow.up.forward.app", "ウインドウで開く", #selector(toggleDetached))
     private lazy var keepOpenButton = iconButton("pin", "開いたままにする", #selector(toggleKeepOpen))
 
     private lazy var toolbarButtons: [ToolbarAction: NSButton] = {
@@ -234,6 +251,7 @@ final class BrowserViewController: NSViewController {
         tabScroll.hasHorizontalScroller = true
         tabScroll.scrollerStyle = .overlay
         tabScroll.autohidesScrollers = true
+        tabScroll.contentView.drawsBackground = false
         tabScroll.documentView = tabStack
         webContainer.wantsLayer = true
         webContainer.layer?.cornerRadius = 10
@@ -261,15 +279,32 @@ final class BrowserViewController: NSViewController {
         }
         tabTrailingConstraint = addTabButton.trailingAnchor.constraint(equalTo: chrome.centerXAnchor, constant: -110)
         controlLeadingConstraint = controlStack.leadingAnchor.constraint(equalTo: chrome.centerXAnchor, constant: 110)
+        tabLeadingConstraint = tabScroll.leadingAnchor.constraint(equalTo: chrome.leadingAnchor, constant: 14)
+        detachedTabTrailingConstraint = addTabButton.trailingAnchor.constraint(equalTo: controlStack.leadingAnchor, constant: -DetachedToolbarLayout.tabControlGap)
+        detachedControlWidthConstraint = controlStack.widthAnchor.constraint(equalToConstant: 0)
+        overflowTabButton.translatesAutoresizingMaskIntoConstraints = false
+        chrome.addSubview(overflowTabButton)
+        NSLayoutConstraint.activate([
+            overflowTabButton.widthAnchor.constraint(equalToConstant: 28),
+            overflowTabButton.heightAnchor.constraint(equalToConstant: 28),
+            overflowTabButton.centerYAnchor.constraint(equalTo: tabScroll.centerYAnchor)
+        ])
+        normalTabScrollTrailingConstraint = tabScroll.trailingAnchor.constraint(equalTo: addTabButton.leadingAnchor, constant: -4)
+        overflowTabConstraints = [
+            tabScroll.trailingAnchor.constraint(equalTo: overflowTabButton.leadingAnchor, constant: -4),
+            addTabButton.leadingAnchor.constraint(equalTo: overflowTabButton.trailingAnchor, constant: 4)
+        ]
+        overflowTabLeadingConstraint = overflowTabButton.leadingAnchor.constraint(equalTo: tabScroll.leadingAnchor)
+        overflowControlGapConstraint = addTabButton.trailingAnchor.constraint(lessThanOrEqualTo: controlStack.leadingAnchor, constant: -8)
         let tabHeight = tabScroll.heightAnchor.constraint(equalToConstant: 32)
         let controlHeight = controlStack.heightAnchor.constraint(equalToConstant: 32)
         stripHeightConstraints = [tabHeight, controlHeight]
         findHeight = findBar.heightAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
             tabScroll.topAnchor.constraint(equalTo: chrome.topAnchor),
-            tabScroll.leadingAnchor.constraint(equalTo: chrome.leadingAnchor, constant: 14),
+            tabLeadingConstraint,
             tabTrailingConstraint, tabHeight,
-            tabScroll.trailingAnchor.constraint(equalTo: addTabButton.leadingAnchor, constant: -4),
+            normalTabScrollTrailingConstraint,
             addTabButton.centerYAnchor.constraint(equalTo: tabScroll.centerYAnchor),
             controlStack.topAnchor.constraint(equalTo: chrome.topAnchor),
             controlStack.trailingAnchor.constraint(equalTo: chrome.trailingAnchor, constant: -12),
@@ -281,6 +316,15 @@ final class BrowserViewController: NSViewController {
             webContainer.leadingAnchor.constraint(equalTo: chrome.leadingAnchor, constant: 8),
             webContainer.trailingAnchor.constraint(equalTo: chrome.trailingAnchor, constant: -8),
             webContainer.bottomAnchor.constraint(equalTo: chrome.bottomAnchor, constant: -8)
+        ])
+        titlebarDrag.isHidden = true
+        titlebarDrag.translatesAutoresizingMaskIntoConstraints = false
+        chrome.addSubview(titlebarDrag)
+        NSLayoutConstraint.activate([
+            titlebarDrag.leadingAnchor.constraint(equalTo: chrome.leadingAnchor),
+            titlebarDrag.trailingAnchor.constraint(equalTo: chrome.trailingAnchor),
+            titlebarDrag.topAnchor.constraint(equalTo: chrome.topAnchor),
+            titlebarDrag.heightAnchor.constraint(equalTo: controlStack.heightAnchor)
         ])
         configureSwitcher(in: chrome)
         notes.isHidden = true
@@ -325,20 +369,134 @@ final class BrowserViewController: NSViewController {
     /// Preserve the original single strip, with the camera cutout between tabs and navigation.
     func updateNotchMetrics(notchWidth: CGFloat, stripHeight: CGFloat) {
         _ = view
+        notchStripHeight = stripHeight
         let gap = notchWidth / 2 + 12
         tabTrailingConstraint.constant = -gap
         controlLeadingConstraint.constant = gap
         for constraint in stripHeightConstraints { constraint.constant = stripHeight }
+        needsTabReveal = true
+        view.needsLayout = true
         updateCompactControls()
         tabStack.setFrameSize(NSSize(width: tabStack.frame.width, height: stripHeight))
     }
 
+    func updateDetachedMetrics(trafficInset: CGFloat, rowHeight: CGFloat) {
+        // This scroll view intentionally lives inside the full-size titlebar.
+        // Automatic safe-area insets would subtract that same titlebar from its
+        // 28pt row, leaving a zero-height clip view and unreachable tab controls.
+        tabStack.spacing = 2
+        tabStack.detachesHiddenViews = true
+        tabScroll.automaticallyAdjustsContentInsets = false
+        tabScroll.contentInsets = NSEdgeInsetsZero
+        detachedTrafficInset = trafficInset
+        tabTrailingConstraint.isActive = false
+        controlLeadingConstraint.isActive = false
+        detachedTabTrailingConstraint.isActive = true
+        detachedControlWidthConstraint.isActive = true
+        tabLeadingConstraint.constant = trafficInset
+        for constraint in stripHeightConstraints { constraint.constant = rowHeight }
+        titlebarDrag.isHidden = false
+        tabStack.setFrameSize(NSSize(width: tabStack.frame.width, height: rowHeight))
+        updateCompactControls()
+    }
+
+    private func restoreNotchMetrics() {
+        overflowTabLeadingConstraint.isActive = false
+        NSLayoutConstraint.deactivate(overflowTabConstraints)
+        normalTabScrollTrailingConstraint.isActive = true
+        overflowTabButton.isHidden = true
+        overflowControlGapConstraint.isActive = false
+        tabStack.spacing = 4
+        tabScroll.automaticallyAdjustsContentInsets = true
+        // Hidden arranged views may be detached from NSStackView. Restore the
+        // saved complete order, not only the currently attached visible slots.
+        if !detachedTabViews.isEmpty {
+            tabStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+            for item in detachedTabViews {
+                item.isHidden = false
+                item.constraints.filter { $0.identifier == "detached-tab-divider" }.forEach { $0.isActive = false }
+                tabStack.addArrangedSubview(item)
+            }
+        }
+        detachedTabViews = []
+        lastDetachedSettle = nil
+        lastDetachedRebuild = nil
+        for case let button as TabButton in tabStack.arrangedSubviews {
+            button.isHidden = false
+            button.detachedWidthConstraint?.isActive = false
+            button.isDetachedLayout = false
+            if let original = button.detachedOriginalTitle {
+                button.title = original
+                button.imagePosition = button.detachedOriginalImagePosition
+                button.detachedOriginalTitle = nil
+            }
+            button.cell?.truncatesLastVisibleLine = button.notchTruncatesLastVisibleLine
+        }
+        tabStack.setFrameSize(NSSize(width: tabStack.fittingSize.width, height: notchStripHeight))
+        tabScroll.contentView.scroll(to: .zero)
+        tabScroll.reflectScrolledClipView(tabScroll.contentView)
+        needsTabReveal = true
+        view.needsLayout = true
+
+        detachedTabTrailingConstraint.isActive = false
+        detachedControlWidthConstraint.isActive = false
+        tabTrailingConstraint.isActive = true
+        controlLeadingConstraint.isActive = true
+        tabLeadingConstraint.constant = 14
+        titlebarDrag.isHidden = true
+        addTabButton.title = ""
+        addTabButton.image = symbol("plus")
+        addTabButton.imagePosition = .imageOnly
+        addTabButton.action = #selector(newTab)
+        addTabButton.constraints.first { $0.firstAttribute == .width && $0.secondItem == nil }?.constant = 28
+
+        for constraint in stripHeightConstraints { constraint.constant = notchStripHeight }
+    }
+
+    private func updateDetachedControls() {
+        let result = detachedTabPlan().toolbar
+        let visible = Set(result.visible)
+        var changed = arrangeToolbar(ifNeeded: [.back, .forward, .home, .reload, .address, .settings, .quit])
+        if controlStack.spacing != DetachedToolbarLayout.spacing { controlStack.spacing = DetachedToolbarLayout.spacing }
+        if !defaultToolbarSpacer.isHidden { defaultToolbarSpacer.isHidden = true }
+        if !placedToolbarSpacer.isHidden { placedToolbarSpacer.isHidden = true }
+        for (action, button) in toolbarButtons {
+            if button.isHidden != !visible.contains(action) {
+                button.isHidden = !visible.contains(action)
+                changed = true
+            }
+        }
+        for button in Array(toolbarButtons.values) + [detachButton] {
+            if let width = button.constraints.first(where: { $0.firstAttribute == .width && $0.secondItem == nil }),
+               width.constant != 28 { width.constant = 28 }
+        }
+        if detachedControlWidthConstraint.constant != result.width { detachedControlWidthConstraint.constant = result.width }
+        if changed { rebuildToolsMenu() }
+    }
+
     private func updateCompactControls() {
+        if isDetached { updateDetachedControls(); return }
+        if detachedControlWidthConstraint?.isActive == true { restoreNotchMetrics() }
+        defaultToolbarSpacer.isHidden = false
+        placedToolbarSpacer.isHidden = false
         let available = view.bounds.width / 2 - controlLeadingConstraint.constant - 12
         let capacity = max(0, Int((available - 32) / 32))
         let requested = store.data.toolbarActions.filter { $0 != .notion && $0.isAvailable }
         let visible = Set(requested.filter { $0 != .spacer }.prefix(capacity))
         var changed = arrangeToolbar(ifNeeded: requested)
+        // Keep the original visible actions and camera gap. Narrow only their hit areas
+        // when the extra detach button needs room; retain at least 3pt between controls.
+        let iconCount = CGFloat(visible.count + 1) // visible actions plus detach
+        let gapCount = iconCount + 1 // includes the existing toolbar spacer
+        let spacing: CGFloat = 24 * iconCount + 28 + 4 * gapCount <= available ? 4 : 3
+        if controlStack.spacing != spacing { controlStack.spacing = spacing }
+        let iconWidth = max(24, min(28, floor((available - 28 - spacing * gapCount) / iconCount)))
+        for button in Array(toolbarButtons.values) + [detachButton] {
+            if let width = button.constraints.first(where: { $0.firstAttribute == .width && $0.secondItem == nil }),
+               width.constant != iconWidth {
+                width.constant = iconWidth
+            }
+        }
         for (action, button) in toolbarButtons {
             let hidden = !visible.contains(action)
             if button.isHidden != hidden { button.isHidden = hidden; changed = true }
@@ -364,13 +522,230 @@ final class BrowserViewController: NSViewController {
             defaultToolbarSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
             controlStack.addArrangedSubview(defaultToolbarSpacer)
         }
+        let pinIndex = controlStack.arrangedSubviews.firstIndex(of: keepOpenButton) ?? controlStack.arrangedSubviews.count
+        controlStack.insertArrangedSubview(detachButton, at: min(pinIndex + 1, controlStack.arrangedSubviews.count))
         controlStack.addArrangedSubview(toolsButton)
         return true
     }
 
+    private var layingOutDetachedTabs = false
+    private var lastDetachedSettle: [String]?
+    private var lastDetachedRebuild: [String]?
+    private var detachedTabViews: [NSView] = []
+    private lazy var overflowTabButton: NSButton = {
+        let button = NSButton(title: "", target: self, action: #selector(showOverflowTabs))
+        button.bezelStyle = .recessed
+        button.font = .systemFont(ofSize: 12)
+        button.contentTintColor = .secondaryLabelColor
+        button.isHidden = true
+        return button
+    }()
+    private var normalTabScrollTrailingConstraint: NSLayoutConstraint!
+    private var overflowTabConstraints: [NSLayoutConstraint] = []
+    private var overflowTabLeadingConstraint: NSLayoutConstraint!
+    private var overflowControlGapConstraint: NSLayoutConstraint!
+
+    private func detachedSettleKey() -> [String] {
+        [String(describing: view.bounds.size), String(describing: detachedTrafficInset),
+         String(describing: selectedIndex), String(describing: controlStack.spacing),
+         String(describing: detachedControlWidthConstraint.constant)]
+        + stripHeightConstraints.map { String(describing: $0.constant) }
+        + tabStack.arrangedSubviews.map { item in
+            let button = item as? TabButton
+            return "\(ObjectIdentifier(item)):\(button?.detachedOriginalTitle ?? button?.title ?? ""):\(button?.detachedNaturalWidth ?? item.fittingSize.width):\(button?.detachedWidthConstraint?.constant ?? 0)"
+        }
+        + controlStack.arrangedSubviews.map { "\(ObjectIdentifier($0)):\($0.isHidden)" }
+    }
+
+    private func detachedTabPlan() -> DetachedTabLayout.Plan {
+        let allViews = detachedTabViews.isEmpty ? tabStack.arrangedSubviews : detachedTabViews
+        let buttons = allViews.compactMap { $0 as? TabButton }
+        let full = buttons.map { $0.detachedMeasuredWidth }.max() ?? 100
+        let minimum: CGFloat = 66 // Designer-approved text/icon boundary
+        let divider = allViews.filter { !($0 is TabButton) }.reduce(CGFloat(0)) { total, _ in total + 4 + tabStack.spacing }
+        // Use the settled chrome span, independent of the chosen toolbar width.
+        // Its right edge remains fixed while the optional controls are folded.
+        // Anchor the budget to the window, never to a controlStack that may
+        // already overflow. Using its displaced maxX creates a positive feedback
+        // loop: wider tabs push controls right, which then reports a larger budget.
+        let rightEdge = glass.content.convert(view.bounds, from: view).maxX - DetachedToolbarLayout.rightInset
+        let actualSpan = rightEdge - tabScroll.frame.minX
+        let geometrySettled = abs(glass.content.bounds.width - view.bounds.width) < 1
+            && abs(tabScroll.frame.minX - detachedTrafficInset) < 1 && actualSpan > 0
+        let available = geometrySettled ? actualSpan - 28 - 4 - 8 - divider
+            : view.bounds.width - detachedTrafficInset - 28 - 4 - 8 - 12 - divider
+        let initial = DetachedTabLayout.planWithOverflowButton(available: available, count: buttons.count, fullWidth: full, textMinimum: minimum, spacing: tabStack.spacing, minimumVisible: min(buttons.count, buttons.filter { tabs.indices.contains($0.tag) && tabs[$0.tag].pinnedID != nil }.count + 1))
+        return initial
+    }
+
+    private func updateTabTitleWidths() {
+        let arranged = isDetached && !detachedTabViews.isEmpty ? detachedTabViews : tabStack.arrangedSubviews
+        for case let button as TabButton in arranged where button.detachedOriginalTitle == nil {
+            button.detachedNaturalWidth = min(150, max(40, button.fittingSize.width))
+        }
+        let items: [CGFloat?] = arranged.map { view in
+            if let button = view as? TabButton {
+                let title = button.detachedOriginalTitle ?? button.title
+                if !title.isEmpty { return nil }
+            }
+            return view.fittingSize.width
+        }
+        let toolbarAvailable = view.bounds.width - detachedTrafficInset - DetachedToolbarLayout.tabWidth
+            - DetachedToolbarLayout.iconWidth - DetachedToolbarLayout.spacing
+            - DetachedToolbarLayout.tabControlGap - DetachedToolbarLayout.rightInset
+        let toolbarWidth = DetachedToolbarLayout.resolve(availableWidth: toolbarAvailable).width
+        let visibleWidth = view.bounds.width - detachedTrafficInset - DetachedToolbarLayout.iconWidth
+            - DetachedToolbarLayout.spacing - DetachedToolbarLayout.tabControlGap
+            - DetachedToolbarLayout.rightInset - toolbarWidth
+        let plan = detachedTabPlan()
+        var widths = isDetached ? arranged.map { $0 is TabButton ? plan.width : 4 }
+            : DetachedTabLayout.widths(available: max(0, visibleWidth), items: items, spacing: tabStack.spacing)
+        if isDetached {
+            let normals = tabButtons.filter { tabs.indices.contains($0.tag) && tabs[$0.tag].pinnedID == nil }
+            let pinnedCount = arranged.compactMap { $0 as? TabButton }.count - normals.count
+            let selectedNormal = normals.firstIndex { $0.tag == selectedIndex }
+            let distribution = DetachedTabLayout.distribute(plan: plan, pinnedCount: pinnedCount, normalCount: normals.count, selectedNormal: selectedNormal)
+            for (index, button) in normals.enumerated() { button.isHidden = !distribution.visibleNormalIndices.contains(index) }
+            widths = arranged.map { $0 is TabButton ? distribution.width : 4 }
+            let hidden = distribution.hiddenNormalCount
+            addTabButton.constraints.first { $0.firstAttribute == .width && $0.secondItem == nil }?.constant = 28
+            detachedTabTrailingConstraint.isActive = hidden == 0
+            overflowControlGapConstraint.isActive = hidden > 0
+            overflowTabLeadingConstraint.isActive = hidden > 0
+            normalTabScrollTrailingConstraint.isActive = hidden == 0
+            if hidden > 0 { NSLayoutConstraint.activate(overflowTabConstraints) }
+            else { NSLayoutConstraint.deactivate(overflowTabConstraints) }
+            overflowTabButton.isHidden = hidden == 0
+            overflowTabButton.title = "+\(hidden)"
+            overflowTabButton.toolTip = "あと \(hidden) 個"
+            overflowTabButton.setAccessibilityLabel("あと \(hidden) 個")
+            addTabButton.title = ""
+            addTabButton.image = symbol("plus")
+            addTabButton.imagePosition = .imageOnly
+            addTabButton.action = #selector(newTab)
+        }
+        var changed = false
+        for (index, view) in arranged.enumerated() {
+            guard let button = view as? TabButton else { continue }
+            if isDetached {
+                button.onDetachedTitleChange = { [weak self] in self?.settleDetachedTabsAfterRebuild() }
+                if button.detachedOriginalTitle == nil {
+                    button.detachedOriginalTitle = button.title
+                    button.detachedOriginalImagePosition = button.imagePosition
+                }
+                button.isDetachedLayout = true
+                if button.detachedWidthConstraint == nil {
+                    button.detachedWidthConstraint = button.widthAnchor.constraint(equalToConstant: widths[index])
+                }
+                if button.detachedWidthConstraint?.constant != widths[index] || button.detachedWidthConstraint?.isActive != true {
+                    button.detachedWidthConstraint?.constant = widths[index]
+                    button.detachedWidthConstraint?.isActive = true
+                    changed = true
+                }
+                let oldTitle = button.title
+                let oldPosition = button.imagePosition
+                button.detachedMode = plan.mode
+                button.detachedNaturalWidth = arranged.compactMap { ($0 as? TabButton)?.detachedMeasuredWidth }.max() ?? 150
+                button.configureDetachedTitle(width: widths[index])
+                changed = changed || oldTitle != button.title || oldPosition != button.imagePosition
+            } else {
+                if button.detachedWidthConstraint?.isActive == true {
+                    button.detachedWidthConstraint?.isActive = false
+                    changed = true
+                }
+                button.isDetachedLayout = false
+                if let original = button.detachedOriginalTitle {
+                    button.title = original
+                    button.imagePosition = button.detachedOriginalImagePosition
+                    button.detachedOriginalTitle = nil
+                }
+                button.isDetachedLayout = false
+            }
+            button.cell?.lineBreakMode = .byTruncatingTail
+            button.cell?.truncatesLastVisibleLine = isDetached ? true : button.notchTruncatesLastVisibleLine
+        }
+        if changed || isDetached {
+            let documentWidth = isDetached
+                ? arranged.indices.filter { !arranged[$0].isHidden }.reduce(CGFloat(0)) { $0 + widths[$1] } + CGFloat(max(0, arranged.filter { !$0.isHidden }.count - 1)) * tabStack.spacing
+                : tabStack.fittingSize.width
+            if isDetached && overflowTabLeadingConstraint.isActive { overflowTabLeadingConstraint.constant = documentWidth + 4 }
+            tabStack.setFrameSize(NSSize(width: documentWidth, height: tabStack.frame.height))
+            tabStack.layoutSubtreeIfNeeded()
+            needsTabReveal = true
+        }
+    }
+
+    private func settleDetachedTabsAfterRebuild() {
+        guard isDetached, !layingOutDetachedTabs else { return }
+        guard lastDetachedSettle != detachedSettleKey() else { return }
+        layingOutDetachedTabs = true
+        defer { layingOutDetachedTabs = false }
+        for case let button as TabButton in tabStack.arrangedSubviews {
+            button.onDetachedTitleChange = { [weak self] in self?.settleDetachedTabsAfterRebuild() }
+        }
+        view.layoutSubtreeIfNeeded()
+        updateCompactControls()
+        view.layoutSubtreeIfNeeded()
+        glass.layoutSubtreeIfNeeded()
+        updateTabTitleWidths()
+        view.layoutSubtreeIfNeeded()
+        glass.layoutSubtreeIfNeeded()
+        tabStack.layoutSubtreeIfNeeded()
+        normalizeDetachedTabScroll()
+        lastDetachedSettle = detachedSettleKey()
+    }
+
+    @objc private func showOverflowTabs() {
+        let menu = NSMenu()
+        for (index, tab) in tabs.enumerated() {
+            let item = NSMenuItem(title: tab.displayName, action: #selector(selectTabByNumber), keyEquivalent: "")
+            item.tag = index + 1
+            item.state = index == selectedIndex ? .on : .off
+            item.target = self
+            menu.addItem(item)
+        }
+        menu.addItem(NSMenuItem.separator())
+        let add = NSMenuItem(title: "新規タブ", action: #selector(newTab), keyEquivalent: "")
+        add.target = self
+        menu.addItem(add)
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: overflowTabButton.bounds.maxY), in: overflowTabButton)
+    }
+
+
+    private func normalizeDetachedTabScroll() {
+        guard isDetached else { return }
+        // Re-tile after replacing/resizing the document; NSClipView can retain its old
+        // viewport and scroll origin even though the document now fits.
+        tabScroll.tile()
+        tabButtons.forEach { $0.updateTrackingAreas() }
+        if tabStack.frame.width <= tabScroll.contentSize.width + 1 {
+            tabScroll.contentView.scroll(to: .zero)
+            tabScroll.reflectScrolledClipView(tabScroll.contentView)
+            tabButtons.forEach { $0.updateTrackingAreas() }
+            needsTabReveal = false
+            return
+        }
+        if let index = selectedIndex, tabButtons.indices.contains(index) {
+            tabButtons[index].scrollToVisible(tabButtons[index].bounds)
+            let clip = tabScroll.contentView
+            let maxX = max(0, tabStack.frame.width - clip.bounds.width)
+            clip.scroll(to: NSPoint(x: min(max(0, clip.bounds.minX), maxX), y: 0))
+            tabScroll.reflectScrolledClipView(clip)
+            needsTabReveal = false
+        }
+        tabButtons.forEach { $0.updateTrackingAreas(); $0.needsDisplay = true }
+
+    }
+
     override func viewDidLayout() {
         super.viewDidLayout()
+        guard !layingOutDetachedTabs else { return }
+        layingOutDetachedTabs = true
+        defer { layingOutDetachedTabs = false }
         updateCompactControls()
+        if isDetached { glass.layoutSubtreeIfNeeded(); updateTabTitleWidths() }
+        if isDetached { glass.layoutSubtreeIfNeeded(); tabStack.layoutSubtreeIfNeeded() }
+        if isDetached { normalizeDetachedTabScroll() }
         if needsTabReveal, tabScroll.bounds.width > 0, let index = selectedIndex, tabButtons.indices.contains(index) {
             needsTabReveal = false
             tabStack.layoutSubtreeIfNeeded()
@@ -378,7 +753,78 @@ final class BrowserViewController: NSViewController {
         }
     }
 
+    func revealSelectedTabAfterNotchLayout() {
+        guard !isDetached else { return }
+        needsTabReveal = true
+        view.needsLayout = true
+        view.layoutSubtreeIfNeeded()
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.isDetached else { return }
+            self.needsTabReveal = true
+            self.view.needsLayout = true
+            self.view.layoutSubtreeIfNeeded()
+        }
+    }
+
+    func preservingPagePosition(move: @escaping () -> Void, completion: @escaping () -> Void) {
+        guard !preservingWebState else { return }
+        preservingWebState = true
+        let sourceWindow = NSApp.keyWindow ?? view.window
+        let previousResponder = sourceWindow?.firstResponder
+        let fallbackToContent = previousResponder == nil || previousResponder === sourceWindow
+            || previousResponder === view || previousResponder === detachButton
+        let nativeFocus = WebTransferResponderState(webView: selectedTab?.webView,
+                                                   sourceWindow: sourceWindow, fallbackToContent: fallbackToContent)
+        let addressWasEditing = addressField.currentEditor() === previousResponder && previousResponder != nil
+        let views = ([selectedTab?.webView].compactMap { $0 } + tabs.map(\.webView))
+            .reduce(into: [WKWebView]()) { result, view in
+                if !result.contains(where: { $0 === view }) { result.append(view) }
+            }
+        let group = DispatchGroup()
+        for webView in views {
+            group.enter()
+            webView.evaluateJavaScript(WebViewTransferState.capture, in: nil, in: .defaultClient) { _ in
+                group.leave()
+            }
+        }
+        let captured = WebTransferCompletionGate()
+        let continueTransfer: () -> Void = { [weak self] in
+            captured.run {
+                guard let self else { return }
+                move()
+                self.view.layoutSubtreeIfNeeded()
+                if addressWasEditing && !self.addressPopover.isShown {
+                    self.addressPopover.show(relativeTo: self.addressButton.bounds, of: self.addressButton, preferredEdge: .minY)
+                }
+                let restoreWebFocus = nativeFocus.restore(to: self.view.window,
+                                                         contentVisible: self.selectedTab?.webView.superview === self.webContainer)
+                // Restore DOM selection only after native focus, overwriting any WebKit select-all.
+                let restored = DispatchGroup()
+                for webView in views {
+                    restored.enter()
+                    webView.callAsyncJavaScript(WebViewTransferState.restore,
+                                               arguments: ["restoreFocus": restoreWebFocus && webView === self.selectedTab?.webView],
+                                               in: nil, in: .defaultClient) { _ in
+                        restored.leave()
+                    }
+                }
+                let restoredGate = WebTransferCompletionGate()
+                let finish: () -> Void = {
+                    restoredGate.run {
+                        self.preservingWebState = false
+                        completion()
+                    }
+                }
+                restored.notify(queue: .main, execute: finish)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: finish)
+            }
+        }
+        group.notify(queue: .main, execute: continueTransfer)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: continueTransfer)
+    }
+
     func focusContent() {
+        guard !preservingWebState else { return }
         if let tab = selectedTab, tab.webView.url != nil {
             view.window?.makeFirstResponder(tab.webView)
             addressField.stringValue = tab.webView.url?.absoluteString ?? ""
@@ -608,6 +1054,7 @@ final class BrowserViewController: NSViewController {
         updateChrome()
         needsTabReveal = true
         view.needsLayout = true
+        if isDetached { settleDetachedTabsAfterRebuild() }
     }
 
     private func select(_ tab: Tab) {
@@ -659,6 +1106,12 @@ final class BrowserViewController: NSViewController {
 
     @objc private func tabClicked(_ sender: NSButton) {
         select(sender.tag)
+        // NSButton/AXPress can toggle the reused selected button before its action.
+        for button in tabButtons {
+            let active = button.tag == selectedIndex && notionPanel?.isHidden != false
+            button.state = active ? .on : .off
+            button.setAccessibilityValue(active ? "選択中" : "")
+        }
         focusContent()
     }
 
@@ -811,15 +1264,40 @@ final class BrowserViewController: NSViewController {
         if addressField.currentEditor() == nil {
             addressField.stringValue = webView?.url?.absoluteString ?? ""
         }
+        // Start-page hosting and other chrome updates above can invalidate ancestor layout.
+        // Settle again before returning to tab commands, rather than waiting for a run loop.
+        settleDetachedTabsAfterRebuild()
     }
 
     private func rebuildTabButtons() {
         guard !isDraggingTab else { return } // the dragged button must stay alive
+        if isDetached {
+            // Loading progress alone does not change the tabs. Preserve the buttons
+            // so the settle cache also avoids synchronous layout on these updates.
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = .sortedKeys
+            let key = [(try? encoder.encode(store.data))?.base64EncodedString() ?? "",
+                       String(describing: selectedIndex), String(describing: notionPanel?.isHidden),
+                       String(describing: view.effectiveAppearance.name)]
+                + tabs.map { "\(ObjectIdentifier($0)):\($0.profileID):\($0.displayName):\($0.webView.url?.absoluteString ?? "")" }
+            let titlesMatch = tabButtons.count == tabs.count && zip(tabButtons, tabs).allSatisfy { button, tab in
+                (button.detachedOriginalTitle ?? button.title) == (tab.pinned?.iconOnly == true ? "" : tab.displayName)
+            }
+            if lastDetachedRebuild == key && titlesMatch { return }
+            lastDetachedRebuild = key
+        } else {
+            lastDetachedRebuild = nil
+            lastDetachedSettle = nil
+        }
         tabStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         tabButtons = []
         let grayscale = store.data.grayscaleIcons
         let notionPosition = min(store.data.notionTabPosition, firstUnpinnedIndex)
         func addNotion() {
+            // This button is reused; discard the previous detached title/width snapshot.
+            notionTabButton.isDetachedLayout = false
+            notionTabButton.detachedOriginalTitle = nil
+            notionTabButton.detachedWidthConstraint?.isActive = false
             let display = store.data.notionTabDisplay
             notionTabButton.title = display == .iconOnly ? "" : "Notion"
             notionTabButton.image = display == .titleOnly ? nil : NotionTabIcon.image(for: view.effectiveAppearance)
@@ -839,6 +1317,11 @@ final class BrowserViewController: NSViewController {
                 let divider = NSBox()
                 divider.boxType = .separator
                 divider.heightAnchor.constraint(equalToConstant: 16).isActive = true
+                if isDetached {
+                    let width = divider.widthAnchor.constraint(equalToConstant: 4)
+                    width.identifier = "detached-tab-divider"
+                    width.isActive = true
+                }
                 tabStack.addArrangedSubview(divider)
             }
             let iconOnly = tab.pinned?.iconOnly ?? false
@@ -862,22 +1345,27 @@ final class BrowserViewController: NSViewController {
             button.contentTintColor = .white
             button.setAccessibilityLabel(tab.displayName)
             button.setAccessibilityValue(active ? "選択中" : "")
-            button.font = .systemFont(ofSize: 12, weight: i == selectedIndex ? .semibold : .regular)
+            button.font = .systemFont(ofSize: 12, weight: isDetached ? .regular : (i == selectedIndex ? .semibold : .regular))
             button.lineBreakMode = .byTruncatingTail
+            button.notchTruncatesLastVisibleLine = button.cell?.truncatesLastVisibleLine ?? false
             button.tag = i
             let profile = store.profile(tab.profileID)
             button.toolTip = [tab.displayName, profile.isDefault ? nil : "プロファイル: \(profile.name)"]
                 .compactMap { $0 }.joined(separator: "\n")
             if !iconOnly {
                 button.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-                button.widthAnchor.constraint(lessThanOrEqualToConstant: 150).isActive = true
+                button.maximumTitleWidth = button.widthAnchor.constraint(lessThanOrEqualToConstant: 150)
+                button.maximumTitleWidth?.isActive = true
             }
             button.menu = contextMenu(for: tab, at: i)
             tabStack.addArrangedSubview(button)
             tabButtons.append(button)
         }
         if store.data.notionEnabled && notionPosition == tabs.count { addNotion() }
+        detachedTabViews = isDetached ? tabStack.arrangedSubviews : []
         tabStack.frame = NSRect(origin: .zero, size: NSSize(width: tabStack.fittingSize.width, height: stripHeightConstraints.first?.constant ?? 32))
+        settleDetachedTabsAfterRebuild()
+        if !isDetached { needsTabReveal = true; view.needsLayout = true }
     }
 
     private func contextMenu(for tab: Tab, at index: Int) -> NSMenu {
@@ -1007,6 +1495,8 @@ final class BrowserViewController: NSViewController {
         if webView.isLoading { webView.stopLoading() } else { webView.reload() }
     }
 
+    @objc func toggleDetached(_ sender: Any?) { onToggleDetached?() }
+
     @objc private func toggleKeepOpen() { onToggleKeepOpen?() }
 
     @objc private func openExternally() {
@@ -1021,6 +1511,11 @@ final class BrowserViewController: NSViewController {
         let heading = NSMenuItem(title: "", action: nil, keyEquivalent: "")
         heading.image = symbol("ellipsis.circle")
         menu.addItem(heading)
+        let detach = NSMenuItem(title: isDetached ? "ノッチに戻す" : "ウインドウで開く", action: #selector(toggleDetached), keyEquivalent: "n")
+        detach.keyEquivalentModifierMask = [.control, .option, .command]
+        detach.target = self
+        detach.image = detachButton.image
+        menu.addItem(detach)
         let hasPage = selectedTab?.webView.url != nil
         let zoom = selectedTab?.webView.pageZoom ?? 1
         for action in ToolbarAction.allCases {
@@ -1034,7 +1529,7 @@ final class BrowserViewController: NSViewController {
             case .reload: button.isEnabled = hasPage || selectedTab?.webView.isLoading == true
             default: break
             }
-            guard button.isHidden, action != .autoRefresh else { continue }
+            guard button.isHidden, action != .autoRefresh, !(isDetached && action == .keepOpen) else { continue }
             let item = NSMenuItem(title: action.title, action: button.action, keyEquivalent: "")
             item.target = self
             item.image = button.image
@@ -1460,7 +1955,52 @@ extension BrowserViewController: WKUIDelegate {
 /// Hover opening deliberately leaves the panel non-key. AppKit's recessed bezel
 /// desaturates in that state, so draw the selected tab independently of focus.
 final class TabButtonCell: NSButtonCell {
+    override func titleRect(forBounds rect: NSRect) -> NSRect {
+        guard let button = controlView as? TabButton, button.isDetachedLayout else {
+            return super.titleRect(forBounds: rect)
+        }
+        return button.detachedTitleRect(in: rect)
+    }
+
+    func displayedTitle(forBounds rect: NSRect) -> String {
+        guard let button = controlView as? TabButton, button.isDetachedLayout else { return title }
+        guard button.detachedContentFullyVisible else { return "" }
+        let width = titleRect(forBounds: rect).width
+        let attributes: [NSAttributedString.Key: Any] = [.font: button.font ?? NSFont.systemFont(ofSize: 12)]
+        return DetachedTabLayout.displayedTitle(button.title, mode: button.detachedMode, available: width) {
+            ($0 as NSString).size(withAttributes: attributes).width
+        }
+    }
+
     override func drawInterior(withFrame frame: NSRect, in controlView: NSView) {
+        if let button = controlView as? TabButton, button.isDetachedLayout {
+            guard button.detachedContentFullyVisible else { return }
+            let closeWidth: CGFloat = button.detachedCloseVisible && button.detachedMode != .iconOnly ? 20 : 0
+            let iconSide = button.detachedIconSide
+            if let image = button.image, button.imagePosition != .noImage, button.detachedDrawsIcon {
+                let x = button.title.isEmpty ? frame.minX + (frame.width - closeWidth - iconSide) / 2 : frame.minX + 6
+                let rendered: NSImage
+                if let tint = button.detachedIconTint {
+                    rendered = NSImage(size: image.size, flipped: false) { rect in
+                        image.draw(in: rect)
+                        tint.setFill()
+                        rect.fill(using: .sourceIn)
+                        return true
+                    }
+                } else { rendered = image } // colored/grayscale favicon pixels are unchanged
+                rendered.draw(in: NSRect(x: x, y: frame.midY - iconSide / 2, width: iconSide, height: iconSide),
+                              from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+            }
+            let text = displayedTitle(forBounds: frame)
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.lineBreakMode = .byTruncatingTail
+            let attributes: [NSAttributedString.Key: Any] = [.font: button.font ?? NSFont.systemFont(ofSize: 12),
+                .foregroundColor: button.contentTintColor ?? NSColor.labelColor, .paragraphStyle: paragraph]
+            let rect = titleRect(forBounds: frame)
+            let height = (text as NSString).size(withAttributes: attributes).height
+            (text as NSString).draw(in: NSRect(x: rect.minX, y: frame.midY - height / 2, width: rect.width, height: height), withAttributes: attributes)
+            return
+        }
         var contentFrame = frame
         if let button = controlView as? TabButton, button.onClose != nil {
             contentFrame.size.width = max(0, frame.width - 20)
@@ -1472,6 +2012,7 @@ final class TabButtonCell: NSButtonCell {
     }
 
     override func drawBezel(withFrame frame: NSRect, in controlView: NSView) {
+        if let button = controlView as? TabButton, button.isDetachedLayout, !button.detachedContentFullyVisible { return }
         guard state == .on else {
             super.drawBezel(withFrame: frame, in: controlView)
             return
@@ -1483,6 +2024,80 @@ final class TabButtonCell: NSButtonCell {
 
 /// Tab button that can be dragged sideways to reorder. A click without movement acts normally.
 final class TabButton: NSButton {
+    var maximumTitleWidth: NSLayoutConstraint?
+    var detachedWidthConstraint: NSLayoutConstraint?
+    var detachedNaturalWidth: CGFloat = 150
+    var detachedIconTint: NSColor? { image?.isTemplate == true ? (contentTintColor ?? .labelColor) : nil }
+    var detachedOriginalTitle: String?
+    var detachedOriginalImagePosition: NSControl.ImagePosition = .imageLeading
+    var isDetachedLayout = false
+    var detachedMode: DetachedTabLayout.Mode = .full
+    var detachedCloseVisible: Bool { onClose != nil && closeButton.isEnabled && closeButton.alphaValue > 0 }
+    var detachedIconSide: CGFloat { 16 }
+    var detachedDrawsIcon: Bool { !(detachedMode == .iconOnly && detachedCloseVisible) }
+    private var detachedCloseFrame: NSRect {
+        NSRect(x: detachedMode == .iconOnly ? bounds.midX - 10 : bounds.maxX - 16, y: bounds.midY - 10, width: detachedMode == .iconOnly ? 20 : 16, height: 20)
+    }
+    override var mouseDownCanMoveWindow: Bool { isDetachedLayout ? false : super.mouseDownCanMoveWindow }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { isDetachedLayout || super.acceptsFirstMouse(for: event) }
+    var detachedContentFullyVisible: Bool {
+        guard isDetachedLayout else { return true }
+        guard !isHidden else { return false }
+        var parent = superview
+        while parent != nil && !(parent is NSClipView) { parent = parent?.superview }
+        guard let clip = parent as? NSClipView else { return true }
+        let rect = convert(bounds, to: clip)
+        return rect.minX >= clip.bounds.minX - 0.5 && rect.maxX <= clip.bounds.maxX + 0.5
+    }
+    var onDetachedTitleChange: (() -> Void)?
+    private var applyingDetachedTitle = false
+
+    override var title: String {
+        didSet {
+            guard isDetachedLayout, !applyingDetachedTitle, title != oldValue else { return }
+            detachedOriginalTitle = title
+            // Match the normal drawing geometry; hovering reserves close space separately.
+            detachedNaturalWidth = detachedMeasuredWidth
+            onDetachedTitleChange?()
+        }
+    }
+
+    private var detachedTextAttributes: [NSAttributedString.Key: Any] { [.font: font ?? NSFont.systemFont(ofSize: 12)] }
+    var detachedMeasuredWidth: CGFloat {
+        let text = detachedOriginalTitle ?? title
+        return 12 + (image == nil ? 0 : 20)
+            + (text as NSString).size(withAttributes: detachedTextAttributes).width
+    }
+    var detachedMinimumTextWidth: CGFloat {
+        let text = String((detachedOriginalTitle ?? title).prefix(2)) + "…"
+        return 12 + (image == nil ? 0 : 20)
+            + (text as NSString).size(withAttributes: detachedTextAttributes).width
+    }
+
+    func detachedTitleRect(in rect: NSRect) -> NSRect {
+        let icon: CGFloat = image != nil && imagePosition != .noImage ? 20 : 0
+        let hoveringText = detachedCloseVisible && detachedMode != .iconOnly
+        let padding: CGFloat = hoveringText ? 8 : 12
+        let close: CGFloat = hoveringText ? 14 : 0
+        return NSRect(x: rect.minX + padding / 2 + icon, y: rect.minY,
+                      width: max(0, rect.width - padding - icon - close), height: rect.height)
+    }
+
+    func configureDetachedTitle(width: CGFloat) {
+        applyingDetachedTitle = true
+        defer { applyingDetachedTitle = false }
+        let original = detachedOriginalTitle ?? title
+        let hide = detachedMode == .iconOnly
+        let newTitle = hide ? "" : original
+        if title != newTitle { title = newTitle }
+        let position = hide && image != nil ? NSControl.ImagePosition.imageOnly : detachedOriginalImagePosition
+        if imagePosition != position { imagePosition = position }
+        cell?.wraps = false
+        setHovered(isHovered)
+        needsDisplay = true
+    }
+
+    var notchTruncatesLastVisibleLine = false
     override class var cellClass: AnyClass? {
         get { TabButtonCell.self }
         set { }
@@ -1517,7 +2132,7 @@ final class TabButton: NSButton {
 
     override func layout() {
         super.layout()
-        closeButton.frame = NSRect(x: bounds.maxX - 20, y: bounds.midY - 10, width: 20, height: 20)
+        closeButton.frame = isDetachedLayout ? detachedCloseFrame : NSRect(x: bounds.maxX - 20, y: bounds.midY - 10, width: 20, height: 20)
     }
 
     override func updateTrackingAreas() {
@@ -1530,10 +2145,25 @@ final class TabButton: NSButton {
         setHovered(hovered)
     }
 
-    override func mouseEntered(with event: NSEvent) { setHovered(true) }
-    override func mouseExited(with event: NSEvent) { setHovered(false) }
+    override func mouseEntered(with event: NSEvent) {
+        setHovered(true)
+    }
+    override func mouseExited(with event: NSEvent) {
+        setHovered(false)
+    }
 
     private func setHovered(_ hovered: Bool) {
+        if isDetachedLayout {
+            isHovered = hovered
+            // A direct update survives document re-layout and tracking-area refresh;
+            // repeatedly restarted implicit alpha animations need not complete.
+            closeButton.frame = isDetachedLayout ? detachedCloseFrame : NSRect(x: bounds.maxX - 20, y: bounds.midY - 10, width: 20, height: 20)
+            let visible = hovered && onClose != nil && detachedContentFullyVisible && (detachedMode != .iconOnly || state == .on)
+            closeButton.isEnabled = visible
+            closeButton.alphaValue = visible ? 1 : 0
+            needsDisplay = true
+            return
+        }
         guard isHovered != hovered else { return }
         isHovered = hovered
         closeButton.isEnabled = hovered
@@ -1543,9 +2173,31 @@ final class TabButton: NSButton {
         }
     }
 
-    @objc private func closeClicked(_ sender: NSButton) { onClose?() }
+    @objc private func closeClicked(_ sender: NSButton) {
+        onClose?()
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        menu ?? super.menu(for: event)
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        if isDetachedLayout, let menu { NSMenu.popUpContextMenu(menu, with: event, for: self) }
+        else { super.rightMouseDown(with: event) }
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        guard isEnabled, let action else { return false }
+        // Dispatch the tab action explicitly: NSButton's default accessibility
+        // implementation need not invoke this custom mouseDown selection path.
+        return sendAction(action, to: target)
+    }
 
     override func mouseDown(with event: NSEvent) {
+        if event.modifierFlags.contains(.control), let contextMenu = self.menu(for: event) {
+            NSMenu.popUpContextMenu(contextMenu, with: event, for: self)
+            return
+        }
         guard let window else { return super.mouseDown(with: event) }
         let start = event.locationInWindow
         let originX = frame.origin.x
@@ -1576,7 +2228,8 @@ final class TabButton: NSButton {
 /// Hidden close controls leave the entire tab body available for selection/dragging.
 private final class TabCloseButton: NSButton {
     override func hitTest(_ point: NSPoint) -> NSView? {
-        isEnabled ? super.hitTest(point) : nil
+        let hit = isEnabled ? super.hitTest(point) : nil
+        return hit
     }
 
     override func rightMouseDown(with event: NSEvent) {

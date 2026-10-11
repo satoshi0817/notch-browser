@@ -5,6 +5,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var notch: NotchManager!
     private var settingsWindow: SettingsWindowController?
     private var statusItem: NSStatusItem!
+    private var detachHotKey: HotKey?
     private var hotKey: HotKey?
     private var keepOpenItem: NSMenuItem!
     private var notionItem: NSMenuItem!
@@ -45,6 +46,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // ⌃⌥N toggles the browser from anywhere.
         hotKey = HotKey(keyCode: kVK_ANSI_N, modifiers: controlKey | optionKey) { [weak self] in
             self?.notch.toggle()
+        }
+        detachHotKey = HotKey(keyCode: kVK_ANSI_N, modifiers: controlKey | optionKey | cmdKey) { [weak self] in
+            self?.notch.toggleDetached()
         }
         NotificationCenter.default.addObserver(self, selector: #selector(onboardingRequested(_:)),
                                                name: .showNotchBrowserOnboarding, object: nil)
@@ -93,6 +97,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let menu = NSMenu()
         menu.addItem(item("開く / 閉じる", #selector(toggleNotch), "n", [.control, .option], target: self))
+        menu.addItem(item("ウインドウで開く / ノッチに戻す", #selector(BrowserViewController.toggleDetached(_:)), "n", [.control, .option, .command], target: notch.browser))
         keepOpenItem = item("開いたままにする", #selector(toggleKeepOpen), target: self)
         menu.addItem(keepOpenItem)
         notionItem = item("Notionエージェント", #selector(openNotion), target: self)

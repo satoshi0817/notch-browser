@@ -5,6 +5,388 @@ import XCTest
 @testable import NotchBrowser
 
 final class BrowserToolsTests: XCTestCase {
+    @MainActor
+    func testSeparateOverflowButtonKeepsNewTabVisibleAndInsideWindow() throws {
+        _ = NSApplication.shared
+        let store = SettingsStore.shared
+        let saved = store.data
+        defer { store.data = saved }
+        for total in [2, 3, 5, 7, 8] {
+            var settings = SettingsData()
+            settings.notionEnabled = false
+            settings.pinnedTabs = [PinnedTab(name: "メール", url: "about:blank", icon: .symbol("envelope")), PinnedTab(name: "カレンダー", url: "about:blank", icon: .symbol("calendar"))]
+            store.data = settings
+            let browser = BrowserViewController()
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 400), styleMask: [.borderless], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentViewController = browser
+            window.setContentSize(NSSize(width: 1000, height: 400))
+            browser.isDetached = true
+            browser.updateDetachedMetrics(trafficInset: 70, rowHeight: 28)
+            for _ in 0..<max(0, total - 2) { browser.newTab(nil) }
+            for width in [1000, 560, 480, 440, 400, 390, 381] {
+                var overflowLabels: [String] = []
+                for index in [3, total] where index <= total {
+                    let sender = NSMenuItem(); sender.tag = index
+                    browser.selectTabByNumber(sender)
+                    window.setContentSize(NSSize(width: width, height: 400))
+                    browser.view.layoutSubtreeIfNeeded()
+                    browser.view.layoutSubtreeIfNeeded()
+                    XCTAssertEqual(window.contentView?.bounds.width, CGFloat(width))
+                    let buttons = descendants(browser.view).compactMap { $0 as? NSButton }
+                    let add = try XCTUnwrap(buttons.first { $0.action == #selector(BrowserViewController.newTab(_:)) })
+                    XCTAssertFalse(add.isHidden)
+                    XCTAssertEqual(add.title, "")
+                    let addFrame = add.convert(add.bounds, to: browser.view)
+                    XCTAssertLessThanOrEqual(addFrame.maxX, browser.view.bounds.maxX - 11)
+                    let overflow = buttons.first { !$0.isHidden && $0.title.hasPrefix("+") && $0.title.count > 1 }
+                    overflowLabels.append(overflow?.title ?? "")
+                    if let overflow {
+                        XCTAssertEqual(overflow.contentTintColor, NSColor.secondaryLabelColor)
+                        let frame = overflow.convert(overflow.bounds, to: browser.view)
+                        XCTAssertGreaterThanOrEqual(addFrame.minX, frame.maxX + 3)
+                    }
+                    let reloadAction = NSSelectorFromString("reloadOrStop")
+                    let reload = try XCTUnwrap(buttons.first { $0.action == reloadAction })
+                    XCTAssertEqual(reload.isHidden, overflow != nil && width < 404)
+                    if reload.isHidden {
+                        let menus = buttons.compactMap { $0.menu }
+                        let item = try XCTUnwrap(menus.flatMap { $0.items }.first { $0.action == reloadAction })
+                        XCTAssertTrue((item.target as? BrowserViewController) === browser)
+                    }
+                    let selected = try XCTUnwrap(buttons.compactMap { $0 as? TabButton }.first { $0.state == .on })
+                    XCTAssertFalse(selected.isHidden)
+                }
+                if overflowLabels.count == 2 { XCTAssertEqual(overflowLabels[0], overflowLabels[1]) }
+            }
+        }
+    }
+
+    @MainActor
+    func testNotchLayoutRevealsSelectedNormalTabAfterAddingTabs() throws {
+        _ = NSApplication.shared
+        let store = SettingsStore.shared
+        let saved = store.data
+        defer { store.data = saved }
+        var settings = SettingsData()
+        settings.notionEnabled = false
+        settings.pinnedTabs = []
+        store.data = settings
+        let browser = BrowserViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 400), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentViewController = browser
+        window.setContentSize(NSSize(width: 640, height: 400))
+        browser.updateNotchMetrics(notchWidth: 200, stripHeight: 32)
+        for _ in 0..<5 { browser.newTab(nil) }
+        browser.view.layoutSubtreeIfNeeded()
+        let selected = try XCTUnwrap(descendants(browser.view).compactMap { $0 as? TabButton }.first { $0.state == .on })
+        var parent = selected.superview
+        while parent != nil && !(parent is NSScrollView) { parent = parent?.superview }
+        let scroll = try XCTUnwrap(parent as? NSScrollView)
+        let frame = selected.convert(selected.bounds, to: scroll.contentView)
+        // Engineer's main c1588977 probe of this same procedure:
+        // frame=(341,6,80,19), clip=(257,0,162,32), doc=(0,0,421,32).
+        // Main already clips the trailing 2pt (421 vs 419). Preserve that behavior
+        // while guarding against the selected tab being substantially offscreen.
+        XCTAssertGreaterThanOrEqual(frame.minX, scroll.contentView.bounds.minX - 2)
+        XCTAssertLessThanOrEqual(frame.maxX, scroll.contentView.bounds.maxX + 2)
+        let visibleWidth = max(0, min(frame.maxX, scroll.contentView.bounds.maxX)
+            - max(frame.minX, scroll.contentView.bounds.minX))
+        XCTAssertGreaterThanOrEqual(visibleWidth, frame.width - 2)
+    }
+
+    @MainActor
+    func testReturningFromDetachedOverflowRevealsAllNotchTabsAndSelectedTab() throws {
+        _ = NSApplication.shared
+        let store = SettingsStore.shared
+        let saved = store.data
+        defer { store.data = saved }
+        var settings = SettingsData()
+        settings.notionEnabled = false
+        settings.pinnedTabs = [PinnedTab(name: "メール", url: "about:blank", icon: .symbol("envelope")), PinnedTab(name: "カレンダー", url: "about:blank", icon: .symbol("calendar"))]
+        store.data = settings
+        let browser = BrowserViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 400), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentViewController = browser
+        window.setContentSize(NSSize(width: 640, height: 400))
+        browser.updateNotchMetrics(notchWidth: 200, stripHeight: 32)
+        for _ in 0..<5 { browser.newTab(nil) }
+        browser.isDetached = true
+        window.setContentSize(NSSize(width: 381, height: 400))
+        browser.updateDetachedMetrics(trafficInset: 70, rowHeight: 28)
+        browser.view.layoutSubtreeIfNeeded()
+        XCTAssertTrue(descendants(browser.view).compactMap { $0 as? TabButton }.count < 7 || descendants(browser.view).compactMap { $0 as? TabButton }.contains { $0.isHidden })
+        let longTab = try XCTUnwrap(descendants(browser.view).compactMap { $0 as? TabButton }.first { $0.state == .on })
+        longTab.title = "r7t7 - Google 検索"
+        browser.isDetached = false
+        window.setContentSize(NSSize(width: 640, height: 400))
+        browser.updateNotchMetrics(notchWidth: 200, stripHeight: 32)
+        browser.view.layoutSubtreeIfNeeded()
+        for _ in 0..<2 { browser.revealSelectedTabAfterNotchLayout(); browser.view.layoutSubtreeIfNeeded() }
+        let restored = descendants(browser.view).compactMap { $0 as? TabButton }
+        XCTAssertEqual(restored.count, 7)
+        XCTAssertTrue(restored.allSatisfy { !$0.isHidden })
+        let selected = try XCTUnwrap(descendants(browser.view).compactMap { $0 as? TabButton }.first { $0.state == .on })
+        var parent = selected.superview
+        while parent != nil && !(parent is NSScrollView) { parent = parent?.superview }
+        let scroll = try XCTUnwrap(parent as? NSScrollView)
+        let frame = selected.convert(selected.bounds, to: scroll.contentView)
+        // Engineer's main c1588977 probe of this same procedure:
+        // frame=(341,6,80,19), clip=(257,0,162,32), doc=(0,0,421,32).
+        // Main already clips the trailing 2pt (421 vs 419). Preserve that behavior
+        // while guarding against the selected tab being substantially offscreen.
+        XCTAssertGreaterThanOrEqual(frame.minX, scroll.contentView.bounds.minX - 2)
+        XCTAssertLessThanOrEqual(frame.maxX, scroll.contentView.bounds.maxX + 2)
+        let visibleWidth = max(0, min(frame.maxX, scroll.contentView.bounds.maxX)
+            - max(frame.minX, scroll.contentView.bounds.minX))
+        XCTAssertGreaterThanOrEqual(visibleWidth, frame.width - 2)
+    }
+
+    @MainActor
+    func testDetachedToolbarRightEdgeStaysInsideWindowWithEightTabs() throws {
+        _ = NSApplication.shared
+        let store = SettingsStore.shared
+        let saved = store.data
+        defer { store.data = saved }
+        var settings = SettingsData()
+        settings.notionEnabled = false
+        settings.pinnedTabs = []
+        store.data = settings
+        let browser = BrowserViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 400), styleMask: [.titled, .fullSizeContentView], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentViewController = browser
+        window.setContentSize(NSSize(width: 1000, height: 400))
+        browser.isDetached = true
+        browser.updateDetachedMetrics(trafficInset: 80, rowHeight: 28)
+        window.orderFrontRegardless()
+        defer { window.orderOut(nil) }
+        browser.newTab(nil)
+        browser.view.layoutSubtreeIfNeeded()
+        for _ in 0..<7 { browser.newTab(nil) }
+        for width in [1000.0, 480, 440, 400, 390, 381] {
+            window.setContentSize(NSSize(width: width, height: 400))
+            browser.view.layoutSubtreeIfNeeded()
+            let tools = try XCTUnwrap(descendants(browser.view).compactMap { $0 as? NSButton }.first { $0.accessibilityLabel() == "ページの操作" })
+            let controls = try XCTUnwrap(tools.superview as? NSStackView)
+            let rect = controls.convert(controls.bounds, to: browser.view)
+            XCTAssertLessThanOrEqual(rect.maxX, browser.view.bounds.maxX - 11)
+        }
+    }
+
+    @MainActor
+    func testDetachedNewTabTitleIsFullAt1000() throws {
+        _ = NSApplication.shared
+        let store = SettingsStore.shared
+        let saved = store.data
+        defer { store.data = saved }
+        var settings = SettingsData()
+        settings.notionEnabled = false
+        settings.pinnedTabs = []
+        store.data = settings
+        let browser = BrowserViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 400), styleMask: [.titled, .fullSizeContentView], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentViewController = browser
+        window.setContentSize(NSSize(width: 1000, height: 400))
+        browser.isDetached = true
+        browser.updateDetachedMetrics(trafficInset: 80, rowHeight: 28)
+        window.orderFrontRegardless()
+        defer { window.orderOut(nil) }
+        browser.newTab(nil)
+        browser.view.layoutSubtreeIfNeeded()
+        let tab = try XCTUnwrap(descendants(browser.view).compactMap { $0 as? TabButton }.last)
+        XCTAssertEqual(tab.detachedMode, .full)
+        XCTAssertEqual(tab.title, "新規タブ")
+        let cell = try XCTUnwrap(tab.cell as? TabButtonCell)
+        XCTAssertEqual(cell.displayedTitle(forBounds: tab.bounds), "新規タブ")
+        let context = try XCTUnwrap(tab.menu)
+        XCTAssertTrue(context.items.contains { $0.title == "タブを閉じる" })
+        let rightClick = NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 0)!
+        XCTAssertTrue(tab.menu(for: rightClick) === context)
+        var parent = tab.superview
+        while parent != nil && !(parent is NSScrollView) { parent = parent?.superview }
+        let scroll = try XCTUnwrap(parent as? NSScrollView)
+        XCTAssertFalse(scroll.automaticallyAdjustsContentInsets)
+        XCTAssertGreaterThanOrEqual(scroll.contentView.frame.height, tab.frame.height)
+        let point = tab.convert(NSPoint(x: tab.bounds.midX, y: tab.bounds.midY), to: window.contentView?.superview)
+        XCTAssertTrue(window.contentView?.hitTest(point) is TabButton)
+    }
+
+    @MainActor
+    func testDetachedTabRebuildsAndTitleChangesApplyWidthsImmediately() throws {
+        _ = NSApplication.shared
+        let store = SettingsStore.shared
+        let saved = store.data
+        defer { store.data = saved }
+        var settings = SettingsData()
+        settings.notionEnabled = false
+        settings.pinnedTabs = [PinnedTab(name: "メール", url: "about:blank", icon: .symbol("envelope")), PinnedTab(name: "カレンダー", url: "about:blank", icon: .symbol("calendar"))]
+        store.data = settings
+        let browser = BrowserViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 400), styleMask: [.titled, .fullSizeContentView], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentViewController = browser
+        window.setContentSize(NSSize(width: 560, height: 400))
+        XCTAssertEqual(window.contentView?.bounds.width, 560)
+        browser.isDetached = true
+        browser.updateDetachedMetrics(trafficInset: 80, rowHeight: 28)
+        window.orderFrontRegardless()
+        defer { window.orderOut(nil) }
+        browser.view.layoutSubtreeIfNeeded()
+
+        func verify(_ operation: String) throws {
+            for tab in descendants(browser.view).compactMap({ $0 as? TabButton }) {
+                XCTAssertTrue(tab.isDetachedLayout)
+                XCTAssertNotNil(tab.detachedOriginalTitle)
+                XCTAssertEqual(tab.detachedWidthConstraint?.isActive, true)
+                var parent = tab.superview
+                while parent != nil && !(parent is NSScrollView) { parent = parent?.superview }
+                let scroll = try XCTUnwrap(parent as? NSScrollView)
+                let document = try XCTUnwrap(scroll.documentView)
+                XCTAssertLessThanOrEqual(document.frame.width, scroll.contentSize.width + 1, operation)
+                XCTAssertEqual(scroll.contentView.bounds.minX, 0, accuracy: 1, operation)
+                let frame = tab.convert(tab.bounds, to: scroll.contentView)
+                XCTAssertGreaterThanOrEqual(frame.minX, scroll.contentView.bounds.minX - 1, operation)
+                XCTAssertLessThanOrEqual(frame.maxX, scroll.contentView.bounds.maxX + 1, operation)
+                let cell = try XCTUnwrap(tab.cell as? TabButtonCell)
+                let displayed = cell.displayedTitle(forBounds: tab.bounds)
+                XCTAssertTrue(tab.title.isEmpty || displayed == tab.title || displayed.hasSuffix("…"))
+            }
+        }
+        browser.newTab(nil) // rebuild at 560; do not call layout after the operation
+        try verify("newTab at 560")
+        window.setContentSize(NSSize(width: 390, height: 400))
+        browser.view.layoutSubtreeIfNeeded()
+        browser.closeCurrentTab(nil) // two tabs again, rebuild at 390
+        try verify("closeCurrentTab at 390")
+        let before = descendants(browser.view).compactMap { $0 as? TabButton }
+        let previouslySelected = try XCTUnwrap(before.first { $0.state == .on })
+        let select = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        let otherTab = try XCTUnwrap(before.first { $0.tag != previouslySelected.tag })
+        select.tag = otherTab.tag + 1 // menu numbers are one-based; button tags are zero-based
+        browser.selectTabByNumber(select)
+        try verify("selectTabByNumber")
+        let after = descendants(browser.view).compactMap { $0 as? TabButton }
+        let newlySelected = try XCTUnwrap(after.first { $0.state == .on })
+        XCTAssertNotEqual(newlySelected.tag, previouslySelected.tag)
+        XCTAssertEqual(newlySelected.tag, otherTab.tag)
+        XCTAssertFalse(after.contains { tab in before.contains { $0 === tab } })
+        browser.selectTabByNumber(select)
+        let sameSelection = descendants(browser.view).compactMap { $0 as? TabButton }
+        XCTAssertEqual(after.map(ObjectIdentifier.init), sameSelection.map(ObjectIdentifier.init))
+        XCTAssertEqual(sameSelection.first { $0.state == .on }?.tag, newlySelected.tag)
+        try verify("unchanged selectTabByNumber")
+        let axOther = try XCTUnwrap(sameSelection.first { $0.tag != newlySelected.tag })
+        XCTAssertTrue(axOther.accessibilityPerformPress())
+        XCTAssertEqual(descendants(browser.view).compactMap { $0 as? TabButton }.first { $0.state == .on }?.tag, axOther.tag)
+        for _ in 0..<2 {
+            let current = try XCTUnwrap(descendants(browser.view).compactMap { $0 as? TabButton }.first { $0.state == .on })
+            current.performClick(nil)
+            let afterClick = try XCTUnwrap(descendants(browser.view).compactMap { $0 as? TabButton }.first { $0.tag == current.tag })
+            XCTAssertEqual(afterClick.state, .on)
+            XCTAssertEqual(afterClick.accessibilityValue() as? String, "選択中")
+            XCTAssertTrue(afterClick.accessibilityPerformPress())
+            let afterPress = try XCTUnwrap(descendants(browser.view).compactMap { $0 as? TabButton }.first { $0.tag == current.tag })
+            XCTAssertEqual(afterPress.state, .on)
+            XCTAssertEqual(afterPress.accessibilityValue() as? String, "選択中")
+        }
+        let changed = try XCTUnwrap(descendants(browser.view).compactMap { $0 as? TabButton }.first)
+        changed.title = "変更された長いタブタイトル"
+        XCTAssertEqual(changed.detachedOriginalTitle, "変更された長いタブタイトル")
+        try verify("title change")
+        store.data.pinnedTabs[1].name = "予定カレンダー"
+        browser.settingsChanged()
+        try verify("settingsChanged")
+        XCTAssertTrue(descendants(browser.view).compactMap { $0 as? TabButton }.contains { $0.detachedOriginalTitle == "予定カレンダー" })
+        let unchanged = descendants(browser.view).compactMap { $0 as? TabButton }
+        browser.settingsChanged()
+        let repeated = descendants(browser.view).compactMap { $0 as? TabButton }
+        XCTAssertEqual(unchanged.map(ObjectIdentifier.init), repeated.map(ObjectIdentifier.init))
+        try verify("unchanged settingsChanged")
+
+        // Genuine minimum-width overflow hides whole normal tabs. The newest tab
+        // remains visible while pinned tabs stay at the left edge.
+        for _ in 0..<4 { browser.newTab(nil) }
+        let overflowTabs = descendants(browser.view).compactMap { $0 as? TabButton }
+        let selected = try XCTUnwrap(overflowTabs.last)
+        XCTAssertTrue(selected.detachedContentFullyVisible)
+        var parent = selected.superview
+        while parent != nil && !(parent is NSScrollView) { parent = parent?.superview }
+        let scroll = try XCTUnwrap(parent as? NSScrollView)
+        XCTAssertLessThanOrEqual(try XCTUnwrap(scroll.documentView).frame.width, scroll.contentSize.width + 1)
+        XCTAssertTrue(overflowTabs.contains { $0.isHidden })
+        for tab in overflowTabs where !tab.detachedContentFullyVisible {
+            let cell = try XCTUnwrap(tab.cell as? TabButtonCell)
+            XCTAssertEqual(cell.displayedTitle(forBounds: tab.bounds), "")
+        }
+        for _ in 0..<4 { browser.closeCurrentTab(nil) }
+        try verify("close overflow tabs back to two")
+    }
+
+    @MainActor
+    func testTwoDetachedTabTitlesFitAndTruncateInsteadOfBeingClipped() throws {
+        _ = NSApplication.shared
+        let store = SettingsStore.shared
+        let saved = store.data
+        defer { store.data = saved }
+        var settings = SettingsData()
+        settings.notionEnabled = false
+        settings.pinnedTabs = [PinnedTab(name: "メール", url: "about:blank", icon: .symbol("envelope")), PinnedTab(name: "カレンダー", url: "about:blank", icon: .symbol("calendar"))]
+        store.data = settings
+        let browser = BrowserViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 400), styleMask: [.titled, .fullSizeContentView], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentViewController = browser
+        window.setContentSize(NSSize(width: 560, height: 400))
+        XCTAssertEqual(window.contentView?.bounds.width, 560)
+        browser.isDetached = true
+        browser.updateDetachedMetrics(trafficInset: 80, rowHeight: 28)
+        window.orderFrontRegardless()
+        defer { window.orderOut(nil) }
+        var widthsByWindowWidth: [Double: [CGFloat]] = [:]
+        for width in [390.0, 400, 440, 480, 520, 560, 640, 1000, 560, 390, 1000, 440, 520, 400] {
+            window.setContentSize(NSSize(width: width, height: 400))
+            browser.view.layoutSubtreeIfNeeded()
+            let tabs = descendants(browser.view).compactMap { $0 as? TabButton }
+            XCTAssertEqual(tabs.count, 2)
+            for tab in tabs {
+                XCTAssertNil(tab.onClose)
+                XCTAssertTrue(tab.subviews.compactMap { $0 as? NSButton }.isEmpty)
+                XCTAssertFalse(try XCTUnwrap(tab.menu).items.contains { $0.title == "タブを閉じる" })
+            }
+            XCTAssertEqual(tabs[0].frame.width, tabs[1].frame.width, accuracy: 1)
+            XCTAssertEqual(tabs[0].detachedMode, tabs[1].detachedMode)
+            let currentWidths = tabs.map { $0.frame.width }
+            if let earlier = widthsByWindowWidth[width] { XCTAssertEqual(currentWidths, earlier) }
+            widthsByWindowWidth[width] = currentWidths
+            for tab in tabs {
+                XCTAssertLessThanOrEqual(tab.frame.width, tab.detachedNaturalWidth + 1)
+                if tab.image?.isTemplate == true { XCTAssertEqual(tab.detachedIconTint, tab.contentTintColor ?? .labelColor) }
+                var parent = tab.superview
+                while parent != nil && !(parent is NSScrollView) { parent = parent?.superview }
+                let scroll = try XCTUnwrap(parent as? NSScrollView)
+                let stack = try XCTUnwrap(scroll.documentView)
+                XCTAssertLessThanOrEqual(stack.frame.width, scroll.contentSize.width + 1)
+                let frame = tab.convert(tab.bounds, to: scroll.contentView)
+                XCTAssertGreaterThanOrEqual(frame.minX, scroll.contentView.bounds.minX - 1)
+                XCTAssertLessThanOrEqual(frame.maxX, scroll.contentView.bounds.maxX + 1)
+                let cell = try XCTUnwrap(tab.cell as? TabButtonCell)
+                XCTAssertEqual(cell.lineBreakMode, .byTruncatingTail)
+                XCTAssertTrue(cell.truncatesLastVisibleLine)
+                XCTAssertFalse(cell.wraps)
+                let titleRect = cell.titleRect(forBounds: tab.bounds)
+                XCTAssertGreaterThanOrEqual(titleRect.minX, tab.bounds.minX)
+                XCTAssertLessThanOrEqual(titleRect.maxX, tab.bounds.maxX)
+                let displayed = cell.displayedTitle(forBounds: tab.bounds)
+                XCTAssertTrue(tab.title.isEmpty || displayed == tab.title || displayed.hasSuffix("…"))
+                if tab.title.isEmpty { XCTAssertEqual(tab.imagePosition, .imageOnly) }
+            }
+        }
+    }
+
     func testClosedTabsAreBoundedLIFOAndRejectTransientURLs() {
         var history = ClosedTabHistory()
         for n in 0..<25 {
@@ -291,12 +673,82 @@ final class BrowserToolsTests: XCTestCase {
             XCTAssertGreaterThanOrEqual(frames.count, 5)
             for frame in frames { XCTAssertGreaterThanOrEqual(frame.minX, width / 2 + 112 - 1); XCTAssertLessThanOrEqual(frame.maxX, width - 11) }
             for pair in zip(frames, frames.dropFirst()) { XCTAssertLessThanOrEqual(pair.0.maxX + 3, pair.1.minX) }
+            let detach = try XCTUnwrap(descendants(browser.view).compactMap { $0 as? NSButton }
+                .first { $0.accessibilityLabel() == "ウインドウで開く" })
+            XCTAssertFalse(detach.isHidden)
+            let detachFrame = detach.convert(detach.bounds, to: browser.view)
+            XCTAssertGreaterThanOrEqual(detachFrame.minX, width / 2 + 112 - 1)
+            XCTAssertLessThanOrEqual(detachFrame.maxX, width - 11)
+            let allFrames = (frames + [detachFrame]).sorted { $0.minX < $1.minX }
+            for pair in zip(allFrames, allFrames.dropFirst()) {
+                XCTAssertLessThanOrEqual(pair.0.maxX + 3, pair.1.minX)
+            }
+            if let pin = buttons.first(where: { $0.accessibilityLabel() == "開いたままにする" }) {
+                let pinFrame = pin.convert(pin.bounds, to: browser.view)
+                XCTAssertGreaterThanOrEqual(detachFrame.minX - pinFrame.maxX, 3)
+                XCTAssertLessThanOrEqual(detachFrame.minX - pinFrame.maxX, 4.5)
+            }
         }
         let web = try XCTUnwrap(descendants(browser.view).compactMap { $0 as? WKWebView }.first)
         let webRect = web.convert(web.bounds, to: browser.view)
         XCTAssertEqual(webRect.maxY, 468, accuracy: 1)
         XCTAssertEqual(webRect.minX, 8, accuracy: 1)
         XCTAssertEqual(webRect.minY, 8, accuracy: 1)
+    }
+
+    @MainActor
+    func testDetachedMinimumWidthOverflowsWithoutHidingPermanentControls() throws {
+        _ = NSApplication.shared
+        let store = SettingsStore.shared
+        let saved = store.data
+        defer { store.data = saved }
+        var settings = SettingsData()
+        settings.pinnedTabs = []
+        store.data = settings
+        let browser = BrowserViewController()
+        let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 1000, height: 500),
+                              styleMask: [.titled, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentViewController = browser
+        window.setContentSize(NSSize(width: 1000, height: 500))
+        XCTAssertEqual(window.contentView?.bounds.width, 1000)
+        browser.isDetached = true
+        browser.updateDetachedMetrics(trafficInset: 80, rowHeight: 28)
+        browser.newTab(nil)
+        window.orderFrontRegardless()
+        defer { window.orderOut(nil) }
+        for width in [388.0, 390.0, 420.0, 520.0, 1000.0] {
+            window.setContentSize(NSSize(width: width, height: 500))
+            browser.view.layoutSubtreeIfNeeded()
+            browser.view.layoutSubtreeIfNeeded()
+            let controls = descendants(browser.view).compactMap { $0 as? NSButton }
+            let pin = try XCTUnwrap(controls.first { $0.accessibilityLabel() == "開いたままにする" })
+            XCTAssertTrue(pin.isHidden)
+            for tab in controls.compactMap({ $0 as? TabButton }) where tab.maximumTitleWidth != nil {
+                XCTAssertEqual(tab.cell?.lineBreakMode, .byTruncatingTail)
+                XCTAssertEqual(tab.cell?.truncatesLastVisibleLine, true)
+                var parent = tab.superview
+                while parent != nil && !(parent is NSScrollView) { parent = parent?.superview }
+                let scroll = try XCTUnwrap(parent as? NSScrollView)
+                XCTAssertLessThanOrEqual(tab.frame.width, scroll.contentSize.width + 1)
+            }
+            let names = ["戻る", "進む", "ノッチに戻す", "ページの操作"]
+            for name in names {
+                let button = try XCTUnwrap(controls.first { $0.accessibilityLabel() == name })
+                XCTAssertFalse(button.isHidden)
+                let frame = button.convert(button.bounds, to: browser.view)
+                XCTAssertGreaterThanOrEqual(frame.minX, 80)
+                XCTAssertLessThanOrEqual(frame.maxX, width - 11)
+            }
+            if width == 388 {
+                let menu = try XCTUnwrap(controls.compactMap { $0 as? NSPopUpButton }.first?.menu)
+                for title in ["終了", "設定", "URLを表示・検索", "設定したページに戻る"] {
+                    let item = try XCTUnwrap(menu.items.first { $0.title == title })
+                    XCTAssertNotNil(item.action)
+                    XCTAssertTrue((item.target as? BrowserViewController) === browser)
+                }
+            }
+        }
     }
 
     @MainActor

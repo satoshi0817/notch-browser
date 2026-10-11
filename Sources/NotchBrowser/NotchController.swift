@@ -534,7 +534,8 @@ final class NotchController: NSObject, NSWindowDelegate {
 
     // MARK: Expand / collapse
 
-    func expand(focus: Bool) {
+    func expand(focus: Bool, preservingContent: Bool = false) {
+        if manager.isDetached { manager.bringDetachedForward(); return }
         if shelfOnly { hideShelf() }
         if notification != nil {
             notification = nil
@@ -545,8 +546,10 @@ final class NotchController: NSObject, NSWindowDelegate {
         hoverTimer?.invalidate()
         if !isExpanded {
             root.contentSize = expandedSize
-            manager.browser.hideNotion()
-            manager.browser.prepareForOpen()
+            if !preservingContent {
+                manager.browser.hideNotion()
+                manager.browser.prepareForOpen()
+            }
             manager.willExpand(self)
             isExpanded = true
             if ShelfFeature.isAvailable && !manager.shelf.store.entries.isEmpty { manager.showShelf(on: self) }
@@ -555,6 +558,7 @@ final class NotchController: NSObject, NSWindowDelegate {
             root.setRunningAgent(nil)
             animate(to: expandedFrame, radius: 18, contentAlpha: 1)
         }
+        manager.browser.revealSelectedTabAfterNotchLayout()
         if focus {
             panel.makeKey()
             manager.browser.focusContent()
@@ -564,7 +568,7 @@ final class NotchController: NSObject, NSWindowDelegate {
     func collapse(animated: Bool = true, preservingShelf: Bool = true) {
         hoverTimer?.invalidate()
         guard isExpanded else { return }
-        manager.browser.hideNotion()
+        if !manager.isDetached { manager.browser.hideNotion() }
         if preservingShelf && shelfVisible && !manager.shelf.store.entries.isEmpty {
             shelfOnly = true
             if panel.isKeyWindow { panel.orderOut(nil); panel.orderFrontRegardless() }
@@ -703,6 +707,7 @@ final class NotchController: NSObject, NSWindowDelegate {
             self.root.cornerRadius = mix(startRadius, radius, shape)
             self.root.content.alphaValue = mix(startContent, contentAlpha, content)
             CATransaction.commit()
+            if progress >= 1, self.isExpanded, !self.manager.isDetached { self.manager.browser.revealSelectedTabAfterNotchLayout() }
         }
     }
 
@@ -710,6 +715,11 @@ final class NotchController: NSObject, NSWindowDelegate {
     /// Only pinning or an active modal temporarily holds the notch open.
     private func hoverChanged(_ inside: Bool) {
         pointerInside = inside
+        if manager.isDetached {
+            hoverTimer?.invalidate()
+            if inside { manager.bringDetachedForward() }
+            return
+        }
         hoverTimer?.invalidate()
         hoverTimer = nil
         let motion = SettingsStore.shared.data.motion
@@ -753,7 +763,14 @@ final class NotchController: NSObject, NSWindowDelegate {
 }
 
 /// Owns the browser and one notch per enabled display.
-final class NotchManager {
+final class NotchManager: NSObject, NSWindowDelegate {
+    private var detachedWindow: NSWindow?
+    private var normalFrameState: DetachedNormalFrameState?
+    private var contentTransferInProgress = false
+    private var returningFromFullScreen = false
+    private var fullScreenTransition = false
+    private var returnDisplayID: String?
+    var isDetached: Bool { detachedWindow != nil }
     let browser = BrowserViewController()
     let shelf: ShelfViewController
     let notion = NotionAgentsStore.shared
@@ -790,6 +807,8 @@ final class NotchManager {
 
     init(shelfStore: ShelfStore = .shared) {
         shelf = ShelfViewController(store: shelfStore)
+        super.init()
+        browser.onToggleDetached = { [weak self] in self?.toggleDetached() }
         browser.onOpenShelf = { [weak self] in self?.showShelf() }
         browser.onExternalTabOpened = { [weak self] in
             guard let self else { return }
@@ -878,6 +897,7 @@ final class NotchManager {
 
     private func applyWindowSettings() {
         controllers.values.forEach { $0.applyScreenCaptureSetting() }
+        detachedWindow?.sharingType = SettingsStore.shared.data.hideFromScreenCapture ? .none : .readOnly
         browser.hideFromScreenCapture = SettingsStore.shared.data.hideFromScreenCapture
     }
 
@@ -929,6 +949,7 @@ final class NotchManager {
     }
 
     private func attachBrowser(to controller: NotchController) {
+        guard !isDetached else { return }
         let view = browser.view
         if view.superview !== controller.root.content {
             view.removeFromSuperview()
@@ -958,7 +979,7 @@ final class NotchManager {
         guard let target else { return }
         target.expand(focus: focus)
         browser.showNotion()
-        target.panel.orderFrontRegardless()
+        if !isDetached { target.panel.orderFrontRegardless() }
     }
 
     private func dragChanged(_ active: Bool) {
@@ -994,8 +1015,175 @@ final class NotchManager {
         }
     }
 
+    func bringDetachedForward() {
+        guard let window = detachedWindow else { return }
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        NSApp.activate()
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    func toggleDetached() {
+        guard !contentTransferInProgress else { return }
+        if let window = detachedWindow {
+            guard !returningFromFullScreen else { return }
+            if fullScreenTransition || window.styleMask.contains(.fullScreen) {
+                returningFromFullScreen = true
+                if !fullScreenTransition { window.toggleFullScreen(nil) }
+            } else { returnToNotch() }
+            return
+        }
+        contentTransferInProgress = true
+        browser.preservingPagePosition(move: { [weak self] in
+            self?.detachBrowser()
+        }, completion: { [weak self] in
+            self?.contentTransferInProgress = false
+        })
+    }
+
+    private func detachBrowser() {
+        let source = orderedControllers.first { browser.view.superview === $0.root.content }
+            ?? orderedControllers.first { $0.screen.frame.contains(NSEvent.mouseLocation) }
+            ?? orderedControllers.first
+        returnDisplayID = source?.screen.displayUUID
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+                              styleMask: [.titled, .resizable, .closable, .miniaturizable, .fullSizeContentView],
+                              backing: .buffered, defer: false)
+        window.title = "NotchBrowser"
+        window.isMovableByWindowBackground = false
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.isReleasedWhenClosed = false
+        window.collectionBehavior = [.fullScreenPrimary]
+        window.minSize = NSSize(width: DetachedToolbarLayout.minimumWidth(trafficInset: trafficLightInset(for: window)), height: 320)
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.sharingType = SettingsStore.shared.data.hideFromScreenCapture ? .none : .readOnly
+        window.center()
+        let saved = UserDefaults.standard.string(forKey: "detachedBrowserFrame")
+        let frame = saved.map(NSRectFromString)
+            ?? NSRect(x: window.frame.midX - 500, y: window.frame.midY - 350, width: 1000, height: 700)
+        detachedWindow = window
+        controllers.values.forEach { $0.collapse(animated: false, preservingShelf: false) }
+        browser.view.removeFromSuperview()
+        browser.view.isHidden = false
+        browser.view.autoresizingMask = [.width, .height]
+        window.contentViewController = browser
+        browser.isDetached = true
+        updateDetachedTitlebar()
+        let restored = DetachedWindowGeometry.constrain(frame, screens: NSScreen.screens.map(\.visibleFrame),
+                                                        primary: (NSScreen.screens.first?.visibleFrame ?? window.frame),
+                                                        minimumSize: window.minSize)
+        // Apply outer frame after AppKit's initial presentation/placement, with delegate
+        // disconnected so intermediate view-sized or cascaded frames cannot be saved.
+        window.setFrame(restored, display: false)
+        bringDetachedForward()
+        window.setFrame(restored, display: true)
+        window.contentView?.layoutSubtreeIfNeeded()
+        updateDetachedTitlebar()
+        window.delegate = self
+        normalFrameState = DetachedNormalFrameState(frame: restored)
+        saveDetachedFrame()
+    }
+
+    private func trafficLightInset(for window: NSWindow) -> CGFloat {
+        let buttons = [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton]
+            .compactMap { window.standardWindowButton($0) }
+        guard let content = window.contentView else { return 80 }
+        return buttons.map { $0.convert($0.bounds, to: content).maxX }.max().map { $0 + 12 } ?? 80
+    }
+
+    private func updateDetachedTitlebar() {
+        guard let window = detachedWindow, let content = window.contentView else { return }
+        let fullscreen = window.styleMask.contains(.fullScreen)
+        let inset = fullscreen ? CGFloat(14) : trafficLightInset(for: window)
+        if !fullscreen {
+            let minimum = DetachedToolbarLayout.minimumWidth(trafficInset: inset)
+            if window.minSize.width != minimum { window.minSize = NSSize(width: minimum, height: 320) }
+        }
+        let button = window.standardWindowButton(.closeButton)
+        let buttonFrame = button.map { $0.convert($0.bounds, to: content) }
+        let height = fullscreen ? CGFloat(36) : max(28, buttonFrame.map { 2 * (content.bounds.maxY - $0.midY) } ?? 28)
+        browser.updateDetachedMetrics(trafficInset: inset, rowHeight: height)
+    }
+
+    private func saveDetachedFrame() {
+        guard let window = detachedWindow, !fullScreenTransition,
+              !window.styleMask.contains(.fullScreen), !returningFromFullScreen else { return }
+        let visible = window.screen?.visibleFrame ?? NSScreen.screens.first?.visibleFrame ?? window.frame
+        let normal = normalFrameState?.observe(frame: window.frame, visibleFrame: visible, isZoomed: window.isZoomed)
+            ?? window.frame
+        UserDefaults.standard.set(NSStringFromRect(normal), forKey: "detachedBrowserFrame")
+    }
+
+    private func returnToNotch() {
+        guard !contentTransferInProgress else { return }
+        contentTransferInProgress = true
+        browser.preservingPagePosition(move: { [weak self] in
+            self?.restoreBrowserToNotch()
+        }, completion: { [weak self] in
+            self?.contentTransferInProgress = false
+        })
+    }
+
+    private func restoreBrowserToNotch() {
+        guard let window = detachedWindow,
+              let target = returnDisplayID.flatMap({ controllers[$0] }) ?? orderedControllers.first else {
+            returningFromFullScreen = false
+            return
+        }
+        saveDetachedFrame()
+        window.delegate = nil
+        window.contentViewController = nil
+        browser.view.removeFromSuperview()
+        window.orderOut(nil)
+        detachedWindow = nil
+        returningFromFullScreen = false
+        browser.isDetached = false
+        target.expand(focus: true, preservingContent: true)
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        toggleDetached()
+        return false
+    }
+
+    func windowDidMove(_ notification: Notification) { saveDetachedFrame() }
+    func windowShouldZoom(_ window: NSWindow, toFrame newFrame: NSRect) -> Bool {
+        let visible = window.screen?.visibleFrame ?? NSScreen.screens.first?.visibleFrame ?? newFrame
+        normalFrameState?.beginZoom(frame: window.frame, target: newFrame, visibleFrame: visible, isZoomed: window.isZoomed)
+        saveDetachedFrame()
+        return true
+    }
+    func windowDidResize(_ notification: Notification) {
+        updateDetachedTitlebar()
+        saveDetachedFrame()
+    }
+    func windowWillEnterFullScreen(_ notification: Notification) {
+        saveDetachedFrame()
+        fullScreenTransition = true
+    }
+    func windowDidEnterFullScreen(_ notification: Notification) {
+        fullScreenTransition = false
+        updateDetachedTitlebar()
+        if returningFromFullScreen { detachedWindow?.toggleFullScreen(nil) }
+    }
+    func windowWillExitFullScreen(_ notification: Notification) { fullScreenTransition = true }
+    func windowDidExitFullScreen(_ notification: Notification) {
+        fullScreenTransition = false
+        updateDetachedTitlebar()
+        if returningFromFullScreen { returnToNotch() }
+    }
+    func windowDidFailToEnterFullScreen(_ window: NSWindow) {
+        fullScreenTransition = false
+        if returningFromFullScreen { returnToNotch() }
+    }
+    func windowDidFailToExitFullScreen(_ window: NSWindow) {
+        fullScreenTransition = false
+        returningFromFullScreen = false
+    }
+
     /// Hotkey: collapse if focused, otherwise open on the display under the pointer.
     func toggle() {
+        if isDetached { bringDetachedForward(); return }
         if let open = controllers.values.first(where: \.isExpanded), open.panel.isKeyWindow {
             open.collapse()
             return

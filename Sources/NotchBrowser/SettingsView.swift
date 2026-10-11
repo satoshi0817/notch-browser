@@ -449,6 +449,7 @@ struct GeneralSettings: View {
 
             Section("ショートカット") {
                 LabeledContent("開く / 閉じる", value: "⌃⌥N")
+                LabeledContent("ウインドウで開く / ノッチに戻す", value: "⌃⌥⌘N")
                 LabeledContent("設定", value: "⌘,")
             }
         }
