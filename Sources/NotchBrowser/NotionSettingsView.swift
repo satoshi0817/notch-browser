@@ -32,11 +32,14 @@ private enum DatabasePollingFrequency: String, CaseIterable, Identifiable {
     }
 }
 
-/// Shared Notion connection and database notifications live outside the agent page.
+/// Connection and database notifications live here; task settings live in PinnedTabsSettings.
 struct NotionSettingsView: View {
+    static let pageSettingsHint = "タスクと議事録は［固定ページ］で設定します"
+    static let pageSettingsDestination: SettingsSection = .tabs
+    var onOpenPinnedPages: () -> Void = {}
     @EnvironmentObject private var settings: SettingsStore
-    @ObservedObject private var connection = NotionConnectionStore.shared
     @ObservedObject private var monitor = NotionDatabaseMonitor.shared
+    @ObservedObject private var connection: NotionConnectionStore
     @State private var tokenDraft = ""
     @State private var databaseInput = ""
     @State private var databaseMessage: String?
@@ -46,6 +49,14 @@ struct NotionSettingsView: View {
     @State private var pollingFrequency = DatabasePollingFrequency.medium
     @FocusState private var pollingFocused: Bool
 
+
+    init(connection: NotionConnectionStore = .shared, onOpenPinnedPages: @escaping () -> Void = {}) {
+        _connection = ObservedObject(wrappedValue: connection)
+        self.onOpenPinnedPages = onOpenPinnedPages
+    }
+
+    func openPinnedPages() { onOpenPinnedPages() }
+
     var body: some View {
         Form {
             Section("Notion接続") {
@@ -53,22 +64,13 @@ struct NotionSettingsView: View {
                     Text("内部インテグレーションのトークン")
                         .frame(width: NotionSettingsFieldLayout.labelWidth, alignment: .leading)
                     SecureField("", text: $tokenDraft)
-                    .textFieldStyle(.roundedBorder)
-                    .labelsHidden()
-                    .frame(maxWidth: .infinity)
-                    .accessibilityLabel("Notionのトークン")
-                    .onSubmit { Task { await saveToken() } }
-                    Color.clear.frame(width: NotionSettingsFieldLayout.actionWidth, height: 0)
-                        .accessibilityHidden(true)
+                        .textFieldStyle(.roundedBorder).labelsHidden()
+                        .accessibilityLabel("Notionのトークン")
+                        .onSubmit { Task { await saveToken() } }
                 }
                 HStack {
-                    Button {
-                        Task { await saveToken() }
-                    } label: {
-                        if connection.isChecking { ProgressView().controlSize(.small) }
-                        else { Text("確認して保存") }
-                    }
-                    .disabled(connection.isChecking || tokenDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    Button("確認して保存") { Task { await saveToken() } }
+                        .disabled(connection.isChecking || tokenDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     if connection.hasStoredToken {
                         Button("接続を確認") { Task { await connection.verifySaved() } }
                             .disabled(connection.isChecking)
@@ -76,8 +78,7 @@ struct NotionSettingsView: View {
                             .disabled(connection.isChecking)
                     }
                     Spacer()
-                    Text(connection.isChecking ? "確認中" : connection.tokenValid ? "接続済み" : "未確認")
-                        .foregroundStyle(connection.tokenValid ? .green : .secondary)
+                    Text(connection.stateLabel).foregroundStyle(connection.tokenValid ? .green : .secondary)
                 }
                 if let message = connection.message {
                     Text(message).font(.caption)
@@ -88,10 +89,9 @@ struct NotionSettingsView: View {
                         settings.data.notionEnabled = true
                     }
                 }
-                Text("トークンはMacのキーチェーンに保存します。エージェントを有効にするには、Notionへの接続を確認します。")
+                Text("トークンはMacのキーチェーンに保存します。")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Section("タスク") { Text("タブの中で設定できます").foregroundStyle(.secondary) }
             Section("データベースの更新通知") {
                 Toggle("データベース更新をノッチで通知", isOn: $settings.data.notionDatabaseNotificationsEnabled)
                 Picker("通知を閉じるまで", selection: $settings.data.notionDatabaseNotificationDuration) {
@@ -182,8 +182,12 @@ struct NotionSettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
                 if let error = monitor.lastError { Text(error).font(.caption).foregroundStyle(.orange) }
             }
-        }
-        .formStyle(.grouped)
+            Section {
+                Text(Self.pageSettingsHint).foregroundStyle(.secondary)
+                Button("固定ページの設定を開く", action: openPinnedPages)
+                    .buttonStyle(.link)
+            }
+        }.formStyle(.grouped)
         .onAppear {
             pollingDraft = String(settings.data.notionDatabasePollingSeconds)
             pollingFrequency = .matching(settings.data.notionDatabasePollingSeconds)
@@ -202,7 +206,6 @@ struct NotionSettingsView: View {
             }
         }
     }
-
     private func saveToken() async {
         if await connection.save(tokenDraft) { tokenDraft = "" }
     }

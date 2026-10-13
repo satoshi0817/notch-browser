@@ -294,7 +294,7 @@ final class SettingsStore: ObservableObject {
         }
     }
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = SettingsDefaults.current) {
         self.defaults = defaults
         if let raw = defaults.data(forKey: Self.key), let decoded = try? JSONDecoder().decode(SettingsData.self, from: raw) {
             data = decoded
@@ -351,8 +351,8 @@ final class SettingsStore: ObservableObject {
     /// The pinned tab last viewed, restored on launch. Kept out of `data` so selecting a
     /// tab doesn't trigger a settings sync.
     var lastViewedPinnedID: UUID? {
-        get { UserDefaults.standard.string(forKey: "lastViewedPinnedID").flatMap(UUID.init) }
-        set { UserDefaults.standard.set(newValue?.uuidString, forKey: "lastViewedPinnedID") }
+        get { defaults.string(forKey: "lastViewedPinnedID").flatMap(UUID.init) }
+        set { defaults.set(newValue?.uuidString, forKey: "lastViewedPinnedID") }
     }
 
     func deleteProfile(_ id: UUID) {
@@ -401,4 +401,19 @@ extension NSScreen {
     }
 
     var hasNotch: Bool { safeAreaInsets.top > 0 }
+}
+
+/// DEBUG-only isolation of app settings and Notion configuration/cache.
+enum SettingsDefaults {
+    static let current = make(arguments: CommandLine.arguments)
+
+    static func make(arguments: [String]) -> UserDefaults {
+        #if DEBUG
+        if let argument = arguments.first(where: { $0.hasPrefix("--defaults-suite=") }) {
+            let name = String(argument.dropFirst("--defaults-suite=".count))
+            if !name.isEmpty, let defaults = UserDefaults(suiteName: name) { return defaults }
+        }
+        #endif
+        return .standard
+    }
 }

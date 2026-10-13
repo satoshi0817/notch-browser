@@ -32,90 +32,155 @@ struct NotionConnectionAPI {
     }
 }
 
+enum NotionConnectionState: String, CaseIterable {
+    case unconnected, verifying, connected, unverified, invalid
+    var label: String {
+        switch self {
+        case .unconnected: "未接続"
+        case .verifying: "確認中"
+        case .connected: "接続済み"
+        case .unverified: "未確認"
+        case .invalid: "無効なトークン"
+        }
+    }
+}
+
 final class NotionConnectionStore: ObservableObject {
     static let shared = NotionConnectionStore()
-
-    @Published private(set) var tokenValid = false
-    @Published private(set) var isChecking = false
+    @Published private(set) var state: NotionConnectionState = .unconnected
+    @Published private(set) var hasStoredToken = false
     @Published private(set) var message: String?
-
-    var hasStoredToken: Bool {
-        #if DEBUG
-        if previewMock { return true }
-        #endif
-        return NotionTokenStore.read() != nil
+    @Published private var checkingNewToken = false
+    var tokenValid: Bool { state == .connected }
+    var isChecking: Bool { state == .verifying || checkingNewToken }
+    var stateLabel: String { state.label }
+    var canReverify: Bool {
+        NotionTaskRules.showsReverificationEntry(state: state, hasStoredToken: hasStoredToken)
     }
+    var showsEmptySettingsButton: Bool {
+        NotionTaskRules.showsEmptySettingsButton(bannerVisible: canReverify)
+    }
+    var showsConnectionError: Bool {
+        NotionTaskRules.showsConnectionError(state: state, hasStoredToken: hasStoredToken)
+    }
+    var bannerTitle: String {
+        state == .invalid ? "Notion のトークンが無効です" :
+        state == .unverified ? "Notion に接続できませんでした" : "Notion 接続を確認中…"
+    }
+    var bannerDetail: String {
+        state == .invalid ? "設定を開いて、トークンを入れ直してください" :
+        state == .unverified ? "ネットワークを確認して、再確認してください" : "接続を確認しています"
+    }
+    var failureMessage: String? {
+        guard NotionTaskRules.showsConnectionError(state: state, hasStoredToken: hasStoredToken) else { return nil }
+        return message ?? (state == .invalid ? "トークンが無効です。Notion 接続を設定し直してください" :
+                           "未確認: 接続を確認できません")
+    }
+    var showsLoading: Bool { NotionTaskRules.showsConnectionLoading(state: state, hasStoredToken: hasStoredToken) }
 
     #if DEBUG
+    typealias PreviewState = NotionConnectionState
+    static func previewState(arguments: [String]) -> PreviewState? {
+        arguments.first { $0.hasPrefix("--notion-connection=") }
+            .flatMap { PreviewState(rawValue: String($0.dropFirst("--notion-connection=".count))) }
+    }
+    static var launchPreviewState: PreviewState? { previewState(arguments: CommandLine.arguments) }
+    var isPreview: Bool { previewMock }
     private var previewMock = false
-    /// Isolated connection for UI tests; disconnect never touches the keychain.
-    static func preview(connected: Bool) -> NotionConnectionStore {
-        let store = NotionConnectionStore()
-        store.previewMock = true
-        store.tokenValid = connected
+    private var previewVerification: (() async throws -> Void)?
+    static func preview(state: PreviewState, verification: (() async throws -> Void)? = nil) -> NotionConnectionStore {
+        let store = NotionConnectionStore(initialState: state)
+        store.previewVerification = verification
         return store
     }
+    static func preview(connected: Bool) -> NotionConnectionStore {
+        preview(state: connected ? .connected : .unverified)
+    }
     #endif
-    private init() {
+
+    private init(initialState: NotionConnectionState? = nil) {
         #if DEBUG
-        if ProcessInfo.processInfo.environment["NOTCH_TASKS_MOCK"] != nil || CommandLine.arguments.contains(where: { $0.hasPrefix("--tasks=") || $0.hasPrefix("--agents=") }) {
+        let fixture = initialState ?? Self.launchPreviewState
+        let legacyFixture = ProcessInfo.processInfo.environment["NOTCH_TASKS_MOCK"] != nil ||
+            CommandLine.arguments.contains { $0.hasPrefix("--tasks=") || $0.hasPrefix("--agents=") }
+        let effectiveFixture: NotionConnectionState? = fixture ?? (legacyFixture ? .connected : nil)
+        if let fixture = effectiveFixture {
             previewMock = true
-            tokenValid = true
-            message = "トークンを確認しました"
+            hasStoredToken = fixture != .unconnected
+            state = fixture
+            if fixture == .unverified { message = "未確認: 接続を確認できません" }
+            if fixture == .invalid { message = "トークンが無効です。Notion 接続を設定し直してください" }
+            return
         }
         #endif
+        hasStoredToken = NotionTokenStore.read() != nil
+        state = hasStoredToken ? .unverified : .unconnected
     }
 
     func verifySaved() async {
         #if DEBUG
-        if previewMock { tokenValid = true; return }
+        if previewMock {
+            guard !isChecking, hasStoredToken, let verification = previewVerification else { return }
+            state = .verifying
+            message = "接続を確認中…"
+            do { try await verification(); state = .connected; message = "トークンを確認しました" }
+            catch { verificationFailed(error) }
+            return
+        }
         #endif
         guard !isChecking else { return }
         guard let token = NotionTokenStore.read() else {
-            tokenValid = false; message = nil
+            hasStoredToken = false
+            state = .unconnected
+            message = nil
             SettingsStore.shared.data.notionEnabled = false
             return
         }
-        isChecking = true
+        hasStoredToken = true
+        state = .verifying
         message = "接続を確認中…"
-        defer { isChecking = false }
         do {
             try await NotionConnectionAPI(token: token).verify()
             guard NotionTokenStore.read() == token else { return }
-            tokenValid = true
+            state = .connected
             message = "トークンを確認しました"
         } catch {
             guard NotionTokenStore.read() == token else { return }
-            tokenValid = false
-            message = "接続を確認できません: \(error.localizedDescription)"
-            if case NotionAPIError.server(let status, _) = error, status == 401 {
-                SettingsStore.shared.data.notionEnabled = false
-            }
+            verificationFailed(error)
         }
         NotionAgentsStore.shared.settingsChanged()
+    }
+
+    private func verificationFailed(_ error: Error) {
+        state = NotionTaskRules.connectionState(after: error)
+        message = state == .invalid ? "トークンが無効です。Notion 接続を設定し直してください" :
+            "未確認: 接続を確認できません: \(error.localizedDescription)"
+        // Keep the agent feature preference on authentication and network failures.
     }
 
     @discardableResult
     func save(_ raw: String) async -> Bool {
         #if DEBUG
-        if previewMock { tokenValid = true; return true }
+        if previewMock { hasStoredToken = true; state = .connected; message = "接続済み"; return true }
         #endif
         let token = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !token.isEmpty, !isChecking else { return false }
-        isChecking = true
+        checkingNewToken = true
         message = "トークンを確認中…"
-        defer { isChecking = false }
+        defer { checkingNewToken = false }
         do {
             try await NotionConnectionAPI(token: token).verify()
             guard NotionTokenStore.save(token) else {
                 message = "トークンをキーチェーンに保存できませんでした。"; return false
             }
+            hasStoredToken = true
+            state = .connected
+            message = "トークンを確認しました"
             NotionAgentsStore.shared.storedTokenChanged()
             await NotionTasksStore.shared.connectionChanged()
-            tokenValid = true
-            message = "トークンを確認しました"
             return true
         } catch {
+            // A rejected replacement must not invalidate a previously saved connection.
             message = "トークンを確認できません: \(error.localizedDescription)"
             return false
         }
@@ -123,12 +188,13 @@ final class NotionConnectionStore: ObservableObject {
 
     func disconnect() {
         #if DEBUG
-        if previewMock { tokenValid = false; message = nil; return }
+        if previewMock { hasStoredToken = false; state = .unconnected; message = nil; return }
         #endif
         guard NotionTokenStore.save("") else {
             message = "キーチェーンの接続情報を削除できませんでした。"; return
         }
-        tokenValid = false
+        hasStoredToken = false
+        state = .unconnected
         message = nil
         SettingsStore.shared.data.notionEnabled = false
         NotionAgentsStore.shared.storedTokenChanged()

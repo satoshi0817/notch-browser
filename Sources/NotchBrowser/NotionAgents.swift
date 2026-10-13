@@ -10,6 +10,9 @@ enum NotionTokenStore {
     private static let account = "internal-integration"
 
     static func read() -> String? {
+        #if DEBUG
+        if NotionConnectionStore.launchPreviewState != nil { return nil }
+        #endif
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                     kSecAttrService as String: service,
                                     kSecAttrAccount as String: account,
@@ -22,6 +25,9 @@ enum NotionTokenStore {
     }
 
     static func save(_ token: String) -> Bool {
+        #if DEBUG
+        if NotionConnectionStore.launchPreviewState != nil { return false }
+        #endif
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                     kSecAttrService as String: service,
                                     kSecAttrAccount as String: account]
@@ -547,7 +553,7 @@ final class NotionAgentsStore: ObservableObject {
         self.pendingRepliesKey = pendingRepliesKey
         self.cache = cache
         hasToken = tokenProvider() != nil
-        if let data = UserDefaults.standard.data(forKey: pendingRepliesKey) {
+        if let data = SettingsDefaults.current.data(forKey: pendingRepliesKey) {
             pendingReplies = (try? JSONDecoder().decode([String: PendingReply].self, from: data)) ?? [:]
         }
     }
@@ -675,7 +681,7 @@ final class NotionAgentsStore: ObservableObject {
     }
 
     private func savePendingReplies() {
-        UserDefaults.standard.set(try? JSONEncoder().encode(pendingReplies), forKey: pendingRepliesKey)
+        SettingsDefaults.current.set(try? JSONEncoder().encode(pendingReplies), forKey: pendingRepliesKey)
     }
 
     func refresh(forceFull: Bool = false) async {
@@ -962,6 +968,7 @@ final class NotionAgentsStore: ObservableObject {
 }
 
 struct NotionAgentsPanel: View {
+    @ObservedObject private var connection = NotionConnectionStore.shared
     @ObservedObject private var store = NotionAgentsStore.shared
     @ObservedObject private var settings = SettingsStore.shared
     @State private var draft = ""
@@ -976,13 +983,18 @@ struct NotionAgentsPanel: View {
     @State private var showingSettings = false
     var body: some View {
         VStack(spacing: 0) {
-            if showingSettings {
+            NotionConnectionNotice(onOpenSettings: onOpenSettings)
+            if showingSettings && !connection.showsConnectionError {
                 HStack { Button("‹ 戻る") { showingSettings = false }; Spacer() }.padding(12)
-            } else if settings.data.notionSavedAgents.isEmpty {
+            } else if !connection.showsConnectionError && settings.data.notionSavedAgents.isEmpty {
                 HStack { Spacer(); settingsButton }.padding(12)
             }
-            if showingSettings {
+            if connection.showsConnectionError {
+                Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if showingSettings {
                 NotionAgentsSettings(onOpenSettings: onOpenSettings).environmentObject(settings)
+            } else if connection.showsLoading {
+                NotionConnectionLoading().frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 conversation
             }
@@ -996,9 +1008,11 @@ struct NotionAgentsPanel: View {
             #endif
         }
     }
-    private var settingsButton: some View {
-        Button { showingSettings = true } label: { Image(systemName: "gearshape") }
-            .help("エージェント設定").accessibilityLabel("エージェント設定を開く")
+    @ViewBuilder private var settingsButton: some View {
+        if !connection.showsConnectionError {
+            Button { showingSettings = true } label: { Image(systemName: "gearshape") }
+                .help("エージェント設定").accessibilityLabel("エージェント設定を開く")
+        }
     }
     private var conversation: some View {
         VStack(spacing: 0) {
@@ -1013,14 +1027,18 @@ struct NotionAgentsPanel: View {
             if settings.data.notionSavedAgents.isEmpty {
                 VStack(spacing: 12) {
                     Text("エージェントが設定されていません").foregroundStyle(.secondary)
-                    NotionTabEmptySettingsButton { showingSettings = true }
+                    if connection.showsEmptySettingsButton {
+                        NotionTabEmptySettingsButton { showingSettings = true }
+                    }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if !store.hasToken {
                 VStack(alignment: .leading, spacing: 12) {
                     Label("Notionを接続", systemImage: "key").font(.headline)
                     Text("設定の「Notion」でトークンを登録してください。")
                         .font(.caption).foregroundStyle(.secondary)
-                    Button("Notion設定を開く", action: onOpenSettings)
+                    if connection.showsEmptySettingsButton {
+                        Button("Notion設定を開く", action: onOpenSettings)
+                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                 .padding(28)
@@ -1428,6 +1446,14 @@ private struct NotionThinkingView: View {
 
 struct NotionAgentsSettings: View {
     var onOpenSettings: () -> Void = {}
+    @MainActor static func enabledBinding(settings: SettingsStore, connection: NotionConnectionStore) -> Binding<Bool> {
+        Binding(get: { connection.tokenValid && settings.data.notionEnabled },
+                set: { enabled in
+                    guard connection.tokenValid else { return }
+                    settings.data.notionEnabled = enabled
+                })
+    }
+
     @EnvironmentObject var settings: SettingsStore
     @ObservedObject private var agents = NotionAgentsStore.shared
     @ObservedObject private var connection = NotionConnectionStore.shared
@@ -1441,145 +1467,144 @@ struct NotionAgentsSettings: View {
     @State private var baseURLDraft = ""
     @State private var baseURLMessage: String?
 
+    init(onOpenSettings: @escaping () -> Void = {}) { self.onOpenSettings = onOpenSettings }
+
     var body: some View {
         Form {
             NotionTabConnectionSettings(onOpenSettings: onOpenSettings)
-            Section("Notionで開く") {
-                HStack {
-                    Text("ベース URL").fixedSize()
-                    TextField("ベース URL", text: $baseURLDraft,
-                              prompt: Text("https://app.dev.notion.com"))
-                        .labelsHidden()
-                        .accessibilityLabel("ベース URL")
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit(saveBaseURL)
-                }
-                HStack {
-                    Button("適用", action: saveBaseURL)
-                    Button("自動に戻す") {
-                        baseURLDraft = ""
-                        settings.data.notionBaseURL = nil
-                        baseURLMessage = nil
-                    }
-                }
-                Text("空欄の場合は会話URLをそのまま使い、URLがない会話では通常のNotionを開きます。")
-                    .font(.caption).foregroundStyle(.secondary)
-                if let baseURLMessage { Text(baseURLMessage).font(.caption).foregroundStyle(.orange) }
-
-            }
-            Section("登録したエージェント") {
-                Text("NotionのURLまたはエージェントIDを入力します。登録したものだけを監視します。")
-                    .font(.caption).foregroundStyle(.secondary)
-                HStack {
-                    TextField("NotionのエージェントURLまたはID", text: $agentInput)
-                        .textFieldStyle(.roundedBorder).onSubmit(addAgent)
-                    Button("追加", action: addAgent)
-                        .disabled(agentInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-                if let inputMessage { Text(inputMessage).font(.caption).foregroundStyle(.orange) }
-                if settings.data.notionSavedAgents.isEmpty {
-                    Text("まだ登録されていません。URL・IDで追加するか、下の名前検索から選べます。")
-                        .foregroundStyle(.secondary)
-                }
-                ForEach($settings.data.notionSavedAgents) { $agent in
-                    HStack(spacing: 10) {
-                        Text(agent.glyph).frame(width: 22)
-                        VStack(alignment: .leading, spacing: 2) {
-                            TextField("表示名", text: $agent.name).textFieldStyle(.plain)
-                            Text(agent.id).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
-                        }
-                        Spacer()
-                        Button { removeAgent(agent.id) } label: { Image(systemName: "minus.circle") }
-                            .buttonStyle(.plain).help("登録リストから削除")
-                            .accessibilityLabel("\(agent.name)を登録リストから削除")
-                    }
-                }
-                HStack {
-                    Button { Task { @MainActor in await agents.refresh() } } label: {
-                        if agents.isRefreshing { ProgressView().controlSize(.small) }
-                        else { Label("登録済みを確認", systemImage: "arrow.clockwise") }
-                    }.disabled(!connection.tokenValid || agents.isRefreshing || settings.data.notionSavedAgents.isEmpty)
-                    if let activity = agents.activityText { Text(activity).font(.caption).foregroundStyle(.secondary) }
-                }
-
-            }
-            Section("名前で探す") {
-                Text("名前の一部を入力して検索します。結果は50件ずつ読み込みます。")
-                    .font(.caption).foregroundStyle(.secondary)
-                HStack {
-                    TextField("エージェント名の一部", text: $searchName)
-                        .textFieldStyle(.roundedBorder).onSubmit { Task { await search(reset: true) } }
-                    Button { Task { await search(reset: true) } } label: {
-                        if isSearching { ProgressView().controlSize(.small) }
-                        else { Text("検索") }
-                    }.disabled(!connection.tokenValid || isSearching || searchName.trimmingCharacters(in: .whitespacesAndNewlines).count < 2)
-                }
-                if let searchMessage { Text(searchMessage).font(.caption).foregroundStyle(.secondary) }
-                ForEach(searchResults) { result in
+            Group {
+                Section("Notionで開く") {
                     HStack {
-                        Text(result.glyph); Text(result.name)
-                        Spacer()
-                        Button(settings.data.notionSavedAgents.contains(where: { $0.id == result.id }) ? "追加済み" : "追加") {
-                            save(result)
-                        }.disabled(settings.data.notionSavedAgents.contains(where: { $0.id == result.id }))
+                        Text("ベース URL").fixedSize()
+                        TextField("ベース URL", text: $baseURLDraft,
+                                  prompt: Text("https://app.dev.notion.com"))
+                            .labelsHidden()
+                            .accessibilityLabel("ベース URL")
+                            .textFieldStyle(.roundedBorder)
+                            .onSubmit(saveBaseURL)
                     }
-                }
-                if searchCursor != nil {
-                    Button { Task { await search(reset: false) } } label: {
-                        if isSearching { ProgressView().controlSize(.small) }
-                        else { Text("次のページを探す") }
-                    }.disabled(isSearching)
-                }
-
-            }
-            Section("表示") {
-                VStack(alignment: .leading, spacing: 2) {
-                    Toggle("Notionカスタムエージェントを使う", isOn: Binding(
-                        get: { settings.data.notionEnabled },
-                        set: { enabled in
-                            if !enabled || connection.tokenValid { settings.data.notionEnabled = enabled }
-                        }))
-                        .disabled(!connection.tokenValid && !settings.data.notionEnabled)
-                    Text(connection.tokenValid
-                         ? "オフにするとエージェントのタブ・通知・ポーリングを停止します。"
-                         : "有効にするには、通常の設定画面「Notion」でトークンの接続を確認してください。")
+                    HStack {
+                        Button("適用", action: saveBaseURL)
+                        Button("自動に戻す") {
+                            baseURLDraft = ""
+                            settings.data.notionBaseURL = nil
+                            baseURLMessage = nil
+                        }
+                    }
+                    Text("空欄の場合は会話URLをそのまま使い、URLがない会話では通常のNotionを開きます。")
                         .font(.caption).foregroundStyle(.secondary)
-                }
-                Picker("タブの表示", selection: $settings.data.notionTabDisplay) {
-                    ForEach(NotionTabDisplay.allCases) { display in
-                        Text(display.title).tag(display)
-                    }
-                }
-                LabeledContent("アイコン") {
-                    Image(nsImage: NotionTabIcon.image(for: NSAppearance(named: .darkAqua)!, size: 28))
-                }
+                    if let baseURLMessage { Text(baseURLMessage).font(.caption).foregroundStyle(.orange) }
 
-                Picker("チャットの外観", selection: $settings.data.notionAppearance) {
-                    ForEach(NotionAppearance.allCases) { appearance in
-                        Text(appearance.title).tag(appearance)
-                    }
                 }
-
-                Toggle("返信・確認待ちをノッチで通知", isOn: $settings.data.notionNotificationsEnabled)
-                Picker("通知を閉じるまで", selection: $settings.data.notionNotificationDuration) {
-                    ForEach([5, 10, 15, 30, 60], id: \.self) { seconds in
-                        Text("\(seconds)秒").tag(seconds)
+                Section("登録したエージェント") {
+                    Text("NotionのURLまたはエージェントIDを入力します。登録したものだけを監視します。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        Text("エージェントの URL または ID")
+                            .fixedSize(horizontal: true, vertical: false).lineLimit(1)
+                        TextField("エージェントの URL または ID", text: $agentInput, prompt: Text("URL または ID"))
+                            .labelsHidden().accessibilityLabel("エージェントの URL または ID")
+                            .textFieldStyle(.roundedBorder).onSubmit(addAgent)
+                        Button("追加", action: addAgent)
+                            .disabled(agentInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
-                }
-                .disabled(!settings.data.notionNotificationsEnabled)
+                    if let inputMessage { Text(inputMessage).font(.caption).foregroundStyle(.orange) }
+                    if settings.data.notionSavedAgents.isEmpty {
+                        Text("まだ登録されていません。URL・IDで追加するか、下の名前検索から選べます。")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach($settings.data.notionSavedAgents) { $agent in
+                        HStack(spacing: 10) {
+                            Text(agent.glyph).frame(width: 22)
+                            VStack(alignment: .leading, spacing: 2) {
+                                TextField("表示名", text: $agent.name).textFieldStyle(.plain)
+                                Text(agent.id).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
+                            }
+                            Spacer()
+                            Button { removeAgent(agent.id) } label: { Image(systemName: "minus.circle") }
+                                .buttonStyle(.plain).help("登録リストから削除")
+                                .accessibilityLabel("\(agent.name)を登録リストから削除")
+                        }
+                    }
+                    HStack {
+                        Button { Task { @MainActor in await agents.refresh() } } label: {
+                            if agents.isRefreshing { ProgressView().controlSize(.small) }
+                            else { Label("登録済みを確認", systemImage: "arrow.clockwise") }
+                        }.disabled(!connection.tokenValid || agents.isRefreshing || settings.data.notionSavedAgents.isEmpty)
+                        if let activity = agents.activityText { Text(activity).font(.caption).foregroundStyle(.secondary) }
+                    }
 
-            }
-            if let error = agents.error { Text(error).foregroundStyle(.red) }
+                }
+                Section("名前で探す") {
+                    Text("名前の一部を入力して検索します。結果は50件ずつ読み込みます。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        TextField("エージェント名の一部", text: $searchName)
+                            .textFieldStyle(.roundedBorder).onSubmit { Task { await search(reset: true) } }
+                        Button { Task { await search(reset: true) } } label: {
+                            if isSearching { ProgressView().controlSize(.small) }
+                            else { Text("検索") }
+                        }.disabled(!connection.tokenValid || isSearching || searchName.trimmingCharacters(in: .whitespacesAndNewlines).count < 2)
+                    }
+                    if let searchMessage { Text(searchMessage).font(.caption).foregroundStyle(.secondary) }
+                    ForEach(searchResults) { result in
+                        HStack {
+                            Text(result.glyph); Text(result.name)
+                            Spacer()
+                            Button(settings.data.notionSavedAgents.contains(where: { $0.id == result.id }) ? "追加済み" : "追加") {
+                                save(result)
+                            }.disabled(settings.data.notionSavedAgents.contains(where: { $0.id == result.id }))
+                        }
+                    }
+                    if searchCursor != nil {
+                        Button { Task { await search(reset: false) } } label: {
+                            if isSearching { ProgressView().controlSize(.small) }
+                            else { Text("次のページを探す") }
+                        }.disabled(isSearching)
+                    }
+
+                }
+                Section("表示") {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Toggle("Notionカスタムエージェントを使う", isOn: Self.enabledBinding(settings: settings, connection: connection))
+                            .disabled(!connection.tokenValid)
+                    }
+                    Picker("タブの表示", selection: $settings.data.notionTabDisplay) {
+                        ForEach(NotionTabDisplay.allCases) { display in
+                            Text(display.title).tag(display)
+                        }
+                    }
+                    LabeledContent("アイコン") {
+                        Image(nsImage: NotionTabIcon.image(for: NSAppearance(named: .darkAqua)!, size: 28))
+                    }
+
+                    Picker("チャットの外観", selection: $settings.data.notionAppearance) {
+                        ForEach(NotionAppearance.allCases) { appearance in
+                            Text(appearance.title).tag(appearance)
+                        }
+                    }
+
+                    Toggle("返信・確認待ちをノッチで通知", isOn: $settings.data.notionNotificationsEnabled)
+                    Picker("通知を閉じるまで", selection: $settings.data.notionNotificationDuration) {
+                        ForEach([5, 10, 15, 30, 60], id: \.self) { seconds in
+                            Text("\(seconds)秒").tag(seconds)
+                        }
+                    }
+                    .disabled(!settings.data.notionNotificationsEnabled)
+
+                }
+                if let error = agents.error { Text(error).foregroundStyle(.red) }
+            }.disabled(!NotionTaskRules.settingsEnabled(state: connection.state))
         }
         .formStyle(.grouped)
         .onAppear {
             #if DEBUG
-            if !CommandLine.arguments.contains("--agents=settings") { agents.start() }
+            if !connection.isPreview { agents.start() }
             #else
             agents.start()
             #endif
             baseURLDraft = settings.data.notionBaseURL ?? ""
-            if !connection.tokenValid { Task { await connection.verifySaved() } }
+
         }
     }
 

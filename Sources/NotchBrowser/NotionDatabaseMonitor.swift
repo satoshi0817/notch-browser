@@ -198,7 +198,7 @@ final class NotionDatabaseMonitor: ObservableObject {
     private var deliveringNotice = false
 
     private init() {
-        states = UserDefaults.standard.data(forKey: stateKey)
+        states = SettingsDefaults.current.data(forKey: stateKey)
             .flatMap { try? JSONDecoder().decode([String: State].self, from: $0) } ?? [:]
     }
 
@@ -304,6 +304,6 @@ final class NotionDatabaseMonitor: ObservableObject {
     }
 
     private func save() {
-        UserDefaults.standard.set(try? JSONEncoder().encode(states), forKey: stateKey)
+        SettingsDefaults.current.set(try? JSONEncoder().encode(states), forKey: stateKey)
     }
 }

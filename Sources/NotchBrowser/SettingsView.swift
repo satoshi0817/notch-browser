@@ -20,11 +20,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         window.delegate = self
     }
 
-    func present(section: SettingsSection? = nil, selectNotion: Bool = false) {
+    func present(section: SettingsSection? = nil, selectNotion: Bool = false, pinnedSelection: PinnedPageSelection = .none) {
         guard let window else { return }
         if let section {
             window.contentViewController = NSHostingController(rootView: SettingsView(initialSection: section,
-                selectNotion: selectNotion).environmentObject(SettingsStore.shared))
+                selectNotion: selectNotion, pinnedSelection: pinnedSelection).environmentObject(SettingsStore.shared))
         }
         if !window.isVisible { center(on: screenUnderMouse) }
         window.level = Self.frontLevel
@@ -81,11 +81,11 @@ enum SettingsSection: String, CaseIterable, Identifiable {
 struct SettingsView: View {
     @EnvironmentObject var store: SettingsStore
     @State private var section: SettingsSection
-    private let selectNotion: Bool
+    private let pinnedSelection: PinnedPageSelection
 
-    init(initialSection: SettingsSection = .tabs, selectNotion: Bool = false) {
+    init(initialSection: SettingsSection = .tabs, selectNotion: Bool = false, pinnedSelection: PinnedPageSelection = .none) {
         _section = State(initialValue: initialSection)
-        self.selectNotion = selectNotion
+        self.pinnedSelection = selectNotion ? .agents : pinnedSelection
     }
     var body: some View {
         HStack(spacing: 0) {
@@ -122,8 +122,8 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Group {
                     switch section {
-                    case .tabs: PinnedTabsSettings(selectNotion: selectNotion)
-                    case .notion: NotionSettingsView()
+                    case .tabs: PinnedTabsSettings(initialSelection: pinnedSelection, onOpenConnection: { section = .notion })
+                    case .notion: NotionSettingsView(onOpenPinnedPages: { section = NotionSettingsView.pageSettingsDestination })
                     case .profiles: ProfilesSettings()
                     case .displays: DisplaysSettings()
                     case .motion: MotionSettingsView()
@@ -139,27 +139,70 @@ struct SettingsView: View {
 
 // MARK: - Pinned tabs
 
+enum PinnedPageSelection: String, CaseIterable {
+    case none, agents, tasks
+    var id: UUID? {
+        switch self {
+        case .none: nil
+        case .agents: PinnedTabsSettings.notionID
+        case .tasks: PinnedTabsSettings.tasksID
+        }
+    }
+}
+
+#if DEBUG
+struct SettingsPreviewLaunch {
+    let section: SettingsSection
+    let selection: PinnedPageSelection
+    static func parse(arguments: [String]) -> SettingsPreviewLaunch? {
+        guard let pane = arguments.first(where: { $0.hasPrefix("--settings-pane=") }) else { return nil }
+        let section: SettingsSection
+        switch String(pane.dropFirst("--settings-pane=".count)) {
+        case "pinned": section = .tabs
+        case "notion": section = .notion
+        default: return nil
+        }
+        let selection = arguments.first(where: { $0.hasPrefix("--pinned-selection=") })
+            .flatMap { PinnedPageSelection(rawValue: String($0.dropFirst("--pinned-selection=".count))) } ?? .none
+        return SettingsPreviewLaunch(section: section, selection: selection)
+    }
+}
+#endif
+
 struct PinnedTabsSettings: View {
     @EnvironmentObject var store: SettingsStore
+    @ObservedObject private var connection = NotionConnectionStore.shared
     @State private var selection: UUID?
-    private static let notionID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
-    private struct Row: Identifiable {
+    var onOpenConnection: () -> Void
+    static let notionID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+    static let tasksID = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+    static let emptySelectionMessage = "固定ページを選ぶと設定が表示されます"
+    static let connectionRequiredMessage = "先に Notion に接続してください"
+    struct Row: Identifiable {
         let id: UUID
         let tab: PinnedTab?
     }
-
-    init(selectNotion: Bool = false) {
-        _selection = State(initialValue: selectNotion ? Self.notionID : nil)
+    init(selectNotion: Bool = false, initialSelection: PinnedPageSelection = .none,
+         onOpenConnection: @escaping () -> Void = {}) {
+        _selection = State(initialValue: selectNotion ? Self.notionID : initialSelection.id)
+        self.onOpenConnection = onOpenConnection
     }
-    private var rows: [Row] {
-        var result = store.data.pinnedTabs.map { Row(id: $0.id, tab: $0) }
-        result.insert(Row(id: Self.notionID, tab: nil),
-                      at: min(store.data.notionTabPosition, result.count))
+    static func pageRows(pinnedTabs: [PinnedTab], notionPosition: Int) -> [Row] {
+        var result = pinnedTabs.map { Row(id: $0.id, tab: $0) }
+        result.insert(Row(id: notionID, tab: nil), at: max(0, min(notionPosition, result.count)))
+        result.append(Row(id: tasksID, tab: nil))
         return result
     }
-
+    private var rows: [Row] { Self.pageRows(pinnedTabs: store.data.pinnedTabs, notionPosition: store.data.notionTabPosition) }
+    enum EditorKind: Equatable { case pinned, notionAgents, notionTasks, empty }
+    static func editorKind(selection: UUID?, pinnedIDs: [UUID]) -> EditorKind {
+        if let selection, pinnedIDs.contains(selection) { return .pinned }
+        if selection == notionID { return .notionAgents }
+        if selection == tasksID { return .notionTasks }
+        return .empty
+    }
     var body: some View {
-        HSplitView {
+        HStack(spacing: 0) {
             VStack(spacing: 0) {
                 List(selection: $selection) {
                     ForEach(rows) { row in
@@ -168,49 +211,44 @@ struct PinnedTabsSettings: View {
                                 Image(nsImage: TabIconRenderer.image(for: tab.icon, hosts: [tab.host]))
                                 Text(tab.name)
                             } else {
-                                Image(nsImage: NotionTabIcon.image(for: NSAppearance(named: .darkAqua)!))
-                                Text("Notionエージェント")
-                                    .foregroundStyle(store.data.notionEnabled ? .primary : .secondary)
+                                Image(systemName: row.id == Self.tasksID ? "checklist" : "bubble.left.and.bubble.right")
+                                Text(row.id == Self.tasksID ? "タスク" : "エージェント")
                             }
                             Spacer()
-                            if row.tab?.iconOnly == true || (row.tab == nil && store.data.notionTabDisplay == .iconOnly) {
-                                Image(systemName: "eye.slash").foregroundStyle(.secondary).help("アイコンのみ")
-                            }
-                            if row.tab == nil && !store.data.notionEnabled {
-                                Image(systemName: "power").foregroundStyle(.secondary).help("オフ")
-                            }
-                        }
-                        .tag(row.id)
-                    }
-                    .onMove(perform: move)
+                        }.tag(row.id)
+                    }.onMove(perform: move)
                 }
+                .listStyle(.plain)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 Divider()
                 HStack(spacing: 0) {
-                    Button { add() } label: { Image(systemName: "plus").frame(width: 24, height: 20) }.help("固定ページを追加")
+                    Button { add() } label: { Image(systemName: "plus").frame(width: 24, height: 20) }
+                        .help("固定ページを追加")
                     Button { remove() } label: { Image(systemName: "minus").frame(width: 24, height: 20) }
-                        .disabled(selection == nil || selection == Self.notionID)
+                        .disabled(selection == nil || selection == Self.notionID || selection == Self.tasksID)
                         .help("選択した固定ページを削除")
                     Spacer()
-                }
-                .buttonStyle(.borderless)
-                .padding(4)
+                }.buttonStyle(.borderless).padding(4)
             }
-            .frame(minWidth: 180, idealWidth: 200, maxWidth: 260)
+            .frame(width: 200)
+            .frame(maxHeight: .infinity)
+            .overlay(Rectangle().stroke(Color.secondary.opacity(0.3), lineWidth: 1))
+            Divider()
 
             Group {
                 if let id = selection, let binding = binding(for: id) {
                     PinnedTabEditor(tab: binding)
-                } else if selection == Self.notionID {
-                    Text("タブの中で設定できます").foregroundStyle(.secondary)
+                } else if Self.editorKind(selection: selection, pinnedIDs: store.data.pinnedTabs.map(\.id)) == .notionAgents {
+                    NotionAgentsSettings(onOpenSettings: onOpenConnection)
+                } else if selection == Self.tasksID {
+                    NotionTasksSettingsPage(onOpenSettings: onOpenConnection)
                 } else {
-                    Label("タブを選択するか、追加してください", systemImage: "plus.circle")
-                        .foregroundStyle(.secondary)
+                    Text(Self.emptySelectionMessage).foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
-            .frame(minWidth: 360)
-        }
-        .onAppear { selection = selection ?? store.data.pinnedTabs.first?.id }
+            .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }.frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func binding(for id: UUID) -> Binding<PinnedTab>? {
@@ -228,7 +266,7 @@ struct PinnedTabsSettings: View {
     }
 
     private func remove() {
-        guard let id = selection else { return }
+        guard let id = selection, id != Self.notionID, id != Self.tasksID else { return }
         if let index = store.data.pinnedTabs.firstIndex(where: { $0.id == id }),
            index < store.data.notionTabPosition {
             store.data.notionTabPosition -= 1
@@ -241,7 +279,8 @@ struct PinnedTabsSettings: View {
         var reordered = rows
         reordered.move(fromOffsets: fromOffsets, toOffset: toOffset)
         var data = store.data
-        data.notionTabPosition = reordered.firstIndex(where: { $0.id == Self.notionID }) ?? data.pinnedTabs.count
+        let orderedPages = reordered.filter { $0.id != Self.tasksID }
+        data.notionTabPosition = orderedPages.firstIndex(where: { $0.id == Self.notionID }) ?? data.pinnedTabs.count
         data.pinnedTabs = reordered.compactMap(\.tab)
         store.data = data
     }

@@ -45,7 +45,7 @@ enum NotionTaskRules {
     struct Checklist: Equatable {
         let loggedIn: Bool
         let databaseURL: Bool
-        var hint: String { loggedIn && databaseURL ? "ノッチにタスクのタブが表示されています" : "データベースの URL を確認してください" }
+        var hint: String { "2つそろうと、ノッチにタスクのタブが表示されます" }
     }
     static func checklist(tokenValid: Bool, checking: Bool, url: String, confirmedURL: String?) -> Checklist {
         .init(loggedIn: tokenValid && !checking, databaseURL: available(token: true, url: url, confirmedURL: confirmedURL))
@@ -60,7 +60,35 @@ enum NotionTaskRules {
         }
         return nil
     }
-    static func tabVisible(connected: Bool) -> Bool { connected }
+    // Settings are always reachable, but editable only after token verification.
+    static let settingsEntryVisible = true
+    static func settingsEnabled(tokenValid: Bool) -> Bool { tokenValid }
+    // Compatibility for callers that only have a verified connection flag.
+    static func tabVisible(connected: Bool) -> Bool {
+        tabVisible(state: connected ? .connected : .unconnected, hasStoredToken: connected)
+    }
+    static func settingsEnabled(state: NotionConnectionState) -> Bool { state == .connected }
+    // Verification results never hide a saved connection; only removing the token does.
+    static func tabVisible(state: NotionConnectionState, hasStoredToken: Bool) -> Bool {
+        hasStoredToken
+    }
+    static func agentTabVisible(state: NotionConnectionState, hasStoredToken: Bool, enabled: Bool) -> Bool {
+        enabled && tabVisible(state: state, hasStoredToken: hasStoredToken)
+    }
+    static func showsEmptySettingsButton(bannerVisible: Bool) -> Bool { !bannerVisible }
+    static func showsConnectionError(state: NotionConnectionState, hasStoredToken: Bool) -> Bool {
+        hasStoredToken && (state == .invalid || state == .unverified)
+    }
+    static func showsConnectionLoading(state: NotionConnectionState, hasStoredToken: Bool) -> Bool {
+        state == .verifying && hasStoredToken
+    }
+    static func showsReverificationEntry(state: NotionConnectionState, hasStoredToken: Bool) -> Bool {
+        hasStoredToken && [.verifying, .unverified, .invalid].contains(state)
+    }
+    static func connectionState(after error: Error) -> NotionConnectionState {
+        if case NotionAPIError.server(401, _) = error { return .invalid }
+        return .unverified
+    }
     static func shouldAutoSelect(available: Bool, alreadySelected: Bool) -> Bool { available && !alreadySelected }
     static func available(token: Bool, url: String, confirmedURL: String?) -> Bool {
         token && confirmedURL == url && NotionDatabaseInput.id(from: url) != nil
@@ -266,7 +294,7 @@ extension NotionDatabaseAPI {
     var available: Bool { NotionTaskRules.available(token: mock || tokenProvider() != nil, url: configuration.url, confirmedURL: configuration.confirmedURL) }
     var isMock: Bool { mock }
     var mockState: String?
-    init(defaults: UserDefaults = .standard, tokenProvider: @escaping () -> String? = { NotionTokenStore.read() },
+    init(defaults: UserDefaults = SettingsDefaults.current, tokenProvider: @escaping () -> String? = { NotionTokenStore.read() },
          apiFactory: @escaping (String) -> NotionDatabaseAPI = { NotionDatabaseAPI(token: $0) }, previewState: String? = nil) {
         self.defaults = defaults
         self.tokenProvider = tokenProvider
@@ -334,7 +362,7 @@ extension NotionDatabaseAPI {
         guard let id = NotionDatabaseInput.id(from: configuration.url) else {
             message = "URL がデータベースではありません"; verified = false; return
         }
-        guard let token = tokenProvider() else { message = "Notion にログインしてください"; return }
+        guard let token = tokenProvider() else { message = "Notion に接続してください"; return }
         checking = true; verified = false; message = nil
         let input = configuration.url
         defer { checking = false }
@@ -413,3 +441,13 @@ extension NotionDatabaseAPI {
     }
     #endif
 }
+
+#if DEBUG
+enum NotionPreviewTab: String, CaseIterable {
+    case tasks, agents
+    static func parse(arguments: [String]) -> NotionPreviewTab? {
+        arguments.first { $0.hasPrefix("--select-tab=") }
+            .flatMap { NotionPreviewTab(rawValue: String($0.dropFirst("--select-tab=".count))) }
+    }
+}
+#endif

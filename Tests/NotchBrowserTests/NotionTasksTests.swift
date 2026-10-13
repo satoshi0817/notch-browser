@@ -27,7 +27,7 @@ final class NotionTasksTests: XCTestCase {
             XCTAssertFalse(NotionTaskRules.available(token: true, url: url, confirmedURL: confirmed))
             let checklist = NotionTaskRules.checklist(tokenValid: true, checking: false, url: url, confirmedURL: confirmed)
             XCTAssertFalse(checklist.databaseURL)
-            XCTAssertEqual(checklist.hint, "データベースの URL を確認してください")
+            XCTAssertEqual(checklist.hint, "2つそろうと、ノッチにタスクのタブが表示されます")
         }
     }
     @MainActor func testEveryConfirmationFailureRevokesPreviousSuccessAndPersistsIt() async throws {
@@ -52,7 +52,7 @@ final class NotionTasksTests: XCTestCase {
             XCTAssertNotNil(store.message)
             let checklist = NotionTaskRules.checklist(tokenValid: true, checking: false, url: url, confirmedURL: store.configuration.confirmedURL)
             XCTAssertFalse(checklist.databaseURL)
-            XCTAssertEqual(checklist.hint, "データベースの URL を確認してください")
+            XCTAssertEqual(checklist.hint, "2つそろうと、ノッチにタスクのタブが表示されます")
             XCTAssertFalse(NotionTasksStore(defaults: defaults, tokenProvider: { "test" }).available)
         }
     }
@@ -106,7 +106,7 @@ final class NotionTasksTests: XCTestCase {
         XCTAssertFalse(store.verified)
         let checklist = NotionTaskRules.checklist(tokenValid: true, checking: false, url: store.configuration.url, confirmedURL: store.configuration.confirmedURL)
         XCTAssertFalse(checklist.databaseURL)
-        XCTAssertEqual(checklist.hint, "データベースの URL を確認してください")
+        XCTAssertEqual(checklist.hint, "2つそろうと、ノッチにタスクのタブが表示されます")
         XCTAssertNotNil(NotionTaskRules.errorLink(store.message!, url: store.configuration.url))
     }
     #endif
@@ -115,7 +115,7 @@ final class NotionTasksTests: XCTestCase {
         let unverified = NotionTaskRules.checklist(tokenValid: false, checking: false, url: url, confirmedURL: url)
         XCTAssertFalse(unverified.loggedIn, "A saved but unverified token must not show a checkmark")
         XCTAssertTrue(unverified.databaseURL)
-        XCTAssertEqual(unverified.hint, "データベースの URL を確認してください")
+        XCTAssertEqual(unverified.hint, "2つそろうと、ノッチにタスクのタブが表示されます")
         let checking = NotionTaskRules.checklist(tokenValid: true, checking: true, url: url, confirmedURL: url)
         XCTAssertFalse(checking.loggedIn)
         XCTAssertEqual(checking.hint, unverified.hint)
@@ -125,7 +125,7 @@ final class NotionTasksTests: XCTestCase {
         XCTAssertEqual(noURL.hint, unverified.hint)
         let complete = NotionTaskRules.checklist(tokenValid: true, checking: false, url: url, confirmedURL: url)
         XCTAssertTrue(complete.loggedIn && complete.databaseURL)
-        XCTAssertEqual(complete.hint, "ノッチにタスクのタブが表示されています")
+        XCTAssertEqual(complete.hint, "2つそろうと、ノッチにタスクのタブが表示されます")
     }
     func testConfirmButtonRequiresNonemptyInputAndNoActiveCheck() {
         XCTAssertFalse(NotionTaskRules.canConfirm(url: "", checking: false))

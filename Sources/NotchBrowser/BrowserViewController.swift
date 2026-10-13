@@ -461,7 +461,7 @@ final class BrowserViewController: NSViewController {
         NotionTasksStore.shared.$configuration.receive(on: RunLoop.main).sink { [weak self] _ in
             self?.refreshTasksAvailability()
         }.store(in: &tasksSubscriptions)
-        notionConnection.$tokenValid.receive(on: RunLoop.main).sink { [weak self] _ in
+        notionConnection.$state.receive(on: RunLoop.main).sink { [weak self] _ in
             self?.refreshTasksAvailability()
         }.store(in: &tasksSubscriptions)
         updateNotionAppearance()
@@ -1007,7 +1007,7 @@ final class BrowserViewController: NSViewController {
 
     func settingsChanged() {
         guard isViewLoaded else { return }
-        if !store.data.notionEnabled && notionPanel?.isHidden == false {
+        if !notionAgentTabVisible && notionPanel?.isHidden == false {
             notionPanel?.isHidden = true
             NotionAgentsStore.shared.setPanelVisible(false)
             updateNotionTabSelection()
@@ -1336,7 +1336,7 @@ final class BrowserViewController: NSViewController {
     private func reorderPinnedButtons(afterDragging button: TabButton) {
         let dragged = button === notionTabButton ? "notion" : tabs[button.tag].pinnedID!.uuidString
         var order = store.data.pinnedTabs.map { $0.id.uuidString }
-        if store.data.notionEnabled {
+        if notionAgentTabVisible {
             order.insert("notion", at: min(store.data.notionTabPosition, order.count))
         }
         order.removeAll { $0 == dragged }
@@ -1348,7 +1348,7 @@ final class BrowserViewController: NSViewController {
         let destination = otherButtons.filter { $0.frame.midX < button.frame.midX }.count
         order.insert(dragged, at: min(destination, order.count))
         var data = store.data
-        if store.data.notionEnabled {
+        if notionAgentTabVisible {
             data.notionTabPosition = order.firstIndex(of: "notion") ?? data.pinnedTabs.count
         }
         data.pinnedTabs.sort { left, right in
@@ -1512,7 +1512,7 @@ final class BrowserViewController: NSViewController {
             tabStack.addArrangedSubview(notionTabButton)
         }
         for (i, tab) in tabs.enumerated() {
-            if !isSingleTabWindow && store.data.notionEnabled && notionTabsConnected && i == notionPosition { addNotion() }
+            if !isSingleTabWindow && notionAgentTabVisible && i == notionPosition { addNotion() }
             if i == firstUnpinnedIndex {
                 let divider = NSBox()
                 divider.boxType = .separator
@@ -1569,7 +1569,7 @@ final class BrowserViewController: NSViewController {
             tabStack.addArrangedSubview(button)
             tabButtons.append(button)
         }
-        if !isSingleTabWindow && store.data.notionEnabled && notionTabsConnected && notionPosition == tabs.count { addNotion() }
+        if !isSingleTabWindow && notionAgentTabVisible && notionPosition == tabs.count { addNotion() }
         if !isDetached {
             for item in tabStack.arrangedSubviews {
                 // Notion participates in the pinned order; keep the divider at
@@ -2006,7 +2006,7 @@ final class BrowserViewController: NSViewController {
         notes.show(profile: store.profile(selectedTab?.profileID ?? store.data.newTabProfileID))
     }
     @objc func toggleNotion(_ sender: Any?) {
-        guard !isSingleTabWindow, store.data.notionEnabled, notionTabsConnected else { return }
+        guard !isSingleTabWindow, notionAgentTabVisible else { return }
         tasksPanel?.isHidden = true
         addressPopover.close()
         updateNotionAppearance()
@@ -2019,7 +2019,7 @@ final class BrowserViewController: NSViewController {
         if !willShow { focusContent() }
     }
     func showNotion() {
-        guard !isSingleTabWindow, store.data.notionEnabled, notionTabsConnected else { return }
+        guard !isSingleTabWindow, notionAgentTabVisible else { return }
         _ = view
         tasksPanel?.isHidden = true
         updateNotionAppearance()
@@ -2062,8 +2062,13 @@ final class BrowserViewController: NSViewController {
         return false
     }
 
+    private var notionAgentTabVisible: Bool {
+        NotionTaskRules.agentTabVisible(state: notionConnection.state, hasStoredToken: notionConnection.hasStoredToken,
+                                       enabled: store.data.notionEnabled)
+    }
+
     private var notionTabsConnected: Bool {
-        NotionTaskRules.tabVisible(connected: notionConnection.tokenValid)
+        NotionTaskRules.tabVisible(state: notionConnection.state, hasStoredToken: notionConnection.hasStoredToken)
     }
 
     func refreshTasksAvailability() {

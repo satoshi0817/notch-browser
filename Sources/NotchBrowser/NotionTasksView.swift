@@ -7,50 +7,55 @@ enum NotionSettingsFieldLayout {
 }
 
 @MainActor struct NotionTasksSettings: View {
+    var title = "データ"
     @ObservedObject private var store = NotionTasksStore.shared
     @ObservedObject private var connection = NotionConnectionStore.shared
+    init(title: String = "データ") { self.title = title }
     private var checklist: NotionTaskRules.Checklist {
         NotionTaskRules.checklist(tokenValid: connection.tokenValid, checking: connection.isChecking,
                                  url: store.configuration.url, confirmedURL: store.configuration.confirmedURL)
     }
     var body: some View {
-        Section("データ") {
+        Section(title) {
             VStack(alignment: .leading, spacing: 4) {
-                checklistItem("Notion にログイン", complete: checklist.loggedIn)
+                checklistItem("Notion に接続", complete: checklist.loggedIn)
                 checklistItem("データベースの URL", complete: checklist.databaseURL)
                 Text(checklist.hint).font(.caption).foregroundStyle(.secondary)
             }
             HStack(alignment: .firstTextBaseline, spacing: NotionSettingsFieldLayout.spacing) {
-                    Text("データベースの URL")
-                        .frame(width: NotionSettingsFieldLayout.labelWidth, alignment: .leading)
-                VStack(alignment: .leading, spacing: 2) {
+                Text("データベースの URL")
+                    .fixedSize(horizontal: true, vertical: false)
                 TextField("データベースの URL", text: $store.configuration.url,
                           prompt: Text("https://www.notion.so/…").foregroundStyle(.secondary))
                     .textFieldStyle(.roundedBorder)
                     .labelsHidden()
                     .frame(maxWidth: .infinity)
+                    .layoutPriority(1)
                     .accessibilityLabel("データベースの URL")
                     .onChange(of: store.configuration.url) { _, _ in
                         store.verified = false; store.sources = []; store.configuration.source = nil
                         store.configuration.mapping = NotionTaskMapping()
                         store.tasks = []; store.message = nil
                     }
-                if store.verified {
-                    Text("✓ \(store.name)（\(store.tasks.count)件）").font(.caption).foregroundStyle(.green)
-                }
-                if let message = store.message {
-                    Text(message).font(.caption).foregroundStyle(.red)
-                    if let url = NotionTaskRules.errorLink(message, url: store.configuration.url) {
-                        Link("Notion で開く", destination: url).font(.caption)
-                            .fixedSize(horizontal: true, vertical: false)
-                    }
-                }
-                }
-                .frame(maxWidth: .infinity)
                 Button { Task { await store.configure() } } label: {
                     Text("確認").frame(width: NotionSettingsFieldLayout.actionWidth)
                 }.buttonStyle(.bordered).controlSize(.regular)
+                    .fixedSize()
                     .disabled(!NotionTaskRules.canConfirm(url: store.configuration.url, checking: store.checking || store.refreshing))
+            }.frame(minWidth: 0, maxWidth: .infinity)
+            if store.verified || !(store.message ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    if store.verified {
+                        Text("✓ \(store.name)（\(store.tasks.count)件）").font(.caption).foregroundStyle(.green)
+                    }
+                    if let message = store.message, !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text(message).font(.caption).foregroundStyle(.red)
+                        if let url = NotionTaskRules.errorLink(message, url: store.configuration.url) {
+                            Link("Notion で開く", destination: url).font(.caption)
+                                .fixedSize(horizontal: true, vertical: false)
+                        }
+                    }
+                }
             }
             if NotionTaskRules.showsSourcePicker(store.sources) {
                 Picker("データソース", selection: $store.configuration.source) {
@@ -64,8 +69,11 @@ enum NotionSettingsFieldLayout {
                 mappingPicker("期日", type: "date", selection: $store.configuration.mapping.due)
                 Button("適用して更新") { Task { await store.refresh() } }
             }
+            Picker("タスクの既定フィルタ", selection: $store.filter) {
+                ForEach(NotionTaskFilter.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            }
         }
-        .task { if store.available { await store.configure() } }
+        .task { if connection.tokenValid && store.available { await store.configure() } }
     }
     private func checklistItem(_ title: String, complete: Bool) -> some View {
         HStack(spacing: 6) {
@@ -83,6 +91,7 @@ enum NotionSettingsFieldLayout {
 }
 
 @MainActor struct NotionTasksPanel: View {
+    @ObservedObject private var connection = NotionConnectionStore.shared
     var openingID = UUID()
     var onOpenSettings: () -> Void = {}
     @State private var showingSettings = false
@@ -90,26 +99,25 @@ enum NotionSettingsFieldLayout {
     @State private var selected: NotionTask?
     var body: some View {
         VStack(spacing: 0) {
-            if showingSettings {
+            NotionConnectionNotice(onOpenSettings: onOpenSettings)
+            if showingSettings && !connection.showsConnectionError {
                 HStack { Button("‹ 戻る") { showingSettings = false }; Spacer() }.padding(12)
-            } else if store.configuration.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            } else if !connection.showsConnectionError && store.configuration.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 HStack { Spacer(); settingsButton }.padding(12)
             }
-            if showingSettings {
-                Form {
-                    NotionTabConnectionSettings(onOpenSettings: onOpenSettings)
-                    NotionTasksSettings()
-                    Section("表示") {
-                        Picker("タスクの既定フィルタ", selection: $store.filter) {
-                            ForEach(NotionTaskFilter.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                        }
-                    }
-                }.formStyle(.grouped)
+            if connection.showsConnectionError {
+                Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if showingSettings {
+                NotionTasksSettingsPage(onOpenSettings: onOpenSettings)
+            } else if connection.showsLoading {
+                NotionConnectionLoading().frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if store.configuration.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Spacer()
                 VStack(spacing: 12) {
                     Text("データベースの URL が設定されていません").foregroundStyle(.secondary)
-                    NotionTabEmptySettingsButton { showingSettings = true }
+                    if connection.showsEmptySettingsButton {
+                        NotionTabEmptySettingsButton { showingSettings = true }
+                    }
                 }
                 Spacer()
             } else {
@@ -137,7 +145,10 @@ enum NotionSettingsFieldLayout {
             if ["tab-settings", "settings", "sources", "settings-error"].contains(store.mockState ?? "") { showingSettings = true }
             if ["detail", "loading", "no-body"].contains(store.mockState ?? "") { selected = store.tasks.first }
             #endif
-            await store.refresh()
+            if connection.tokenValid { await store.refresh() }
+        }
+        .onChange(of: connection.state) { _, state in
+            if state == .connected { Task { await store.refresh() } }
         }
         .onChange(of: store.configuration.source) { _, _ in selected = nil }
         .onChange(of: store.tasks) { _, tasks in
@@ -148,9 +159,11 @@ enum NotionSettingsFieldLayout {
         NotionTaskDetail(task: task, back: { selected = nil }, narrow: narrow)
             .id("\(task.id)-\(openingID)")
     }
-    private var settingsButton: some View {
-        Button { showingSettings = true } label: { Image(systemName: "gearshape") }
-            .help("タスク設定").accessibilityLabel("タスク設定を開く")
+    @ViewBuilder private var settingsButton: some View {
+        if !connection.showsConnectionError {
+            Button { showingSettings = true } label: { Image(systemName: "gearshape") }
+                .help("タスク設定").accessibilityLabel("タスク設定を開く")
+        }
     }
     private var list: some View {
         VStack(spacing: 0) {
@@ -327,7 +340,7 @@ struct NotionTaskBlockView: View {
     let onOpenSettings: () -> Void
     var body: some View {
         Section("接続") {
-            LabeledContent("接続状態", value: connection.tokenValid ? "接続済み" : "未接続")
+            LabeledContent("接続状態", value: connection.stateLabel)
             Button("「Notion 接続」の設定を開く", action: onOpenSettings)
                 .buttonStyle(.link).foregroundStyle(Color.accentColor)
         }
@@ -340,5 +353,60 @@ struct NotionTabEmptySettingsButton: View {
         Button(action: action) {
             Text("設定を開く").fixedSize(horizontal: true, vertical: false)
         }.buttonStyle(.bordered).controlSize(.regular)
+    }
+}
+
+/// Visible in both tabs, including before their gear is opened.
+struct NotionConnectionNotice: View {
+    @ObservedObject private var connection: NotionConnectionStore
+    let onOpenSettings: () -> Void
+    init(connection: NotionConnectionStore = .shared, onOpenSettings: @escaping () -> Void) {
+        _connection = ObservedObject(wrappedValue: connection)
+        self.onOpenSettings = onOpenSettings
+    }
+    func openSettings() { onOpenSettings() }
+    var body: some View {
+        if connection.canReverify {
+            HStack(alignment: .top, spacing: 10) {
+                if connection.showsConnectionError {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .accessibilityLabel("接続エラー")
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(connection.bannerTitle).foregroundStyle(.primary)
+                    Text(connection.bannerDetail).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("再確認") { Task { await connection.verifySaved() } }
+                    .disabled(connection.isChecking)
+                Button("設定を開く", action: openSettings)
+            }.padding(12)
+        }
+    }
+}
+
+/// The complete task settings page is shared by pinned settings and the tab gear.
+@MainActor struct NotionTasksSettingsPage: View {
+    var onOpenSettings: () -> Void = {}
+    @ObservedObject private var connection = NotionConnectionStore.shared
+    init(onOpenSettings: @escaping () -> Void = {}) {
+        self.onOpenSettings = onOpenSettings
+    }
+    var body: some View {
+        Form {
+            NotionTabConnectionSettings(onOpenSettings: onOpenSettings)
+            NotionTasksSettings(title: "タスク")
+                .disabled(!NotionTaskRules.settingsEnabled(state: connection.state))
+        }.formStyle(.grouped)
+    }
+}
+
+struct NotionConnectionLoading: View {
+    var body: some View {
+        VStack(spacing: 8) {
+            ProgressView()
+            Text("Notion 接続を確認中…").foregroundStyle(.secondary)
+        }.accessibilityLabel("Notion 接続を確認中")
     }
 }

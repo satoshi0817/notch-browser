@@ -17,7 +17,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var updatesStarted = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let firstRun = OnboardingState.shouldPresent()
+        var firstRun = OnboardingState.shouldPresent()
+        #if DEBUG
+        if SettingsPreviewLaunch.parse(arguments: CommandLine.arguments) != nil { firstRun = false }
+        #endif
         if firstRun {
             OnboardingState.begin()
             // Ask for calendar access only after the user opts in during setup.
@@ -53,6 +56,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(self, selector: #selector(onboardingRequested(_:)),
                                                name: .showNotchBrowserOnboarding, object: nil)
         if firstRun { DispatchQueue.main.async { [weak self] in self?.presentOnboarding() } }
+        #if DEBUG
+        if let preview = SettingsPreviewLaunch.parse(arguments: CommandLine.arguments) {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if self.settingsWindow == nil { self.settingsWindow = SettingsWindowController() }
+                self.settingsWindow?.present(section: preview.section, pinnedSelection: preview.selection)
+            }
+        }
+        #endif
     }
 
     private func startUpdatesIfNeeded() {

@@ -81,7 +81,7 @@ final class TabSelectionAppearanceTests: XCTestCase {
     }
 
     @MainActor
-    func testNotionTabDisplayAndFeatureSwitchUpdateThePinnedStrip() throws {
+    func testNotionTabDisplayFeatureSwitchAndTokenRemovalControlVisibility() throws {
         _ = NSApplication.shared
         let settings = SettingsStore.shared
         let saved = settings.data
@@ -112,9 +112,53 @@ final class TabSelectionAppearanceTests: XCTestCase {
         XCTAssertNil(notion.image)
         settings.data.notionEnabled = false
         browser.settingsChanged()
-        XCTAssertNil(notion.superview)
+        XCTAssertFalse(settings.data.notionEnabled)
+        XCTAssertNil(notion.superview, "The explicit feature switch hides the agent tab")
         browser.showNotion()
         XCTAssertEqual(notion.state, .off)
+        settings.data.notionEnabled = true
+        browser.settingsChanged()
+        XCTAssertNotNil(notion.superview)
+        browser.showNotion()
+        XCTAssertEqual(notion.state, .on)
+        browser.notionConnection.disconnect()
+        browser.refreshTasksAvailability()
+        XCTAssertNil(notion.superview, "Removing the token hides the Notion tab")
+        XCTAssertEqual(notion.state, .off)
+    }
+
+    @MainActor
+    func testSavedTokenVerificationFailuresKeepAgentAndTaskTabsWithErrors() async throws {
+        _ = NSApplication.shared
+        let settings = SettingsStore.shared
+        let saved = settings.data
+        defer { settings.data = saved }
+        settings.data.notionEnabled = true
+        let failures: [Error] = [NotionAPIError.server(401, "unauthorized"), URLError(.notConnectedToInternet)]
+        for failure in failures {
+            let connection = NotionConnectionStore.preview(state: .unverified, verification: { throw failure })
+            await connection.verifySaved()
+            XCTAssertEqual(connection.state, NotionTaskRules.connectionState(after: failure))
+            let browser = BrowserViewController()
+            browser.notionConnection = connection
+            _ = browser.view
+            browser.refreshTasksAvailability()
+            let buttons = sequence(first: [browser.view], next: { level in
+                let children = level.flatMap(\.subviews)
+                return children.isEmpty ? nil : children
+            }).flatMap { $0 }.compactMap { $0 as? NSButton }
+            let agents = try XCTUnwrap(buttons.first { $0.accessibilityLabel() == "Notionエージェント" })
+            let tasks = try XCTUnwrap(buttons.first { $0.accessibilityLabel() == "タスク" })
+            XCTAssertNotNil(agents.superview)
+            XCTAssertNotNil(tasks.superview)
+            XCTAssertNotNil(connection.failureMessage)
+            XCTAssertTrue(connection.canReverify)
+            XCTAssertTrue(settings.data.notionEnabled, "Verification failure must not change the user's switch")
+            browser.showNotion()
+            XCTAssertEqual(agents.state, .on)
+            browser.showTasks()
+            XCTAssertEqual(tasks.state, .on)
+        }
     }
 
     @MainActor

@@ -5,6 +5,11 @@ import AppKit
 struct DesignPreview {
     static func main() {
         precondition(Bundle.main.bundleIdentifier == "com.satoshi0817.NotchBrowser.DesignPreview")
+        #if DEBUG
+        let selectedNotionTab = NotionPreviewTab.parse(arguments: CommandLine.arguments)
+        // Read the connection fixture before constructing the browser or any live stores.
+        let connectionPreview = NotionConnectionStore.launchPreviewState
+        #endif
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)
         let quitDelegate = PreviewQuitDelegate()
@@ -28,6 +33,9 @@ struct DesignPreview {
         #if DEBUG
         if CommandLine.arguments.contains(where: { $0.hasPrefix("--agents=") }) { data.notionEnabled = true }
         #endif
+        #if DEBUG
+        if selectedNotionTab != nil || connectionPreview != nil { data.notionEnabled = true }
+        #endif
         SettingsStore.shared.data = data
         let manager = NotchManager(shelfStore: ShelfStore(file: fixture.deletingLastPathComponent().appendingPathComponent("preview-shelf.json")))
         if CommandLine.arguments.contains("--shelf") {
@@ -37,6 +45,19 @@ struct DesignPreview {
             for file in files.dropFirst(2) { _ = manager.shelf.store.add([file]) }
         }
         let settings = SettingsWindowController()
+        var requestedPreviewAction: (() -> Void)? = nil
+        #if DEBUG
+        if let preview = SettingsPreviewLaunch.parse(arguments: CommandLine.arguments) {
+            requestedPreviewAction = { settings.present(section: preview.section, pinnedSelection: preview.selection) }
+        } else if let selectedNotionTab {
+            requestedPreviewAction = {
+                switch selectedNotionTab {
+                case .tasks: manager.browser.showTasks()
+                case .agents: manager.browser.showNotion()
+                }
+            }
+        }
+        #endif
         var onboardingSettings = data
         onboardingSettings.countdownEnabled = false
         onboardingSettings.toolbarActions.removeAll { $0 == .notion }
@@ -69,6 +90,8 @@ struct DesignPreview {
         if CommandLine.arguments.contains("--shelf") { manager.showShelf() }
         if let onboarding {
             DispatchQueue.main.async { onboarding.present() }
+        } else if let requestedPreviewAction {
+            DispatchQueue.main.async(execute: requestedPreviewAction)
         } else if CommandLine.arguments.contains(where: { $0.hasPrefix("--tasks=") }) {
             DispatchQueue.main.async { manager.browser.showTasks() }
         } else if CommandLine.arguments.contains(where: { $0.hasPrefix("--agents=") }) {
