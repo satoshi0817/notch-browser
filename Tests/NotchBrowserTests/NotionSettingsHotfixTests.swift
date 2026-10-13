@@ -214,13 +214,13 @@ final class NotionSettingsHotfixTests: XCTestCase {
         for state in NotionConnectionState.allCases {
             let connection = NotionConnectionStore.preview(state: state)
             let rows = PinnedTabsSettings.pageRows(pinnedTabs: [], notionPosition: 0)
-            XCTAssertEqual(rows.map(\.id), [PinnedTabsSettings.notionID, PinnedTabsSettings.tasksID], "\(state)")
+            XCTAssertEqual(rows.map(\.id), [PinnedTabsSettings.notionID, PinnedTabsSettings.tasksID, PinnedTabsSettings.meetingsID], "\(state)")
             XCTAssertEqual(NotionTaskRules.settingsEnabled(state: connection.state), state == .connected)
             XCTAssertEqual(PinnedTabsSettings.editorKind(selection: PinnedTabsSettings.tasksID, pinnedIDs: []), .notionTasks)
         }
         let page = PinnedTab(name: "Example", url: "https://example.com")
         let rows = PinnedTabsSettings.pageRows(pinnedTabs: [page], notionPosition: 1)
-        XCTAssertEqual(rows.map(\.id), [page.id, PinnedTabsSettings.notionID, PinnedTabsSettings.tasksID])
+        XCTAssertEqual(rows.map(\.id), [page.id, PinnedTabsSettings.notionID, PinnedTabsSettings.tasksID, PinnedTabsSettings.meetingsID])
     }
 
     @MainActor func testUnauthorizedSavedTokenKeepsBothTabsWithErrorAndRecoveryActions() async {
@@ -234,7 +234,7 @@ final class NotionSettingsHotfixTests: XCTestCase {
         XCTAssertFalse(connection.showsLoading)
         XCTAssertTrue(NotionTaskRules.tabVisible(state: connection.state, hasStoredToken: connection.hasStoredToken))
         XCTAssertFalse(NotionTaskRules.settingsEnabled(state: connection.state))
-        XCTAssertEqual(PinnedTabsSettings.pageRows(pinnedTabs: [], notionPosition: 0).count, 2)
+        XCTAssertEqual(PinnedTabsSettings.pageRows(pinnedTabs: [], notionPosition: 0).count, 3)
         XCTAssertTrue(NotionTaskRules.tabVisible(state: connection.state, hasStoredToken: true))
         XCTAssertTrue(connection.failureMessage?.contains("トークンが無効です") == true)
         XCTAssertTrue(connection.canReverify)

@@ -304,7 +304,7 @@ extension NotionDatabaseAPI {
         loadCache()
         #if DEBUG
         let argument = CommandLine.arguments.first { $0.hasPrefix("--tasks=") }.map { String($0.dropFirst("--tasks=".count)) }
-        if let state = previewState ?? ProcessInfo.processInfo.environment["NOTCH_TASKS_MOCK"] ?? argument {
+        if let state = previewState ?? ProcessInfo.processInfo.environment["NOTCH_TASKS_MOCK"] ?? argument ?? (CommandLine.arguments.contains(where: { $0.hasPrefix("--meetings=") }) ? "empty" : nil) {
             mock = true
             mockState = state
             configuration.autoSelected = false
@@ -444,7 +444,7 @@ extension NotionDatabaseAPI {
 
 #if DEBUG
 enum NotionPreviewTab: String, CaseIterable {
-    case tasks, agents
+    case tasks, agents, meetings
     static func parse(arguments: [String]) -> NotionPreviewTab? {
         arguments.first { $0.hasPrefix("--select-tab=") }
             .flatMap { NotionPreviewTab(rawValue: String($0.dropFirst("--select-tab=".count))) }

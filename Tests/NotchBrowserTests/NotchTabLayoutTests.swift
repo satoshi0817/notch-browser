@@ -30,6 +30,15 @@ final class NotchTabLayoutTests: XCTestCase {
             try XCTUnwrap(descendants().compactMap { $0 as? TabButton }.first { $0.accessibilityLabel() == "Notionエージェント" })
         }
         let fixed = try notion()
+        let systemLabels = ["タスク", "Notionエージェント", "議事録"]
+        let systemButtons = descendants().compactMap { $0 as? TabButton }.filter {
+            systemLabels.contains($0.accessibilityLabel() ?? "")
+        }
+        XCTAssertEqual(systemButtons.count, 3)
+        for button in systemButtons {
+            XCTAssertTrue(button.superview === fixed.superview)
+            XCTAssertGreaterThanOrEqual(button.frame.width, 28)
+        }
         XCTAssertFalse(fixed.superview?.superview is NSClipView)
         let pinned = descendants().compactMap { $0 as? TabButton }.filter { $0.accessibilityLabel()?.hasPrefix("Fixed ") == true }
         XCTAssertEqual(pinned.count, 2)
@@ -77,9 +86,20 @@ final class NotchTabLayoutTests: XCTestCase {
         browser.isDetached = true
         browser.updateDetachedMetrics(trafficInset: 80, rowHeight: 28)
         XCTAssertTrue(try notion().superview?.superview is NSClipView)
+        for button in systemButtons {
+            XCTAssertFalse(button.notchFixedWidth?.isActive ?? false,
+                           "Notch widths must not conflict with detached widths")
+            XCTAssertTrue(button.detachedWidthConstraint?.isActive ?? false)
+        }
         browser.isDetached = false
         browser.revealSelectedTabAfterNotchLayout()
         XCTAssertFalse(try notion().superview?.superview is NSClipView)
+        for button in systemButtons {
+            XCTAssertFalse(button.detachedWidthConstraint?.isActive ?? false)
+            XCTAssertTrue(button.notchFixedWidth?.isActive ?? false)
+            XCTAssertGreaterThanOrEqual(button.frame.width, 28)
+            XCTAssertFalse(button.isDetachedLayout)
+        }
         let restoredButtons = descendants().compactMap { $0 as? TabButton }
         let restoredNormal = try XCTUnwrap(restoredButtons.first { $0.state == .on && $0.onClose != nil })
         let restoredNormalY = restoredNormal.convert(restoredNormal.bounds, to: browser.view).midY
@@ -100,6 +120,25 @@ final class NotchTabLayoutTests: XCTestCase {
         XCTAssertEqual(NotchTabLayout.fixedWidths(natural: [28, 150, 100], available: 156), [28, 60, 60])
         XCTAssertEqual(NotchTabLayout.fixedWidths(natural: [28, 60], available: 200), [28, 60])
         XCTAssertEqual(NotchTabLayout.fixedWidths(natural: [], available: 0), [])
+    }
+
+    func testThreeSystemTabsKeepNaturalWidthsBesideShortBrowserTitle() {
+        let natural: [CGFloat] = [64, 88, 64]
+        let total = natural.reduce(0, +) + 8
+        let normal = NotchTabLayout.normalSlotWidth(natural: 72)
+        let fixed = NotchTabLayout.pinnedWidth(natural: total, available: 300, hasNormal: true, normalWidth: normal)
+        XCTAssertEqual(fixed, total)
+        XCTAssertEqual(NotchTabLayout.fixedWidths(natural: natural, available: fixed), natural)
+        XCTAssertGreaterThanOrEqual(300 - fixed, normal)
+    }
+
+    func testNormalSlotIsCappedAndThreeFixedTabsShrinkLongestFirst() {
+        XCTAssertEqual(NotchTabLayout.normalSlotWidth(natural: 300), 150)
+        XCTAssertEqual(NotchTabLayout.normalSlotWidth(natural: 10), 28)
+        let fixed = NotchTabLayout.pinnedWidth(natural: 292, available: 300, hasNormal: true,
+                                             normalWidth: NotchTabLayout.normalSlotWidth(natural: 72))
+        XCTAssertEqual(NotchTabLayout.fixedWidths(natural: [64, 150, 70], available: fixed), [64, 86, 70])
+        XCTAssertEqual(300 - fixed, 72)
     }
 
     func testSelectedNormalTabRevealsBothEdges() {

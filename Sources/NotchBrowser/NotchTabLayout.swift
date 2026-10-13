@@ -1,6 +1,10 @@
 import AppKit
 
 enum NotchTabLayout {
+    /// Reserve the displayed browser title, without wasting 150pt on a short title.
+    static func normalSlotWidth(natural: CGFloat) -> CGFloat {
+        min(150, max(28, natural))
+    }
     static func pinnedWidth(natural: CGFloat, available: CGFloat, hasNormal: Bool, normalWidth: CGFloat = 150) -> CGFloat {
         min(max(0, natural), max(0, available - (hasNormal ? normalWidth : 0)))
     }

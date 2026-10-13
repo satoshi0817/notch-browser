@@ -54,6 +54,7 @@ struct DesignPreview {
                 switch selectedNotionTab {
                 case .tasks: manager.browser.showTasks()
                 case .agents: manager.browser.showNotion()
+                case .meetings: manager.browser.showMeetings()
                 }
             }
         }

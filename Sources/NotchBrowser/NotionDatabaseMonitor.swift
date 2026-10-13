@@ -89,6 +89,14 @@ enum NotionDatabaseValue {
 struct NotionDatabaseAPI {
     let token: String
     var fetch: (URLRequest) async throws -> (Data, URLResponse) = { try await URLSession.shared.data(for: $0) }
+    var version = "2025-09-03"
+    var wait: (Double) async throws -> Void = { try await Task.sleep(for: .seconds($0)) }
+
+    // Keep the existing trailing-closure initializer bound to fetch.
+    init(token: String, fetch: @escaping (URLRequest) async throws -> (Data, URLResponse) = { try await URLSession.shared.data(for: $0) }) {
+        self.token = token
+        self.fetch = fetch
+    }
 
     func request(_ path: String, body: [String: Any]? = nil, query: [URLQueryItem] = []) async throws -> [String: Any] {
         guard !token.isEmpty else { throw NotionAPIError.missingToken }
@@ -97,15 +105,15 @@ struct NotionDatabaseAPI {
         var request = URLRequest(url: components.url!)
         request.httpMethod = body == nil ? "GET" : "POST"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("2025-09-03", forHTTPHeaderField: "Notion-Version")
+        request.setValue(version, forHTTPHeaderField: "Notion-Version")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let body { request.httpBody = try JSONSerialization.data(withJSONObject: body) }
         for attempt in 0..<3 {
             let (data, response) = try await fetch(request)
             guard let response = response as? HTTPURLResponse else { throw NotionAPIError.invalidResponse }
             if (response.statusCode == 429 || response.statusCode == 529) && attempt < 2 {
-                let seconds = max(1, Int(response.value(forHTTPHeaderField: "Retry-After") ?? "") ?? (1 << attempt))
-                try await Task.sleep(for: .seconds(seconds))
+                let seconds = max(0, Double(response.value(forHTTPHeaderField: "Retry-After") ?? "") ?? Double(1 << attempt))
+                try await wait(seconds)
                 continue
             }
             guard (200..<300).contains(response.statusCode) else {

@@ -1,5 +1,30 @@
 import SwiftUI
 
+struct NotionTabListHeader<Leading: View>: View {
+    let refreshing: Bool
+    let onRefresh: () -> Void
+    let onSettings: () -> Void
+    let settingsLabel: String
+    let leading: () -> Leading
+    init(refreshing: Bool, onRefresh: @escaping () -> Void, onSettings: @escaping () -> Void,
+         settingsLabel: String, @ViewBuilder leading: @escaping () -> Leading) {
+        self.refreshing = refreshing
+        self.onRefresh = onRefresh
+        self.onSettings = onSettings
+        self.settingsLabel = settingsLabel
+        self.leading = leading
+    }
+    var body: some View {
+        HStack(spacing: 8) {
+            leading()
+            Button(action: onRefresh) { Image(systemName: "arrow.clockwise") }
+                .disabled(refreshing).help("更新")
+            Button(action: onSettings) { Image(systemName: "gearshape") }
+                .help(settingsLabel).accessibilityLabel("\(settingsLabel)を開く")
+        }.padding()
+    }
+}
+
 enum NotionSettingsFieldLayout {
     static let labelWidth: CGFloat = 200
     static let actionWidth: CGFloat = 56
@@ -167,16 +192,15 @@ enum NotionSettingsFieldLayout {
     }
     private var list: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 8) {
+            NotionTabListHeader(refreshing: store.refreshing,
+                               onRefresh: { Task { await store.refresh() } },
+                               onSettings: { showingSettings = true }, settingsLabel: "タスク設定") {
                 Picker("表示", selection: $store.filter) {
                     ForEach(NotionTaskFilter.allCases, id: \.self) {
                         Text($0.rawValue).tag($0)
                     }
                 }.pickerStyle(.segmented)
-                Button { Task { await store.refresh() } } label: { Image(systemName: "arrow.clockwise") }
-                    .disabled(store.refreshing).help("更新")
-                settingsButton
-            }.padding()
+            }
             if let message = store.message { Text(message).font(.caption).foregroundStyle(.red).padding(.horizontal) }
             let rows = NotionTaskRules.rows(store.tasks, filter: store.filter)
             if rows.isEmpty {

@@ -81,7 +81,9 @@ final class NotionConnectionStore: ObservableObject {
     #if DEBUG
     typealias PreviewState = NotionConnectionState
     static func previewState(arguments: [String]) -> PreviewState? {
-        arguments.first { $0.hasPrefix("--notion-connection=") }
+        if arguments.contains("--meetings=pinned-unconnected") { return .unconnected }
+        if arguments.contains("--meetings=error") { return .unverified }
+        return arguments.first { $0.hasPrefix("--notion-connection=") }
             .flatMap { PreviewState(rawValue: String($0.dropFirst("--notion-connection=".count))) }
     }
     static var launchPreviewState: PreviewState? { previewState(arguments: CommandLine.arguments) }
@@ -102,7 +104,7 @@ final class NotionConnectionStore: ObservableObject {
         #if DEBUG
         let fixture = initialState ?? Self.launchPreviewState
         let legacyFixture = ProcessInfo.processInfo.environment["NOTCH_TASKS_MOCK"] != nil ||
-            CommandLine.arguments.contains { $0.hasPrefix("--tasks=") || $0.hasPrefix("--agents=") }
+            CommandLine.arguments.contains { $0.hasPrefix("--tasks=") || $0.hasPrefix("--agents=") || $0.hasPrefix("--meetings=") }
         let effectiveFixture: NotionConnectionState? = fixture ?? (legacyFixture ? .connected : nil)
         if let fixture = effectiveFixture {
             previewMock = true
@@ -178,6 +180,7 @@ final class NotionConnectionStore: ObservableObject {
             message = "トークンを確認しました"
             NotionAgentsStore.shared.storedTokenChanged()
             await NotionTasksStore.shared.connectionChanged()
+            await NotionMeetingsStore.shared.connectionChanged()
             return true
         } catch {
             // A rejected replacement must not invalidate a previously saved connection.
@@ -198,6 +201,6 @@ final class NotionConnectionStore: ObservableObject {
         message = nil
         SettingsStore.shared.data.notionEnabled = false
         NotionAgentsStore.shared.storedTokenChanged()
-        Task { @MainActor in NotionTasksStore.shared.connectionChanged() }
+        Task { @MainActor in NotionTasksStore.shared.connectionChanged(); NotionMeetingsStore.shared.connectionChanged() }
     }
 }

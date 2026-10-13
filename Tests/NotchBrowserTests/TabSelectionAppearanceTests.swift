@@ -149,8 +149,10 @@ final class TabSelectionAppearanceTests: XCTestCase {
             }).flatMap { $0 }.compactMap { $0 as? NSButton }
             let agents = try XCTUnwrap(buttons.first { $0.accessibilityLabel() == "Notionエージェント" })
             let tasks = try XCTUnwrap(buttons.first { $0.accessibilityLabel() == "タスク" })
+            let meetings = try XCTUnwrap(buttons.first { $0.accessibilityLabel() == "議事録" })
             XCTAssertNotNil(agents.superview)
             XCTAssertNotNil(tasks.superview)
+            XCTAssertNotNil(meetings.superview)
             XCTAssertNotNil(connection.failureMessage)
             XCTAssertTrue(connection.canReverify)
             XCTAssertTrue(settings.data.notionEnabled, "Verification failure must not change the user's switch")
@@ -158,6 +160,12 @@ final class TabSelectionAppearanceTests: XCTestCase {
             XCTAssertEqual(agents.state, .on)
             browser.showTasks()
             XCTAssertEqual(tasks.state, .on)
+            browser.showMeetings()
+            XCTAssertEqual(meetings.state, .on)
+            connection.disconnect()
+            browser.refreshTasksAvailability()
+            XCTAssertNil(meetings.superview)
+            XCTAssertEqual(meetings.state, .off)
         }
     }
 

@@ -163,6 +163,17 @@ final class BrowserViewController: NSViewController {
     private var findGeneration = 0
     private let notes = ScratchpadView()
     private var notionPanel: NSHostingView<NotionAgentsPanel>?
+    private var meetingsPanel: NSHostingView<NotionMeetingsPanel>?
+    private lazy var meetingsTabButton: TabButton = {
+        let button = TabButton(title: "議事録", image: NSImage(systemSymbolName: "person.2", accessibilityDescription: "議事録") ?? NSImage(), target: self, action: #selector(showMeetings))
+        button.bezelStyle = .recessed
+        button.setButtonType(.pushOnPushOff)
+        button.font = .systemFont(ofSize: 12)
+        button.tag = -998
+        button.imagePosition = .imageLeading
+        button.setAccessibilityLabel("議事録")
+        return button
+    }()
     private var tasksPanel: NSHostingView<NotionTasksPanel>?
     var notionConnection = NotionConnectionStore.shared
     private var tasksSubscriptions = Set<AnyCancellable>()
@@ -458,6 +469,17 @@ final class BrowserViewController: NSViewController {
             tasks.bottomAnchor.constraint(equalTo: webContainer.bottomAnchor)
         ])
         tasksPanel = tasks
+        let meetings = NSHostingView(rootView: NotionMeetingsPanel(onOpenSettings: { [weak self] in self?.onOpenNotionSettings?() }))
+        meetings.isHidden = true
+        meetings.translatesAutoresizingMaskIntoConstraints = false
+        chrome.addSubview(meetings)
+        NSLayoutConstraint.activate([
+            meetings.leadingAnchor.constraint(equalTo: webContainer.leadingAnchor),
+            meetings.trailingAnchor.constraint(equalTo: webContainer.trailingAnchor),
+            meetings.topAnchor.constraint(equalTo: webContainer.topAnchor),
+            meetings.bottomAnchor.constraint(equalTo: webContainer.bottomAnchor)
+        ])
+        meetingsPanel = meetings
         NotionTasksStore.shared.$configuration.receive(on: RunLoop.main).sink { [weak self] _ in
             self?.refreshTasksAvailability()
         }.store(in: &tasksSubscriptions)
@@ -867,7 +889,10 @@ final class BrowserViewController: NSViewController {
             }?.constant ?? 28
             let available = max(0, view.bounds.width / 2 + tabTrailingConstraint.constant
                 - addWidth - tabLeadingConstraint.constant - 4)
-            let fixedWidth = NotchTabLayout.pinnedWidth(natural: natural, available: available, hasNormal: firstUnpinnedIndex < tabs.count)
+            let normalButtons = tabButtons.filter { tabs.indices.contains($0.tag) && tabs[$0.tag].pinnedID == nil }
+            let normalButton = normalButtons.first { $0.tag == selectedIndex } ?? normalButtons.first
+            let normalWidth = NotchTabLayout.normalSlotWidth(natural: normalButton?.cell?.cellSize.width ?? 150)
+            let fixedWidth = NotchTabLayout.pinnedWidth(natural: natural, available: available, hasNormal: !normalButtons.isEmpty, normalWidth: normalWidth)
             if pinnedTabWidth.constant != fixedWidth { needsTabReveal = true }
             pinnedTabWidth.constant = fixedWidth
             tabStrip.fixedWidth = fixedWidth
@@ -1296,7 +1321,7 @@ final class BrowserViewController: NSViewController {
         select(sender.tag)
         // NSButton/AXPress can toggle the reused selected button before its action.
         for button in tabButtons {
-            let active = button.tag == selectedIndex && notionPanel?.isHidden != false && tasksPanel?.isHidden != false
+            let active = button.tag == selectedIndex && notionPanel?.isHidden != false && tasksPanel?.isHidden != false && meetingsPanel?.isHidden != false
             button.state = active ? .on : .off
             button.setAccessibilityValue(active ? "選択中" : "")
         }
@@ -1467,7 +1492,7 @@ final class BrowserViewController: NSViewController {
             let encoder = JSONEncoder()
             encoder.outputFormatting = .sortedKeys
             let key = [(try? encoder.encode(store.data))?.base64EncodedString() ?? "",
-                       String(describing: selectedIndex), String(describing: notionPanel?.isHidden), String(describing: tasksPanel?.isHidden), String(notionTabsConnected),
+                       String(describing: selectedIndex), String(describing: notionPanel?.isHidden), String(describing: tasksPanel?.isHidden), String(notionTabsConnected), String(describing: meetingsPanel?.isHidden),
                        String(describing: view.effectiveAppearance.name)]
                 + tabs.map { "\(ObjectIdentifier($0)):\($0.profileID):\($0.displayName):\($0.webView.url?.absoluteString ?? "")" }
             let titlesMatch = tabButtons.count == tabs.count && zip(tabButtons, tabs).allSatisfy { button, tab in
@@ -1490,6 +1515,12 @@ final class BrowserViewController: NSViewController {
             tasksTabButton.notchFixedWidth?.isActive = false
             tasksTabButton.state = tasksPanel?.isHidden == false ? .on : .off
             tabStack.addArrangedSubview(tasksTabButton)
+            meetingsTabButton.isDetachedLayout = false
+            meetingsTabButton.detachedOriginalTitle = nil
+            meetingsTabButton.detachedWidthConstraint?.isActive = false
+            meetingsTabButton.notchFixedWidth?.isActive = false
+            meetingsTabButton.state = meetingsPanel?.isHidden == false ? .on : .off
+            tabStack.addArrangedSubview(meetingsTabButton)
         }
         let notionPosition = min(store.data.notionTabPosition, firstUnpinnedIndex)
         func addNotion() {
@@ -1546,7 +1577,7 @@ final class BrowserViewController: NSViewController {
             }
             button.bezelStyle = .recessed
             button.setButtonType(.pushOnPushOff)
-            let active = i == selectedIndex && notionPanel?.isHidden != false && tasksPanel?.isHidden != false
+            let active = i == selectedIndex && notionPanel?.isHidden != false && tasksPanel?.isHidden != false && meetingsPanel?.isHidden != false
             button.state = active ? .on : .off
             button.showsBorderOnlyWhileMouseInside = !active
             button.imagePosition = iconOnly ? .imageOnly : .imageLeading
@@ -1575,7 +1606,7 @@ final class BrowserViewController: NSViewController {
                 // Notion participates in the pinned order; keep the divider at
                 // the fixed group's trailing edge, outside the scrolling clip.
                 let fixed = (item as? TabButton).map {
-                    $0 === notionTabButton || $0 === tasksTabButton || (tabs.indices.contains($0.tag) && tabs[$0.tag].pinnedID != nil)
+                    $0 === notionTabButton || $0 === tasksTabButton || $0 === meetingsTabButton || (tabs.indices.contains($0.tag) && tabs[$0.tag].pinnedID != nil)
                 } ?? true
                 if fixed { item.removeFromSuperview(); pinnedTabStack.addArrangedSubview(item) }
             }
@@ -2007,6 +2038,7 @@ final class BrowserViewController: NSViewController {
     }
     @objc func toggleNotion(_ sender: Any?) {
         guard !isSingleTabWindow, notionAgentTabVisible else { return }
+        meetingsPanel?.isHidden = true
         tasksPanel?.isHidden = true
         addressPopover.close()
         updateNotionAppearance()
@@ -2021,6 +2053,7 @@ final class BrowserViewController: NSViewController {
     func showNotion() {
         guard !isSingleTabWindow, notionAgentTabVisible else { return }
         _ = view
+        meetingsPanel?.isHidden = true
         tasksPanel?.isHidden = true
         updateNotionAppearance()
         notionPanel?.isHidden = false
@@ -2029,7 +2062,8 @@ final class BrowserViewController: NSViewController {
         NotionAgentsStore.shared.setPanelVisible(true)
     }
     func hideNotion() {
-        let tasksWereVisible = tasksPanel?.isHidden == false
+        let tasksWereVisible = tasksPanel?.isHidden == false || meetingsPanel?.isHidden == false
+        meetingsPanel?.isHidden = true
         tasksPanel?.isHidden = true
         if tasksWereVisible { updateNotionTabSelection() }
         guard notionPanel?.isHidden == false else { return }
@@ -2039,8 +2073,10 @@ final class BrowserViewController: NSViewController {
     }
 
     private func updateNotionTabSelection() {
-        let active = notionPanel?.isHidden == false || tasksPanel?.isHidden == false
+        let active = notionPanel?.isHidden == false || tasksPanel?.isHidden == false || meetingsPanel?.isHidden == false
         glass.opaqueBackdrop = active
+        meetingsTabButton.state = meetingsPanel?.isHidden == false ? .on : .off
+        meetingsTabButton.setAccessibilityValue(meetingsPanel?.isHidden == false ? "選択中" : "")
         notionTabButton.state = notionPanel?.isHidden == false ? .on : .off
         notionTabButton.setAccessibilityValue(notionPanel?.isHidden == false ? "選択中" : "")
         tasksTabButton.state = tasksPanel?.isHidden == false ? .on : .off
@@ -2053,6 +2089,7 @@ final class BrowserViewController: NSViewController {
         }
     }
     func dismissOverlay() -> Bool {
+        if meetingsPanel?.isHidden == false { hideNotion(); updateChrome(); focusContent(); return true }
         if tasksPanel?.isHidden == false { tasksPanel?.isHidden = true; updateNotionTabSelection(); updateChrome(); focusContent(); return true }
         if addressPopover.isShown { addressPopover.close(); focusContent(); return true }
         if notionPanel?.isHidden == false { hideNotion(); focusContent(); return true }
@@ -2073,6 +2110,12 @@ final class BrowserViewController: NSViewController {
 
     func refreshTasksAvailability() {
         guard isViewLoaded, !isSingleTabWindow else { return }
+        #if DEBUG
+        if NotionMeetingsStore.shared.isMock {
+            if notionTabsConnected { showMeetings() } else { hideNotion(); updateChrome(); focusContent() }
+            return
+        }
+        #endif
         let tasks = NotionTasksStore.shared
         if !notionTabsConnected {
             // Panels overlay the last selected browser tab; closing them restores it.
@@ -2095,6 +2138,16 @@ final class BrowserViewController: NSViewController {
         updateNotionTabSelection()
         updateChrome()
         Task { await NotionTasksStore.shared.refresh() }
+    }
+
+    @objc func showMeetings() {
+        guard !isSingleTabWindow, notionTabsConnected else { return }
+        hideNotion()
+        notes.isHidden = true; switcher.isHidden = true
+        meetingsPanel?.rootView = NotionMeetingsPanel(onOpenSettings: { [weak self] in self?.onOpenNotionSettings?() })
+        meetingsPanel?.isHidden = false
+        updateNotionTabSelection()
+        updateChrome()
     }
 
     // MARK: Modals

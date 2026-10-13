@@ -631,6 +631,9 @@ final class NotionAgentsStore: ObservableObject {
     }
 
     func start() {
+        #if DEBUG
+        if CommandLine.arguments.contains(where: { $0.hasPrefix("--meetings=") }) { return }
+        #endif
         hasToken = tokenProvider() != nil
         let ids = Set(visibleAgents.map(\.id))
         let valid = pendingReplies.filter { ids.contains($0.value.agentID) }
