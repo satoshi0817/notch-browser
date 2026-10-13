@@ -79,6 +79,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
 }
 
 struct SettingsView: View {
+    @EnvironmentObject var store: SettingsStore
     @State private var section: SettingsSection
     private let selectNotion: Bool
 
@@ -113,7 +114,10 @@ struct SettingsView: View {
                     }
                 }
                 Spacer()
-                Label("⌃ ⌥ N で開く", systemImage: "keyboard").font(.system(size: 11)).foregroundStyle(.secondary)
+                if let hint = store.data.shortcuts.openHint {
+                    Label(hint, systemImage: "keyboard")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                }
             }.padding(20).frame(width: 210).background(.ultraThinMaterial)
             VStack(alignment: .leading, spacing: 8) {
                 Group {
@@ -358,6 +362,7 @@ struct ProfilesSettings: View {
 // MARK: - General
 
 struct GeneralSettings: View {
+    @StateObject private var shortcutRecorder = ShortcutRecorder()
     @EnvironmentObject var store: SettingsStore
 
     private var browsers: [ExternalBrowser] { ExternalBrowserLauncher.installed() }
@@ -447,13 +452,22 @@ struct GeneralSettings: View {
 
             UpdateSettingsView()
 
-            Section("ショートカット") {
-                LabeledContent("開く / 閉じる", value: "⌃⌥N")
-                LabeledContent("ウインドウで開く / ノッチに戻す", value: "⌃⌥⌘N")
+            Section {
+                ShortcutSettingsView(recorder: shortcutRecorder)
                 LabeledContent("設定", value: "⌘,")
+            } header: {
+                Text("ショートカット")
+            } footer: {
+                HStack {
+                    Spacer()
+                    Button("すべて既定に戻す") { shortcutRecorder.resetAll() }
+                }
+                .padding(.top, -2)
+                .padding(.bottom, 20)
             }
         }
         .formStyle(.grouped)
+        .onDisappear { shortcutRecorder.cancel() }
     }
 }
 

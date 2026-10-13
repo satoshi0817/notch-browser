@@ -183,6 +183,7 @@ private enum OnboardingStep: Int, CaseIterable {
 }
 
 private struct OnboardingView: View {
+    @ObservedObject private var shortcutStore = SettingsStore.shared
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var step = OnboardingStep.welcome
     @State private var choices: OnboardingChoices
@@ -307,7 +308,9 @@ private struct OnboardingView: View {
                 .font(.callout).foregroundStyle(.secondary).lineSpacing(5)
             HStack(alignment: .top, spacing: 10) {
                 instruction("cursorarrow.motionlines", title: "カーソルで開く", detail: "画面上端に乗せ、クリックで入力")
-                instruction("keyboard", title: "⌃⌥N でも開く", detail: "どのアプリからでも呼び出せます")
+                if let hint = shortcutStore.data.shortcuts.openHint {
+                    instruction("keyboard", title: hint, detail: "どのアプリからでも呼び出せます")
+                }
             }
         }
     }
@@ -502,7 +505,7 @@ private struct OnboardingView: View {
             .padding(20).frame(maxWidth: .infinity, alignment: .leading)
             .background(.green.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
             VStack(alignment: .leading, spacing: 12) {
-                summary("ブラウザ", "ノッチにカーソルを乗せるか、⌃⌥Nで開く")
+                summary("ブラウザ", shortcutStore.data.shortcuts.openSummary)
                 summary("固定ページ", "\(choices.pinnedTabs.count)件")
                 summary("サイズ", choices.displayPreset?.title ?? "現在の設定")
                 summary("動き", MotionPreset.allCases.first(where: { $0.settings == choices.motion })?.title ?? "現在の設定")

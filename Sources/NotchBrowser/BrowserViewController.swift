@@ -1495,7 +1495,7 @@ final class BrowserViewController: NSViewController {
         if webView.isLoading { webView.stopLoading() } else { webView.reload() }
     }
 
-    @objc func toggleDetached(_ sender: Any?) { onToggleDetached?() }
+    @objc func toggleDetached(_ sender: Any?) { ShortcutController.shared.cancelPending(); onToggleDetached?() }
 
     @objc private func toggleKeepOpen() { onToggleKeepOpen?() }
 
@@ -1512,7 +1512,7 @@ final class BrowserViewController: NSViewController {
         heading.image = symbol("ellipsis.circle")
         menu.addItem(heading)
         let detach = NSMenuItem(title: isDetached ? "ノッチに戻す" : "ウインドウで開く", action: #selector(toggleDetached), keyEquivalent: "n")
-        detach.keyEquivalentModifierMask = [.control, .option, .command]
+        SettingsStore.shared.data.shortcuts[.detach].apply(to: detach)
         detach.target = self
         detach.image = detachButton.image
         menu.addItem(detach)

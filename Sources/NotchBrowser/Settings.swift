@@ -159,6 +159,7 @@ enum ToolbarAction: String, Codable, CaseIterable, Identifiable {
 }
 
 struct SettingsData: Codable {
+    var shortcuts = ShortcutPreferences()
     var profiles = [Profile(id: Profile.defaultID, name: "デフォルト")]
     var pinnedTabs = [
         PinnedTab(name: "メール", url: "https://mail.google.com/", icon: .symbol("envelope")),
@@ -209,6 +210,7 @@ struct SettingsData: Codable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let fallback = SettingsData()
+        shortcuts = (try? c.decode(ShortcutPreferences.self, forKey: .shortcuts)) ?? fallback.shortcuts
         profiles = try c.decodeIfPresent([Profile].self, forKey: .profiles) ?? fallback.profiles
         pinnedTabs = try c.decodeIfPresent([PinnedTab].self, forKey: .pinnedTabs) ?? fallback.pinnedTabs
         notionTabPosition = min(pinnedTabs.count, max(0,
@@ -263,6 +265,7 @@ struct SettingsData: Codable {
 final class SettingsStore: ObservableObject {
     static let shared = SettingsStore()
     private static let key = "settings.v1"
+    private let defaults: UserDefaults
 
     @Published var data: SettingsData {
         didSet {
@@ -273,25 +276,25 @@ final class SettingsStore: ObservableObject {
         }
     }
 
-    private init() {
-        let defaults = UserDefaults.standard
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
         if let raw = defaults.data(forKey: Self.key), let decoded = try? JSONDecoder().decode(SettingsData.self, from: raw) {
             data = decoded
         } else {
-            data = Self.migrateLegacyApps() ?? SettingsData()
+            data = Self.migrateLegacyApps(defaults: defaults) ?? SettingsData()
         }
     }
 
     private func save() {
         if let raw = try? JSONEncoder().encode(data) {
-            UserDefaults.standard.set(raw, forKey: Self.key)
+            defaults.set(raw, forKey: Self.key)
         }
     }
 
     /// v0.1 stored saved tabs as `savedApps`.
-    private static func migrateLegacyApps() -> SettingsData? {
+    private static func migrateLegacyApps(defaults: UserDefaults) -> SettingsData? {
         struct LegacyApp: Codable { var name: String; var url: String; var symbol: String }
-        guard let raw = UserDefaults.standard.data(forKey: "savedApps"),
+        guard let raw = defaults.data(forKey: "savedApps"),
               let apps = try? JSONDecoder().decode([LegacyApp].self, from: raw) else { return nil }
         var data = SettingsData()
         data.pinnedTabs = apps.map { PinnedTab(name: $0.name, url: $0.url, icon: $0.symbol == "star" ? .favicon : .symbol($0.symbol)) }

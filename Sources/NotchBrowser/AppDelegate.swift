@@ -1,12 +1,14 @@
 import AppKit
 import Carbon
+import Combine
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var notch: NotchManager!
     private var settingsWindow: SettingsWindowController?
     private var statusItem: NSStatusItem!
-    private var detachHotKey: HotKey?
-    private var hotKey: HotKey?
+    private var shortcutMenuSubscription: AnyCancellable?
+    private var toggleMenuItem: NSMenuItem!
+    private var detachMenuItem: NSMenuItem!
     private var keepOpenItem: NSMenuItem!
     private var notionItem: NSMenuItem!
     private var updateWindow: UpdateWindowController?
@@ -43,13 +45,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if !firstRun { startUpdatesIfNeeded() }
 
-        // ⌃⌥N toggles the browser from anywhere.
-        hotKey = HotKey(keyCode: kVK_ANSI_N, modifiers: controlKey | optionKey) { [weak self] in
-            self?.notch.toggle()
+        ShortcutController.shared.onAction = { [weak self] action in
+            if action == .toggle { self?.notch.toggle() } else { self?.notch.toggleDetached() }
         }
-        detachHotKey = HotKey(keyCode: kVK_ANSI_N, modifiers: controlKey | optionKey | cmdKey) { [weak self] in
-            self?.notch.toggleDetached()
-        }
+        ShortcutController.shared.start()
         NotificationCenter.default.addObserver(self, selector: #selector(onboardingRequested(_:)),
                                                name: .showNotchBrowserOnboarding, object: nil)
         if firstRun { DispatchQueue.main.async { [weak self] in self?.presentOnboarding() } }
@@ -62,6 +61,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private var isConfirmingQuit = false
+
+    func applicationWillTerminate(_ notification: Notification) {
+        ShortcutController.shared.shutdown()
+    }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !isConfirmingQuit else { return .terminateCancel }
@@ -96,8 +99,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.image = NSImage(systemSymbolName: "rectangle.topthird.inset.filled", accessibilityDescription: "NotchBrowser")
 
         let menu = NSMenu()
-        menu.addItem(item("開く / 閉じる", #selector(toggleNotch), "n", [.control, .option], target: self))
-        menu.addItem(item("ウインドウで開く / ノッチに戻す", #selector(BrowserViewController.toggleDetached(_:)), "n", [.control, .option, .command], target: notch.browser))
+        toggleMenuItem = item("開く / 閉じる", #selector(toggleNotch), target: self)
+        detachMenuItem = item("ウインドウで開く / ノッチに戻す", #selector(BrowserViewController.toggleDetached(_:)), target: notch.browser)
+        menu.addItem(toggleMenuItem)
+        menu.addItem(detachMenuItem)
         keepOpenItem = item("開いたままにする", #selector(toggleKeepOpen), target: self)
         menu.addItem(keepOpenItem)
         notionItem = item("Notionエージェント", #selector(openNotion), target: self)
@@ -109,6 +114,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(item("NotchBrowser を終了", #selector(NSApplication.terminate(_:)), "q", target: NSApp))
         menu.delegate = self
         statusItem.menu = menu
+        shortcutMenuSubscription = SettingsStore.shared.$data.map(\.shortcuts).removeDuplicates().sink { [weak self] preferences in
+            guard let self else { return }
+            preferences[.toggle].apply(to: self.toggleMenuItem)
+            preferences[.detach].apply(to: self.detachMenuItem)
+        }
     }
 
 
@@ -116,7 +126,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func checkForUpdates() { Task { await UpdateChecker.shared.check() } }
 
-    @objc private func toggleNotch() { notch.toggle() }
+    @objc private func toggleNotch() { ShortcutController.shared.cancelPending(); notch.toggle() }
     @objc private func toggleKeepOpen() { notch.keepOpen.toggle() }
 
     @objc private func openSettings() {
@@ -221,6 +231,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 extension AppDelegate: NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
+        ShortcutController.shared.cancelPending()
+        SettingsStore.shared.data.shortcuts[.toggle].apply(to: toggleMenuItem)
+        SettingsStore.shared.data.shortcuts[.detach].apply(to: detachMenuItem)
         keepOpenItem.state = notch.keepOpen ? .on : .off
         notionItem.isHidden = !SettingsStore.shared.data.notionEnabled
     }
