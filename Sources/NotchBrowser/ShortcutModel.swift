@@ -46,10 +46,19 @@ struct ShortcutStroke: Codable, Hashable {
 }
 
 enum GlobalShortcutAction: String, CaseIterable, Codable, Identifiable {
-    case toggle, detach
+    case toggle, detach, detachTab
     var id: Self { self }
-    var title: String { self == .toggle ? "開く / 閉じる" : "ウインドウで開く / ノッチに戻す" }
-    var defaultBinding: ShortcutBinding { .keys([ShortcutStroke(keyCode: 45, modifiers: self == .toggle ? [.control,.option] : [.control,.option,.command])]) }
+    var title: String {
+        switch self {
+        case .toggle: return "開く / 閉じる"
+        case .detach: return "ブラウザ全体をウインドウにする / ノッチに戻す"
+        case .detachTab: return "このタブを別ウインドウで開く"
+        }
+    }
+    var defaultBinding: ShortcutBinding {
+        if self == .detachTab { return .unassigned }
+        return .keys([ShortcutStroke(keyCode: 45, modifiers: self == .toggle ? [.control,.option] : [.control,.option,.command])])
+    }
 }
 
 enum ShortcutBinding: Codable, Equatable {
@@ -102,9 +111,10 @@ struct ShortcutRowPresentation {
 struct ShortcutPreferences: Codable, Equatable {
     var toggle: ShortcutBinding = GlobalShortcutAction.toggle.defaultBinding
     var detach: ShortcutBinding = GlobalShortcutAction.detach.defaultBinding
+    var detachTab: ShortcutBinding = .unassigned
     subscript(action: GlobalShortcutAction) -> ShortcutBinding {
-        get { action == .toggle ? toggle : detach }
-        set { if action == .toggle { toggle = newValue } else { detach = newValue } }
+        get { action == .toggle ? toggle : action == .detachTab ? detachTab : detach }
+        set { if action == .toggle { toggle = newValue } else if action == .detachTab { detachTab = newValue } else { detach = newValue } }
     }
     init() {}
     /// Shared, observable-view-independent wording; nil hides keyboard guidance when unset.
@@ -118,6 +128,8 @@ struct ShortcutPreferences: Codable, Equatable {
         detach = (try? c.decode(ShortcutBinding.self, forKey: .detach)).flatMap { $0.isValid ? $0 : nil } ?? GlobalShortcutAction.detach.defaultBinding
         if error(for: toggle, action: .toggle) != nil { toggle = GlobalShortcutAction.toggle.defaultBinding }
         if error(for: detach, action: .detach) != nil { detach = GlobalShortcutAction.detach.defaultBinding }
+        detachTab = (try? c.decode(ShortcutBinding.self, forKey: .detachTab)).flatMap { $0.isValid ? $0 : nil } ?? .unassigned
+        if error(for: detachTab, action: .detachTab) != nil { detachTab = .unassigned }
         if toggle.overlaps(detach) { self = Self() }
     }
     func error(for binding: ShortcutBinding, action: GlobalShortcutAction) -> String? {

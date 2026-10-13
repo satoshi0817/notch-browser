@@ -466,6 +466,7 @@ final class NotchController: NSObject, NSWindowDelegate {
     func close() {
         transition.cancel()
         hoverTimer?.invalidate()
+        clearHoverSuppression()
         notificationDismissTimer?.invalidate()
         panel.orderOut(nil)
     }
@@ -534,12 +535,18 @@ final class NotchController: NSObject, NSWindowDelegate {
 
     // MARK: Expand / collapse
 
+    private var hoverSuppressionRegion: NSRect?
+    private var hoverExitTimer: Timer?
+    private var explicitReturnOpen = false
+    var hoverPointerLocation: () -> NSPoint = { NSEvent.mouseLocation }
+
     var deactivateAfterDetaching: () -> Void = { NSApp.deactivate() }
 
     func openFromHotKey(preservingContent: Bool = false, returningFromDetached: Bool = false) {
+        clearHoverSuppression()
         // Release only activation inherited from the detached window. Ordinary
         // hotkey opens must not deactivate our settings or other app windows.
-        if returningFromDetached { deactivateAfterDetaching() }
+        if returningFromDetached { deactivateAfterDetaching(); explicitReturnOpen = true }
         expand(focus: true, preservingContent: preservingContent)
     }
 
@@ -576,6 +583,7 @@ final class NotchController: NSObject, NSWindowDelegate {
 
     func collapse(animated: Bool = true, preservingShelf: Bool = true) {
         hoverTimer?.invalidate()
+        explicitReturnOpen = false
         guard isExpanded else { return }
         if !manager.isDetached { manager.browser.hideNotion() }
         if preservingShelf && shelfVisible && !manager.shelf.store.entries.isEmpty {
@@ -721,9 +729,16 @@ final class NotchController: NSObject, NSWindowDelegate {
     }
 
     /// Leaving closes after the configured delay, even after clicking or typing.
-    /// Only pinning or an active modal temporarily holds the notch open.
+    /// Explicit returns remain open until explicitly closed; ordinary hover keeps its delays.
     private func hoverChanged(_ inside: Bool) {
         pointerInside = inside
+        if hoverSuppressionRegion != nil {
+            // The frozen expanded region does not shrink with the animation.
+            // Tracking-area exit/entry pairs alone cannot rearm hover.
+            rearmHoverAfterPhysicalExit()
+            return
+        }
+        if explicitReturnOpen { return }
         if manager.isDetached {
             hoverTimer?.invalidate()
             if inside { manager.bringDetachedForward() }
@@ -766,6 +781,32 @@ final class NotchController: NSObject, NSWindowDelegate {
         if hoverTimer?.isValid != true { hoverChanged(false) }
     }
 
+    func closeFromHotKey(animated: Bool = true) {
+        explicitReturnOpen = false
+        clearHoverSuppression()
+        hoverSuppressionRegion = panel.frame.union(expandedFrame).union(collapsedFrame)
+        // After collapse the pointer can leave the old expanded region without
+        // crossing a live tracking area. Poll only while hover is suppressed.
+        let timer = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            self.rearmHoverAfterPhysicalExit()
+        }
+        hoverExitTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+        collapse(animated: animated, preservingShelf: false)
+    }
+
+    private func rearmHoverAfterPhysicalExit() {
+        guard let region = hoverSuppressionRegion, !region.contains(hoverPointerLocation()) else { return }
+        clearHoverSuppression()
+    }
+
+    private func clearHoverSuppression() {
+        hoverSuppressionRegion = nil
+        hoverExitTimer?.invalidate()
+        hoverExitTimer = nil
+    }
+
     func resumeHoverCloseIfNeeded() {
         if isExpanded, !pointerInside { hoverChanged(false) }
     }
@@ -773,6 +814,8 @@ final class NotchController: NSObject, NSWindowDelegate {
 
 /// Owns the browser and one notch per enabled display.
 final class NotchManager: NSObject, NSWindowDelegate {
+    private var tabTransfers: Set<ObjectIdentifier> = []
+    private(set) var detachedTabs: [DetachedTabWindowController] = []
     private var detachedWindow: NSWindow?
     private var normalFrameState: DetachedNormalFrameState?
     private var contentTransferInProgress = false
@@ -817,6 +860,7 @@ final class NotchManager: NSObject, NSWindowDelegate {
     init(shelfStore: ShelfStore = .shared) {
         shelf = ShelfViewController(store: shelfStore)
         super.init()
+        browser.onDetachTab = { [weak self] tab, point in self?.detachTab(tab, at: point) }
         browser.onToggleDetached = { [weak self] in self?.toggleDetached() }
         browser.onOpenShelf = { [weak self] in self?.showShelf() }
         browser.onExternalTabOpened = { [weak self] in
@@ -901,6 +945,10 @@ final class NotchManager: NSObject, NSWindowDelegate {
         applyWindowSettings()
         shelf.settingsChanged()
         browser.settingsChanged()
+        for controller in detachedTabs {
+            controller.browser.settingsChanged()
+            controller.window?.sharingType = SettingsStore.shared.data.hideFromScreenCapture ? .none : .readOnly
+        }
         controllers.values.forEach { $0.refreshNotionAvailability() }
     }
 
@@ -918,7 +966,7 @@ final class NotchManager: NSObject, NSWindowDelegate {
     }
 
     /// Syncs notch windows with connected displays and their settings.
-    private func rebuild() {
+    func rebuild() {
         let store = SettingsStore.shared
         let enabled = NSScreen.screens.filter { store.displaySettings(for: $0).enabled }
         let ids = Set(enabled.map(\.displayUUID))
@@ -1033,6 +1081,7 @@ final class NotchManager: NSObject, NSWindowDelegate {
     }
 
     func toggleDetached() {
+        guard tabTransfers.isEmpty else { return }
         guard !contentTransferInProgress else { return }
         if let window = detachedWindow {
             guard !returningFromFullScreen else { return }
@@ -1048,6 +1097,85 @@ final class NotchManager: NSObject, NSWindowDelegate {
         }, completion: { [weak self] in
             self?.contentTransferInProgress = false
         })
+    }
+
+    func detachTab(_ tab: Tab, at point: NSPoint? = nil) {
+        guard tab.pinnedID == nil, !contentTransferInProgress else { return }
+        transferTab(tab) { [weak self] in
+            guard let self, let moved = self.browser.takeTab(tab) else { return false }
+            if point != nil {
+                // A normal-level tab window would otherwise sit behind the
+                // pop-up-level notch throughout the drag. Collapse immediately
+                // and hold hover off before displaying the final tab window.
+                for controller in self.controllers.values where controller.isExpanded {
+                    controller.closeFromHotKey(animated: false)
+                }
+            }
+            self.openTabWindow(moved, at: point)
+            return true
+        }
+    }
+
+    /// Capture scroll/selection before reparenting; timeouts keep a busy page from blocking UI.
+    private func transferTab(_ tab: Tab, move: @escaping () -> Bool) {
+        let id = ObjectIdentifier(tab)
+        guard tabTransfers.insert(id).inserted else { return }
+        let web = tab.webView
+        let nativeFocus = WebTransferResponderState(webView: web, sourceWindow: web.window, fallbackToContent: true)
+        let gate = WebTransferCompletionGate()
+        let proceed = { [weak self] in
+            gate.run {
+                guard let self else { return }
+                guard tab.webView === web, move() else { self.tabTransfers.remove(id); return }
+                web.window?.contentView?.layoutSubtreeIfNeeded()
+                let restoreFocus = nativeFocus.restore(to: web.window, contentVisible: !web.isHidden)
+                guard web.url != nil else { self.tabTransfers.remove(id); return }
+                let finished = WebTransferCompletionGate()
+                let finish = { [weak self] in finished.run { self?.tabTransfers.remove(id) } }
+                web.callAsyncJavaScript(WebViewTransferState.restore, arguments: ["restoreFocus": restoreFocus],
+                                       in: nil, in: .defaultClient) { _ in finish() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: finish)
+            }
+        }
+        guard web.url != nil else { proceed(); return }
+        web.evaluateJavaScript(WebViewTransferState.capture, in: nil, in: .defaultClient) { _ in proceed() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: proceed)
+    }
+
+    private func openTabWindow(_ moved: Tab, at point: NSPoint? = nil) {
+        let controller = DetachedTabWindowController(tab: moved)
+        detachedTabs.append(controller)
+        controller.browser.onCreateTabWindow = { [weak self] tab in self?.openTabWindow(tab) }
+        controller.browser.onNewTabInNotch = { [weak self] in
+            guard let self else { return }
+            self.browser.newTab(nil)
+            if self.isDetached { self.toggleDetached() }
+            else {
+                let target = self.orderedControllers.first { $0.screen.frame.contains(NSEvent.mouseLocation) } ?? self.orderedControllers.first
+                target?.openFromHotKey(preservingContent: true, returningFromDetached: true)
+            }
+        }
+        controller.browser.onOpenSettings = browser.onOpenSettings
+        controller.browser.onModalChange = browser.onModalChange
+        controller.onReturn = { [weak self, weak controller] in
+            guard let self, let controller, let tab = controller.browser.currentTab,
+                  !self.contentTransferInProgress else { return }
+            self.transferTab(tab) { [weak self, weak controller] in
+                guard let self, let controller, let moved = controller.browser.takeTab(tab) else { return false }
+                self.browser.receiveTab(moved)
+                controller.window?.close()
+                if self.isDetached { self.bringDetachedForward() }
+                else {
+                    let target = self.orderedControllers.first { $0.screen.frame.contains(NSEvent.mouseLocation) } ?? self.orderedControllers.first
+                    target?.openFromHotKey(preservingContent: true, returningFromDetached: true)
+                }
+                return true
+            }
+        }
+        controller.onClosed = { [weak self, weak controller] in
+            self?.detachedTabs.removeAll { $0 === controller }
+        }
+        controller.present(at: point)
     }
 
     private func detachBrowser() {
@@ -1194,8 +1322,8 @@ final class NotchManager: NSObject, NSWindowDelegate {
     /// Hotkey: collapse if focused, otherwise open on the display under the pointer.
     func toggle() {
         if isDetached { bringDetachedForward(); return }
-        if let open = controllers.values.first(where: \.isExpanded), open.panel.isKeyWindow {
-            open.collapse()
+        if let open = controllers.values.first(where: \.isExpanded) {
+            open.closeFromHotKey()
             return
         }
         let mouse = NSEvent.mouseLocation

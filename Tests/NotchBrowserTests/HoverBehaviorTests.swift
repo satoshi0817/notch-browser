@@ -4,6 +4,99 @@ import XCTest
 
 final class HoverBehaviorTests: XCTestCase {
     @MainActor
+    func testAnimatedHotkeyCloseWaitsForExitFromOriginalExpandedRegion() throws {
+        _ = NSApplication.shared
+        let screen = try XCTUnwrap(NSScreen.screens.first)
+        let store = SettingsStore.shared
+        let original = store.data
+        defer { store.data = original }
+        var settings = SettingsData()
+        settings.pinnedTabs = []
+        settings.notionEnabled = false
+        settings.motion.style = .none
+        settings.motion.openDelay = 0
+        settings.motion.closeDuration = 0.28
+        store.data = settings
+        let manager = NotchManager(shelfStore: ShelfStore(file: FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString).appendingPathComponent("items.json")))
+        let controller = NotchController(screen: screen, manager: manager)
+        defer { controller.close() }
+        controller.show()
+        controller.expand(focus: true)
+        let expanded = controller.panel.frame
+        // This point is inside the expanded panel but below the collapsed notch.
+        var pointer = NSPoint(x: expanded.midX, y: expanded.midY)
+        controller.hoverPointerLocation = { pointer }
+        controller.root.onHoverChange?(true)
+        store.data.motion.style = .linear
+        controller.closeFromHotKey()
+        // Shrinking/replacing tracking areas reports exit/entry without mouse motion.
+        // Exercise both the 0.28s closing animation and events after it finishes.
+        for _ in 0..<10 {
+            controller.root.onHoverChange?(false)
+            controller.root.onHoverChange?(true)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            XCTAssertFalse(controller.isExpanded, "A stationary pointer in the old panel must not rearm hover")
+        }
+        XCTAssertLessThan(controller.panel.frame.width, expanded.width)
+        let collapsed = controller.panel.frame
+        // Even movement into the collapsed notch is still inside the original region.
+        pointer = NSPoint(x: collapsed.midX, y: collapsed.midY)
+        controller.root.onHoverChange?(false)
+        controller.root.onHoverChange?(true)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        XCTAssertFalse(controller.isExpanded)
+        XCTAssertEqual(controller.panel.frame.width, collapsed.width, accuracy: 0.5)
+        // Leaving the old panel may produce no tracking event after collapse.
+        pointer = NSPoint(x: expanded.minX - 100, y: expanded.minY - 100)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        XCTAssertFalse(controller.isExpanded)
+        pointer = NSPoint(x: collapsed.midX, y: collapsed.midY)
+        controller.root.onHoverChange?(true)
+        XCTAssertTrue(controller.isExpanded, "Physical exit followed by a fresh entry must restore hover opening")
+    }
+
+    @MainActor
+    func testExplicitCloseSuppressesHoverAndReturnIgnoresPointerTransitions() throws {
+        _ = NSApplication.shared
+        let screen = try XCTUnwrap(NSScreen.screens.first)
+        let store = SettingsStore.shared
+        let original = store.data
+        defer { store.data = original }
+        var settings = SettingsData()
+        settings.pinnedTabs = []
+        settings.notionEnabled = false
+        settings.motion.style = .none
+        settings.motion.openDelay = 0
+        settings.motion.closeDelay = 0
+        store.data = settings
+        let manager = NotchManager(shelfStore: ShelfStore(file: FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString).appendingPathComponent("items.json")))
+        let controller = NotchController(screen: screen, manager: manager)
+        defer { controller.close() }
+        controller.hoverPointerLocation = { NSPoint(x: screen.frame.midX, y: screen.frame.maxY - 1) }
+        controller.root.onHoverChange?(true)
+        XCTAssertTrue(controller.isExpanded)
+        controller.closeFromHotKey()
+        controller.root.onHoverChange?(true)
+        XCTAssertFalse(controller.isExpanded, "A pointer still inside must not reopen an explicit close")
+        controller.root.onHoverChange?(false)
+        controller.root.onHoverChange?(true)
+        XCTAssertFalse(controller.isExpanded, "Tracking-area replacement must not rearm hover under a stationary pointer")
+        controller.hoverPointerLocation = { NSPoint(x: screen.frame.minX - 100, y: screen.frame.minY - 100) }
+        controller.root.onHoverChange?(false)
+        controller.root.onHoverChange?(true)
+        XCTAssertTrue(controller.isExpanded, "A fresh entry restores ordinary hover behavior")
+        controller.collapse(animated: false)
+        controller.deactivateAfterDetaching = {}
+        controller.openFromHotKey(preservingContent: true, returningFromDetached: true)
+        for inside in [false, true, false, true] { controller.root.onHoverChange?(inside) }
+        XCTAssertTrue(controller.isExpanded, "Returning a tab explicitly holds the notch open")
+        controller.closeFromHotKey()
+        XCTAssertFalse(controller.isExpanded)
+    }
+
+    @MainActor
     func testHotkeyOpenAndReturnShareNonactivatingFocusAndPreserveContent() throws {
         _ = NSApplication.shared
         let screen = try XCTUnwrap(NSScreen.screens.first)

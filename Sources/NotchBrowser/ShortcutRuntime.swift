@@ -279,8 +279,10 @@ final class ShortcutController: ObservableObject {
         let candidate = ShortcutPreferences()
         var probes: [Int] = []
         for action in GlobalShortcutAction.allCases {
-            guard let first = candidate[action].strokes.first,
-                  let token = registrar.register(first, action: {}) else {
+            // Unassigned defaults have no Carbon key to probe. They still reset
+            // synchronously with the assigned bindings after all probes succeed.
+            guard let first = candidate[action].strokes.first else { continue }
+            guard let token = registrar.register(first, action: {}) else {
                 probes.forEach(registrar.unregister); rebuild()
                 errors[action] = "このキーは登録できませんでした"; return
             }

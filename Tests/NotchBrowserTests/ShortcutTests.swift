@@ -84,6 +84,49 @@ final class ShortcutTests: XCTestCase {
     }
 
     @MainActor
+    func testResetAllClearsAssignedTabShortcutAndSkipsItsUnassignedDefault() {
+        let store = SettingsStore(defaults: MemoryShortcutDefaults())
+        let registrar = FakeShortcutRegistrar()
+        var permissionChecks = 0
+        let controller = ShortcutController(registrar: registrar, store: store,
+            permissionAvailable: { permissionChecks += 1; return false })
+        defer { controller.shutdown() }
+        XCTAssertNil(controller.set(.doubleModifier(.command), for: .toggle))
+        XCTAssertNil(controller.set(.keys([prefix, second]), for: .detachTab))
+        var published: [ShortcutPreferences] = []
+        let subscription = store.$data.dropFirst().sink { published.append($0.shortcuts) }
+        controller.resetAll()
+        XCTAssertEqual(published, [ShortcutPreferences()])
+        XCTAssertEqual(store.data.shortcuts.toggle, GlobalShortcutAction.toggle.defaultBinding)
+        XCTAssertEqual(store.data.shortcuts.detach, GlobalShortcutAction.detach.defaultBinding)
+        XCTAssertEqual(store.data.shortcuts.detachTab, .unassigned)
+        XCTAssertTrue(controller.errors.isEmpty)
+        XCTAssertTrue(registrar.live.isEmpty, "Temporary reset probes must all be unregistered")
+        XCTAssertEqual(permissionChecks, 0, "Reset must publish without synchronous permission IPC")
+        withExtendedLifetime(subscription) {}
+    }
+
+    @MainActor
+    func testResetAllRegistrationFailurePreservesPreferencesAndCleansEarlierProbes() {
+        let store = SettingsStore(defaults: MemoryShortcutDefaults())
+        let registrar = FakeShortcutRegistrar()
+        let controller = ShortcutController(registrar: registrar, store: store, permissionAvailable: { false })
+        defer { controller.shutdown() }
+        XCTAssertNil(controller.set(.keys([prefix]), for: .toggle))
+        XCTAssertNil(controller.set(.keys([second]), for: .detachTab))
+        let saved = store.data.shortcuts
+        registrar.failStroke = GlobalShortcutAction.detach.defaultBinding.strokes.first
+        var publications = 0
+        let subscription = store.$data.dropFirst().sink { _ in publications += 1 }
+        controller.resetAll()
+        XCTAssertEqual(store.data.shortcuts, saved)
+        XCTAssertEqual(publications, 0)
+        XCTAssertNotNil(controller.errors[.detach])
+        XCTAssertTrue(registrar.live.isEmpty)
+        withExtendedLifetime(subscription) {}
+    }
+
+    @MainActor
     func testRecorderSuccessAndResetClearAttemptedAndErrorsSynchronously() {
         let store = SettingsStore(defaults: MemoryShortcutDefaults())
         let controller = ShortcutController(registrar: FakeShortcutRegistrar(), store: store,
@@ -314,7 +357,7 @@ final class ShortcutTests: XCTestCase {
         XCTAssertFalse(ShortcutBinding.unassigned.overlaps(.unassigned))
         var settings = ShortcutPreferences()
         settings.detach = sequence
-        XCTAssertEqual(settings.error(for:single, action:.toggle), "『ウインドウで開く / ノッチに戻す』と同じキーです")
+        XCTAssertEqual(settings.error(for:single, action:.toggle), "『ブラウザ全体をウインドウにする / ノッチに戻す』と同じキーです")
     }
 
     func testDoubleModifierConflict() {

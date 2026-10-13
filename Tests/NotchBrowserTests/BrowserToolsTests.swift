@@ -674,7 +674,7 @@ final class BrowserToolsTests: XCTestCase {
             for frame in frames { XCTAssertGreaterThanOrEqual(frame.minX, width / 2 + 112 - 1); XCTAssertLessThanOrEqual(frame.maxX, width - 11) }
             for pair in zip(frames, frames.dropFirst()) { XCTAssertLessThanOrEqual(pair.0.maxX + 3, pair.1.minX) }
             let detach = try XCTUnwrap(descendants(browser.view).compactMap { $0 as? NSButton }
-                .first { $0.accessibilityLabel() == "ウインドウで開く" })
+                .first { $0.accessibilityLabel() == "ブラウザ全体をウインドウにする" })
             XCTAssertFalse(detach.isHidden)
             let detachFrame = detach.convert(detach.bounds, to: browser.view)
             XCTAssertGreaterThanOrEqual(detachFrame.minX, width / 2 + 112 - 1)

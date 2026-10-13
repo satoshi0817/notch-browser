@@ -6,7 +6,7 @@ private final class LinkMenuMessageHandler: NSObject, WKScriptMessageHandler {
     weak var owner: BrowserViewController?
     init(owner: BrowserViewController) { self.owner = owner }
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        owner?.showLinkMenu(for: message)
+        (message.webView?.uiDelegate as? BrowserViewController ?? owner)?.showLinkMenu(for: message)
     }
 }
 
@@ -53,10 +53,56 @@ final class Tab {
 
 final class BrowserViewController: NSViewController {
     var onToggleDetached: (() -> Void)?
+    var onDetachTab: ((Tab, NSPoint?) -> Void)?
+    var onCreateTabWindow: ((Tab) -> Void)?
+    var onNewTabInNotch: (() -> Void)?
+    var onReturnTab: (() -> Void)?
+    var onPageTitleChanged: ((String) -> Void)?
+    var onSingleTabClosed: (() -> Void)?
+    var isSingleTabWindow = false
+    var tabCount: Int { tabs.count }
+    var currentTab: Tab? { selectedTab }
+
+    func takeTab(_ tab: Tab) -> Tab? {
+        guard tab.pinnedID == nil, let index = tabs.firstIndex(where: { $0 === tab }) else { return nil }
+        let selected = selectedTab
+        tabs.remove(at: index)
+        tab.observations.removeAll()
+        tab.webView.removeFromSuperview()
+        select(selected === tab ? (tabs.isEmpty ? nil : min(index, tabs.count - 1)) : selected.flatMap { old in tabs.firstIndex { $0 === old } })
+        return tab
+    }
+
+    func receiveTab(_ tab: Tab) {
+        _ = view
+        precondition(!isSingleTabWindow || tabs.isEmpty)
+        tabs.append(tab)
+        let controller = tab.webView.configuration.userContentController
+        controller.removeScriptMessageHandler(forName: "notchBrowserLinkMenu")
+        controller.add(LinkMenuMessageHandler(owner: self), name: "notchBrowserLinkMenu")
+        linkMenuControllers.add(controller)
+        tab.webView.navigationDelegate = self
+        tab.webView.uiDelegate = self
+        install(tab)
+        select(tab)
+    }
+
+    @objc func detachCurrentTab(_ sender: Any?) {
+        guard let tab = selectedTab, tab.pinnedID == nil, !isSingleTabWindow else { return }
+        onDetachTab?(tab, nil)
+    }
+
+    @objc private func detachTabFromMenu(_ sender: NSMenuItem) {
+        guard tabs.indices.contains(sender.tag), tabs[sender.tag].pinnedID == nil else { return }
+        onDetachTab?(tabs[sender.tag], nil)
+    }
+
+    @objc private func returnSingleTab(_ sender: Any?) { onReturnTab?() }
+
     var isDetached = false { didSet {
         guard isViewLoaded else { return }
         detachButton.image = symbol(isDetached ? "arrow.down.backward" : "arrow.up.forward.app")
-        detachButton.toolTip = isDetached ? "ノッチに戻す" : "ウインドウで開く"
+        detachButton.toolTip = isDetached ? "ノッチに戻す" : "ブラウザ全体をウインドウにする"
         detachButton.setAccessibilityLabel(detachButton.toolTip!)
         updateCompactControls()
         rebuildToolsMenu()
@@ -82,7 +128,7 @@ final class BrowserViewController: NSViewController {
     private var tabButtons: [TabButton] = []
     private var isDraggingTab = false
     private var selectedIndex: Int?
-    private var selectedTab: Tab? { selectedIndex.map { tabs[$0] } }
+    private var selectedTab: Tab? { selectedIndex.flatMap { tabs.indices.contains($0) ? tabs[$0] : nil } }
     private var downloadDestinations: [ObjectIdentifier: URL] = [:]
     private let linkMenuControllers = NSHashTable<WKUserContentController>.weakObjects()
     private var store: SettingsStore { .shared }
@@ -144,7 +190,7 @@ final class BrowserViewController: NSViewController {
     private lazy var backButton = iconButton("chevron.left", "戻る", #selector(goBack))
     private lazy var forwardButton = iconButton("chevron.right", "進む", #selector(goForward))
     private lazy var reloadButton = iconButton("arrow.clockwise", "再読み込み", #selector(reloadOrStop))
-    private lazy var detachButton = iconButton("arrow.up.forward.app", "ウインドウで開く", #selector(toggleDetached))
+    private lazy var detachButton = iconButton("arrow.up.forward.app", "ブラウザ全体をウインドウにする", #selector(toggleDetached))
     private lazy var keepOpenButton = iconButton("pin", "開いたままにする", #selector(toggleKeepOpen))
 
     private lazy var toolbarButtons: [ToolbarAction: NSButton] = {
@@ -210,6 +256,8 @@ final class BrowserViewController: NSViewController {
         ])
         let chrome = glass.content
         tabStack.orientation = .horizontal
+        pinnedTabStack.alignment = .centerY
+        tabStack.alignment = .centerY
         pinnedTabStack.orientation = .horizontal
         pinnedTabStack.spacing = 4
         pinnedTabStack.translatesAutoresizingMaskIntoConstraints = false
@@ -256,6 +304,7 @@ final class BrowserViewController: NSViewController {
         }
         controlStack.addArrangedSubview(defaultToolbarSpacer)
         controlStack.addArrangedSubview(toolsButton)
+        tabScroll.automaticallyAdjustsContentInsets = false
         tabScroll.drawsBackground = false
         tabScroll.hasHorizontalScroller = true
         tabScroll.scrollerStyle = .overlay
@@ -266,6 +315,13 @@ final class BrowserViewController: NSViewController {
         tabStrip.scroll = tabScroll
         tabStrip.addSubview(pinnedTabStack)
         tabStrip.addSubview(tabScroll)
+        // Width is budgeted separately, but the fixed stack must fill the same
+        // row as the scrolling stack instead of adopting its intrinsic height.
+        NSLayoutConstraint.activate([
+            pinnedTabStack.topAnchor.constraint(equalTo: tabStrip.topAnchor),
+            pinnedTabStack.bottomAnchor.constraint(equalTo: tabStrip.bottomAnchor),
+            pinnedTabStack.leadingAnchor.constraint(equalTo: tabStrip.leadingAnchor),
+        ])
         webContainer.wantsLayer = true
         webContainer.layer?.cornerRadius = 10
         webContainer.layer?.masksToBounds = true
@@ -470,6 +526,7 @@ final class BrowserViewController: NSViewController {
     }
 
     private func updateDetachedControls() {
+        addTabButton.isHidden = isSingleTabWindow
         let result = detachedTabPlan().toolbar
         let visible = Set(result.visible)
         var changed = arrangeToolbar(ifNeeded: [.back, .forward, .home, .reload, .address, .settings, .quit])
@@ -589,8 +646,9 @@ final class BrowserViewController: NSViewController {
         let actualSpan = rightEdge - scrollLeft
         let geometrySettled = abs(glass.content.bounds.width - view.bounds.width) < 1
             && abs(scrollLeft - detachedTrafficInset) < 1 && actualSpan > 0
-        let available = geometrySettled ? actualSpan - 28 - 4 - 8 - divider
-            : view.bounds.width - detachedTrafficInset - 28 - 4 - 8 - 12 - divider
+        let addWidth: CGFloat = isSingleTabWindow ? 0 : 28
+        let available = geometrySettled ? actualSpan - addWidth - 4 - 8 - divider
+            : view.bounds.width - detachedTrafficInset - addWidth - 4 - 8 - 12 - divider
         let initial = DetachedTabLayout.planWithOverflowButton(available: available, count: buttons.count, fullWidth: full, textMinimum: minimum, spacing: tabStack.spacing, minimumVisible: min(buttons.count, buttons.filter { tabs.indices.contains($0.tag) && tabs[$0.tag].pinnedID != nil }.count + 1))
         return initial
     }
@@ -625,7 +683,7 @@ final class BrowserViewController: NSViewController {
             for (index, button) in normals.enumerated() { button.isHidden = !distribution.visibleNormalIndices.contains(index) }
             widths = arranged.map { $0 is TabButton ? distribution.width : 4 }
             let hidden = distribution.hiddenNormalCount
-            addTabButton.constraints.first { $0.firstAttribute == .width && $0.secondItem == nil }?.constant = 28
+            addTabButton.constraints.first { $0.firstAttribute == .width && $0.secondItem == nil }?.constant = isSingleTabWindow ? 0 : 28
             detachedTabTrailingConstraint.isActive = hidden == 0
             overflowControlGapConstraint.isActive = hidden > 0
             overflowTabLeadingConstraint.isActive = hidden > 0
@@ -1015,6 +1073,7 @@ final class BrowserViewController: NSViewController {
 
     /// Pinned tabs come first, in settings order; other tabs follow.
     private func syncPinnedTabs() {
+        guard !isSingleTabWindow else { return }
         let pinned = store.data.pinnedTabs
         let pinnedIDs = Set(pinned.map(\.id))
         let selected = selectedTab
@@ -1147,6 +1206,7 @@ final class BrowserViewController: NSViewController {
         } else if let selected = selectedIndex {
             select(selected == index ? min(index, tabs.count - 1) : (selected > index ? selected - 1 : selected))
         }
+        if isSingleTabWindow { onSingleTabClosed?() }
     }
 
     private func index(of webView: WKWebView) -> Int? {
@@ -1154,15 +1214,25 @@ final class BrowserViewController: NSViewController {
     }
 
     @objc func newTab(_ sender: Any?) {
-        let tab = insertTab(makeTab(pinnedID: nil, profileID: store.data.newTabProfileID), after: nil)
+        if isSingleTabWindow { onNewTabInNotch?(); return }
+        let tab = makeTab(pinnedID: nil, profileID: store.data.newTabProfileID)
+        insertTab(tab, after: nil)
         select(tab)
     }
 
     private func openInNewTab(_ url: URL, from opener: Tab? = nil) {
         let profileID = opener?.profileID ?? store.data.newTabProfileID
-        let tab = insertTab(makeTab(pinnedID: nil, profileID: profileID), after: opener ?? selectedTab)
+        let tab = makeTab(pinnedID: nil, profileID: profileID)
         tab.webView.load(URLRequest(url: url))
+        if isSingleTabWindow { releaseNewTabToWindow(tab); return }
+        insertTab(tab, after: opener ?? selectedTab)
         select(tab)
+    }
+
+    private func releaseNewTabToWindow(_ tab: Tab) {
+        tab.observations.removeAll()
+        tab.webView.removeFromSuperview()
+        onCreateTabWindow?(tab)
     }
 
     @objc func closeCurrentTab(_ sender: Any?) {
@@ -1249,6 +1319,7 @@ final class BrowserViewController: NSViewController {
     // MARK: Tab context menu
 
     @objc private func pinTab(_ sender: NSMenuItem) {
+        guard !isSingleTabWindow else { return }
         let tab = tabs[sender.tag]
         guard tab.pinnedID == nil, let url = tab.webView.url else { return }
         let name = tab.webView.title.flatMap { $0.isEmpty ? nil : String($0.prefix(14)) } ?? url.host() ?? "Web"
@@ -1320,6 +1391,7 @@ final class BrowserViewController: NSViewController {
     }
 
     private func updateChrome() {
+        onPageTitleChanged?(selectedTab?.displayName ?? "新規タブ")
         guard isViewLoaded else { return }
         rebuildTabButtons()
 
@@ -1389,7 +1461,7 @@ final class BrowserViewController: NSViewController {
             tabStack.addArrangedSubview(notionTabButton)
         }
         for (i, tab) in tabs.enumerated() {
-            if store.data.notionEnabled && i == notionPosition { addNotion() }
+            if !isSingleTabWindow && store.data.notionEnabled && i == notionPosition { addNotion() }
             if i == firstUnpinnedIndex {
                 let divider = NSBox()
                 divider.boxType = .separator
@@ -1407,6 +1479,13 @@ final class BrowserViewController: NSViewController {
             let button = TabButton(title: iconOnly ? "" : tab.displayName, image: tab.icon(grayscale: !colored), target: self, action: #selector(tabClicked))
             button.onDragBegan = { [weak self] _ in self?.isDraggingTab = true }
             button.onDragEnded = { [weak self] button in self?.tabDragEnded(button) }
+            if tab.pinnedID == nil && !isSingleTabWindow {
+                button.onDragOut = { [weak self, weak tab] point in
+                    guard let self, let tab else { return }
+                    self.isDraggingTab = false
+                    self.onDetachTab?(tab, point)
+                }
+            }
             if tab.pinnedID == nil {
                 button.onClose = { [weak self, weak tab] in
                     guard let self, let tab, let index = self.tabs.firstIndex(where: { $0 === tab }),
@@ -1439,7 +1518,7 @@ final class BrowserViewController: NSViewController {
             tabStack.addArrangedSubview(button)
             tabButtons.append(button)
         }
-        if store.data.notionEnabled && notionPosition == tabs.count { addNotion() }
+        if !isSingleTabWindow && store.data.notionEnabled && notionPosition == tabs.count { addNotion() }
         if !isDetached {
             for item in tabStack.arrangedSubviews {
                 // Notion participates in the pinned order; keep the divider at
@@ -1469,20 +1548,29 @@ final class BrowserViewController: NSViewController {
         func add(_ title: String, _ action: Selector, to menu: NSMenu = menu) -> NSMenuItem {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
             item.target = self
-            let icons: [Selector: String] = [#selector(toggleIconOnly): "eye", #selector(setPinnedHome): "house", #selector(openSettings): "slider.horizontal.3", #selector(pinTab): "pin", #selector(unpinTab): "pin.slash", #selector(closeTabFromMenu): "xmark", #selector(changeProfile): "person.crop.circle", #selector(openTabExternally): "safari"]
+            let icons: [Selector: String] = [#selector(toggleIconOnly): "eye", #selector(setPinnedHome): "house", #selector(openSettings): "slider.horizontal.3", #selector(pinTab): "pin", #selector(unpinTab): "pin.slash", #selector(closeTabFromMenu): "xmark", #selector(changeProfile): "person.crop.circle", #selector(openTabExternally): "safari", #selector(returnSingleTab): "arrow.down.backward", #selector(detachTabFromMenu): "arrow.up.forward.app"]
             item.image = symbol(icons[action] ?? "circle")
             item.tag = index
             menu.addItem(item)
             return item
         }
 
+        menu.autoenablesItems = false
+        if isSingleTabWindow {
+            add("ノッチに戻す", #selector(returnSingleTab))
+        } else {
+            let detach = add("このタブを別ウインドウで開く", #selector(detachTabFromMenu))
+            detach.image = symbol("arrow.up.forward.app")
+            detach.isEnabled = tab.pinnedID == nil
+        }
+        menu.addItem(.separator())
         if let pinned = tab.pinned {
             add("アイコンのみ表示", #selector(toggleIconOnly)).state = pinned.iconOnly ? .on : .off
             add("現在のページをホームに設定", #selector(setPinnedHome))
             add("固定タブを編集…", #selector(openSettings))
             menu.addItem(.separator())
         } else {
-            add("固定タブにする", #selector(pinTab))
+            add("固定タブにする", #selector(pinTab)).isEnabled = !isSingleTabWindow
         }
 
         add("ブラウザで開く", #selector(openTabExternally)).isEnabled = tab.webView.url != nil
@@ -1590,7 +1678,7 @@ final class BrowserViewController: NSViewController {
         if webView.isLoading { webView.stopLoading() } else { webView.reload() }
     }
 
-    @objc func toggleDetached(_ sender: Any?) { ShortcutController.shared.cancelPending(); onToggleDetached?() }
+    @objc func toggleDetached(_ sender: Any?) { ShortcutController.shared.cancelPending(); if isSingleTabWindow { onReturnTab?() } else { onToggleDetached?() } }
 
     @objc private func toggleKeepOpen() { onToggleKeepOpen?() }
 
@@ -1606,8 +1694,9 @@ final class BrowserViewController: NSViewController {
         let heading = NSMenuItem(title: "", action: nil, keyEquivalent: "")
         heading.image = symbol("ellipsis.circle")
         menu.addItem(heading)
-        let detach = NSMenuItem(title: isDetached ? "ノッチに戻す" : "ウインドウで開く", action: #selector(toggleDetached), keyEquivalent: "n")
-        SettingsStore.shared.data.shortcuts[.detach].apply(to: detach)
+        let detach = NSMenuItem(title: isDetached ? "ノッチに戻す" : "ブラウザ全体をウインドウにする", action: #selector(toggleDetached), keyEquivalent: "n")
+        if !isSingleTabWindow { SettingsStore.shared.data.shortcuts[.detach].apply(to: detach) }
+        else { detach.keyEquivalent = "" }
         detach.target = self
         detach.image = detachButton.image
         menu.addItem(detach)
@@ -1675,9 +1764,11 @@ final class BrowserViewController: NSViewController {
     @objc func reopenClosedTab(_ sender: Any?) {
         guard let entry = closedTabs.pop() else { return }
         let profileID = store.data.profiles.contains { $0.id == entry.profileID } ? entry.profileID : Profile.defaultID
-        let tab = insertTab(makeTab(pinnedID: nil, profileID: profileID), after: nil)
+        let tab = makeTab(pinnedID: nil, profileID: profileID)
         tab.webView.pageZoom = BrowserTools.zoom(entry.zoom)
         tab.webView.load(URLRequest(url: entry.url))
+        if isSingleTabWindow { releaseNewTabToWindow(tab); return }
+        insertTab(tab, after: nil)
         select(tab)
         focusContent()
     }
@@ -1864,7 +1955,7 @@ final class BrowserViewController: NSViewController {
         notes.show(profile: store.profile(selectedTab?.profileID ?? store.data.newTabProfileID))
     }
     @objc func toggleNotion(_ sender: Any?) {
-        guard store.data.notionEnabled else { return }
+        guard !isSingleTabWindow, store.data.notionEnabled else { return }
         addressPopover.close()
         updateNotionAppearance()
         let willShow = notionPanel?.isHidden == true
@@ -1876,7 +1967,7 @@ final class BrowserViewController: NSViewController {
         if !willShow { focusContent() }
     }
     func showNotion() {
-        guard store.data.notionEnabled else { return }
+        guard !isSingleTabWindow, store.data.notionEnabled else { return }
         _ = view
         updateNotionAppearance()
         notionPanel?.isHidden = false
@@ -2002,8 +2093,8 @@ extension BrowserViewController: WKUIDelegate {
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         let opener = index(of: webView).map { tabs[$0] }
         let tab = makeTab(pinnedID: nil, profileID: opener?.profileID ?? store.data.newTabProfileID, configuration: configuration)
-        insertTab(tab, after: opener)
-        select(tab)
+        if isSingleTabWindow { releaseNewTabToWindow(tab) }
+        else { insertTab(tab, after: opener); select(tab) }
         return tab.webView
     }
 
@@ -2137,7 +2228,26 @@ private final class BrowserTabStripView: NSView {
         fixed?.frame = NSRect(x: 0, y: 0, width: width, height: bounds.height)
         scroll?.frame = NSRect(x: width, y: 0, width: max(0, bounds.width - width), height: bounds.height)
         fixed?.layoutSubtreeIfNeeded()
+        if let scroll {
+            scroll.wantsLayer = true
+            let mask = CAGradientLayer()
+            mask.frame = scroll.bounds
+            mask.startPoint = CGPoint(x: 0, y: 0.5)
+            mask.endPoint = CGPoint(x: 1, y: 0.5)
+            mask.colors = [NSColor.clear.cgColor, NSColor.black.cgColor, NSColor.black.cgColor]
+            mask.locations = [0, NSNumber(value: Double(min(1, 12 / max(1, scroll.bounds.width)))), 1]
+            scroll.layer?.mask = mask
+        }
         scroll?.tile()
+        if let scroll, let document = scroll.documentView {
+            if abs(document.frame.height - scroll.contentSize.height) > 0.5 {
+                document.setFrameSize(NSSize(width: document.frame.width, height: scroll.contentSize.height))
+            }
+            document.layoutSubtreeIfNeeded()
+            if scroll.contentView.bounds.origin.y != 0 {
+                scroll.contentView.scroll(to: NSPoint(x: scroll.contentView.bounds.origin.x, y: 0))
+            }
+        }
     }
 }
 
@@ -2231,6 +2341,7 @@ final class TabButton: NSButton {
         set { }
     }
 
+    var onDragOut: ((NSPoint) -> Void)?
     var onDragBegan: ((TabButton) -> Void)?
     var onDragEnded: ((TabButton) -> Void)?
     var onClose: (() -> Void)? {
@@ -2341,6 +2452,14 @@ final class TabButton: NSButton {
                 }
                 return
             }
+            let row = superview ?? self
+            let local = row.convert(next.locationInWindow, from: nil)
+            if next.type == .leftMouseDragged, let onDragOut,
+               TabDetachmentGesture.shouldDetach(pointer: local, strip: row.bounds, flipped: row.isFlipped) {
+                alphaValue = 1
+                onDragOut(window.convertPoint(toScreen: next.locationInWindow))
+                return
+            }
             if !dragging, abs(dx) > 4 {
                 dragging = true
                 onDragBegan?(self)
@@ -2390,5 +2509,12 @@ private final class TopAlignedStackView: NSStackView { override var isFlipped: B
 extension BrowserViewController: NSPopoverDelegate {
     func popoverDidClose(_ notification: Notification) {
         onModalChange?(false)
+    }
+}
+
+/// The threshold is measured from the strip, independent of the tab button's height.
+enum TabDetachmentGesture {
+    static func shouldDetach(pointer: NSPoint, strip: NSRect, flipped: Bool) -> Bool {
+        flipped ? pointer.y >= strip.maxY + 40 : pointer.y <= strip.minY - 40
     }
 }

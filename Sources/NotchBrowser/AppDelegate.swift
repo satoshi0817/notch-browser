@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var shortcutMenuSubscription: AnyCancellable?
     private var toggleMenuItem: NSMenuItem!
     private var detachMenuItem: NSMenuItem!
+    private var newTabCommand: BrowserNewTabCommand?
     private var keepOpenItem: NSMenuItem!
     private var notionItem: NSMenuItem!
     private var updateWindow: UpdateWindowController?
@@ -46,7 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !firstRun { startUpdatesIfNeeded() }
 
         ShortcutController.shared.onAction = { [weak self] action in
-            if action == .toggle { self?.notch.toggle() } else { self?.notch.toggleDetached() }
+            if action == .toggle { self?.notch.toggle() } else if action == .detachTab { self?.notch.browser.detachCurrentTab(nil) } else { self?.notch.toggleDetached() }
         }
         ShortcutController.shared.start()
         NotificationCenter.default.addObserver(self, selector: #selector(onboardingRequested(_:)),
@@ -100,7 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let menu = NSMenu()
         toggleMenuItem = item("開く / 閉じる", #selector(toggleNotch), target: self)
-        detachMenuItem = item("ウインドウで開く / ノッチに戻す", #selector(BrowserViewController.toggleDetached(_:)), target: notch.browser)
+        detachMenuItem = item("ブラウザ全体をウインドウにする / ノッチに戻す", #selector(BrowserViewController.toggleDetached(_:)), target: notch.browser)
         menu.addItem(toggleMenuItem)
         menu.addItem(detachMenuItem)
         keepOpenItem = item("開いたままにする", #selector(toggleKeepOpen), target: self)
@@ -192,7 +193,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         addSubmenu(edit, to: main)
 
         let nav = NSMenu(title: "移動")
-        nav.addItem(item("新規タブ", #selector(BrowserViewController.newTab(_:)), "t", target: browser))
+        let newTabCommand = BrowserNewTabCommand(browser: browser)
+        self.newTabCommand = newTabCommand
+        nav.addItem(newTabCommand.makeMenuItem())
         nav.addItem(item("タブを閉じる", #selector(BrowserViewController.closeCurrentTab(_:)), "w", target: browser))
         nav.addItem(item("アドレスバー", #selector(BrowserViewController.focusAddressBar(_:)), "l", target: browser))
         nav.addItem(item("再読み込み", #selector(BrowserViewController.reloadPage(_:)), "r", target: browser))
@@ -223,7 +226,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func item(_ title: String, _ action: Selector, _ key: String = "", _ modifiers: NSEvent.ModifierFlags = .command, target: AnyObject? = nil, tag: Int = 0) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: modifiers.contains(.shift) ? key.uppercased() : key)
         item.keyEquivalentModifierMask = modifiers
-        item.target = target // nil = first responder chain
+        item.target = target is BrowserViewController && !key.isEmpty ? nil : target // Browser commands follow the focused window.
         item.tag = tag
         return item
     }
