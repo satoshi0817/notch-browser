@@ -4,6 +4,55 @@ import XCTest
 
 final class HoverBehaviorTests: XCTestCase {
     @MainActor
+    func testHotkeyOpenAndReturnShareNonactivatingFocusAndPreserveContent() throws {
+        _ = NSApplication.shared
+        let screen = try XCTUnwrap(NSScreen.screens.first)
+        let store = SettingsStore.shared
+        let original = store.data
+        defer { store.data = original }
+        var settings = SettingsData()
+        settings.pinnedTabs = []
+        settings.notionEnabled = true
+        settings.motion.style = .none
+        store.data = settings
+        let manager = NotchManager(shelfStore: ShelfStore(file: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("items.json")))
+        let controller = NotchController(screen: screen, manager: manager)
+        defer { controller.close() }
+        controller.show()
+        manager.browser.showNotion()
+        var deactivationStates: [(expanded: Bool, key: Bool)] = []
+        controller.deactivateAfterDetaching = {
+            deactivationStates.append((controller.isExpanded, controller.panel.isKeyWindow))
+        }
+        defer { controller.deactivateAfterDetaching = {} }
+        func notionButton() throws -> NSButton {
+            let views = sequence(first: [manager.browser.view], next: { level in
+                let children = level.flatMap(\.subviews)
+                return children.isEmpty ? nil : children
+            }).flatMap { $0 }
+            return try XCTUnwrap(views.compactMap { $0 as? NSButton }.first { $0.accessibilityLabel() == "Notionエージェント" })
+        }
+        // The return path uses this same entry point with content preservation.
+        controller.openFromHotKey(preservingContent: true, returningFromDetached: true)
+        XCTAssertEqual(deactivationStates.count, 1)
+        XCTAssertFalse(try XCTUnwrap(deactivationStates.first).expanded)
+        XCTAssertFalse(try XCTUnwrap(deactivationStates.first).key)
+        XCTAssertTrue(controller.isExpanded)
+        XCTAssertTrue(controller.panel.styleMask.contains(.nonactivatingPanel))
+        XCTAssertTrue(controller.panel.isKeyWindow)
+        XCTAssertEqual(try notionButton().state, .on)
+        controller.collapse(animated: false)
+        XCTAssertFalse(controller.isExpanded)
+        controller.openFromHotKey()
+        XCTAssertTrue(controller.isExpanded)
+        XCTAssertTrue(controller.panel.isKeyWindow)
+        XCTAssertEqual(deactivationStates.count, 1, "Ordinary hotkey open must leave settings-window activation unchanged")
+        XCTAssertEqual(try notionButton().state, .off)
+        controller.collapse(animated: false)
+        XCTAssertFalse(controller.isExpanded)
+    }
+
+    @MainActor
     func testFocusedNotchClosesAfterLeavingAndModalDefersClosing() throws {
         _ = NSApplication.shared
         let screen = try XCTUnwrap(NSScreen.screens.first)

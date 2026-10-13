@@ -534,6 +534,15 @@ final class NotchController: NSObject, NSWindowDelegate {
 
     // MARK: Expand / collapse
 
+    var deactivateAfterDetaching: () -> Void = { NSApp.deactivate() }
+
+    func openFromHotKey(preservingContent: Bool = false, returningFromDetached: Bool = false) {
+        // Release only activation inherited from the detached window. Ordinary
+        // hotkey opens must not deactivate our settings or other app windows.
+        if returningFromDetached { deactivateAfterDetaching() }
+        expand(focus: true, preservingContent: preservingContent)
+    }
+
     func expand(focus: Bool, preservingContent: Bool = false) {
         if manager.isDetached { manager.bringDetachedForward(); return }
         if shelfOnly { hideShelf() }
@@ -1138,7 +1147,7 @@ final class NotchManager: NSObject, NSWindowDelegate {
         detachedWindow = nil
         returningFromFullScreen = false
         browser.isDetached = false
-        target.expand(focus: true, preservingContent: true)
+        target.openFromHotKey(preservingContent: true, returningFromDetached: true)
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -1190,6 +1199,6 @@ final class NotchManager: NSObject, NSWindowDelegate {
         }
         let mouse = NSEvent.mouseLocation
         let target = orderedControllers.first { $0.screen.frame.contains(mouse) } ?? orderedControllers.first
-        target?.expand(focus: true)
+        target?.openFromHotKey()
     }
 }
