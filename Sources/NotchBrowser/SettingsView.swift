@@ -201,7 +201,7 @@ struct PinnedTabsSettings: View {
                 if let id = selection, let binding = binding(for: id) {
                     PinnedTabEditor(tab: binding)
                 } else if selection == Self.notionID {
-                    NotionAgentsSettings()
+                    Text("タブの中で設定できます").foregroundStyle(.secondary)
                 } else {
                     Label("タブを選択するか、追加してください", systemImage: "plus.circle")
                         .foregroundStyle(.secondary)

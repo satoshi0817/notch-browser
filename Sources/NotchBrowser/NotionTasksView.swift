@@ -14,7 +14,7 @@ enum NotionSettingsFieldLayout {
                                  url: store.configuration.url, confirmedURL: store.configuration.confirmedURL)
     }
     var body: some View {
-        Section("タスク") {
+        Section("データ") {
             VStack(alignment: .leading, spacing: 4) {
                 checklistItem("Notion にログイン", complete: checklist.loggedIn)
                 checklistItem("データベースの URL", complete: checklist.databaseURL)
@@ -47,8 +47,9 @@ enum NotionSettingsFieldLayout {
                 }
                 }
                 .frame(maxWidth: .infinity)
-                Button("確認") { Task { await store.configure() } }
-                    .frame(width: NotionSettingsFieldLayout.actionWidth)
+                Button { Task { await store.configure() } } label: {
+                    Text("確認").frame(width: NotionSettingsFieldLayout.actionWidth)
+                }.buttonStyle(.bordered).controlSize(.regular)
                     .disabled(!NotionTaskRules.canConfirm(url: store.configuration.url, checking: store.checking || store.refreshing))
             }
             if NotionTaskRules.showsSourcePicker(store.sources) {
@@ -83,28 +84,57 @@ enum NotionSettingsFieldLayout {
 
 @MainActor struct NotionTasksPanel: View {
     var openingID = UUID()
+    var onOpenSettings: () -> Void = {}
+    @State private var showingSettings = false
     @ObservedObject private var store = NotionTasksStore.shared
     @State private var selected: NotionTask?
     var body: some View {
-        GeometryReader { geometry in
-            HStack(spacing: 0) {
-                if geometry.size.width >= 640 {
-                    list.frame(width: (geometry.size.width - 1) / 2)
-                    Divider()
-                    Group {
-                        if let selected { detail(selected, narrow: false) }
-                        else { Text("タスクを選ぶと詳細が表示されます").foregroundStyle(.tertiary) }
-                    }.frame(width: (geometry.size.width - 1) / 2, height: geometry.size.height)
-                } else if let selected {
-                    detail(selected, narrow: true).frame(maxWidth: .infinity)
-                } else {
-                    list.frame(maxWidth: .infinity)
+        VStack(spacing: 0) {
+            if showingSettings {
+                HStack { Button("‹ 戻る") { showingSettings = false }; Spacer() }.padding(12)
+            } else if store.configuration.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                HStack { Spacer(); settingsButton }.padding(12)
+            }
+            if showingSettings {
+                Form {
+                    NotionTabConnectionSettings(onOpenSettings: onOpenSettings)
+                    NotionTasksSettings()
+                    Section("表示") {
+                        Picker("タスクの既定フィルタ", selection: $store.filter) {
+                            ForEach(NotionTaskFilter.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                        }
+                    }
+                }.formStyle(.grouped)
+            } else if store.configuration.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Spacer()
+                VStack(spacing: 12) {
+                    Text("データベースの URL が設定されていません").foregroundStyle(.secondary)
+                    NotionTabEmptySettingsButton { showingSettings = true }
+                }
+                Spacer()
+            } else {
+                GeometryReader { geometry in
+                    HStack(spacing: 0) {
+                        if geometry.size.width >= 640 {
+                            list.frame(width: (geometry.size.width - 1) / 2)
+                            Divider()
+                            Group {
+                                if let selected { detail(selected, narrow: false) }
+                                else { Text("タスクを選ぶと詳細が表示されます").foregroundStyle(.tertiary) }
+                            }.frame(width: (geometry.size.width - 1) / 2, height: geometry.size.height)
+                        } else if let selected {
+                            detail(selected, narrow: true).frame(maxWidth: .infinity)
+                        } else {
+                            list.frame(maxWidth: .infinity)
+                        }
+                    }
                 }
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .task(id: openingID) {
             #if DEBUG
+            if ["tab-settings", "settings", "sources", "settings-error"].contains(store.mockState ?? "") { showingSettings = true }
             if ["detail", "loading", "no-body"].contains(store.mockState ?? "") { selected = store.tasks.first }
             #endif
             await store.refresh()
@@ -118,9 +148,13 @@ enum NotionSettingsFieldLayout {
         NotionTaskDetail(task: task, back: { selected = nil }, narrow: narrow)
             .id("\(task.id)-\(openingID)")
     }
+    private var settingsButton: some View {
+        Button { showingSettings = true } label: { Image(systemName: "gearshape") }
+            .help("タスク設定").accessibilityLabel("タスク設定を開く")
+    }
     private var list: some View {
         VStack(spacing: 0) {
-            HStack {
+            HStack(spacing: 8) {
                 Picker("表示", selection: $store.filter) {
                     ForEach(NotionTaskFilter.allCases, id: \.self) {
                         Text($0.rawValue).tag($0)
@@ -128,6 +162,7 @@ enum NotionSettingsFieldLayout {
                 }.pickerStyle(.segmented)
                 Button { Task { await store.refresh() } } label: { Image(systemName: "arrow.clockwise") }
                     .disabled(store.refreshing).help("更新")
+                settingsButton
             }.padding()
             if let message = store.message { Text(message).font(.caption).foregroundStyle(.red).padding(.horizontal) }
             let rows = NotionTaskRules.rows(store.tasks, filter: store.filter)
@@ -284,5 +319,26 @@ struct NotionTaskBlockView: View {
             result.append(part)
         }
         return result
+    }
+}
+
+@MainActor struct NotionTabConnectionSettings: View {
+    @ObservedObject private var connection = NotionConnectionStore.shared
+    let onOpenSettings: () -> Void
+    var body: some View {
+        Section("接続") {
+            LabeledContent("接続状態", value: connection.tokenValid ? "接続済み" : "未接続")
+            Button("「Notion 接続」の設定を開く", action: onOpenSettings)
+                .buttonStyle(.link).foregroundStyle(Color.accentColor)
+        }
+    }
+}
+
+struct NotionTabEmptySettingsButton: View {
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            Text("設定を開く").fixedSize(horizontal: true, vertical: false)
+        }.buttonStyle(.bordered).controlSize(.regular)
     }
 }

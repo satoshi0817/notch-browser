@@ -91,7 +91,7 @@ struct NotionSettingsView: View {
                 Text("トークンはMacのキーチェーンに保存します。エージェントを有効にするには、Notionへの接続を確認します。")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            NotionTasksSettings()
+            Section("タスク") { Text("タブの中で設定できます").foregroundStyle(.secondary) }
             Section("データベースの更新通知") {
                 Toggle("データベース更新をノッチで通知", isOn: $settings.data.notionDatabaseNotificationsEnabled)
                 Picker("通知を閉じるまで", selection: $settings.data.notionDatabaseNotificationDuration) {

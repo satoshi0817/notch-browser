@@ -164,6 +164,7 @@ final class BrowserViewController: NSViewController {
     private let notes = ScratchpadView()
     private var notionPanel: NSHostingView<NotionAgentsPanel>?
     private var tasksPanel: NSHostingView<NotionTasksPanel>?
+    var notionConnection = NotionConnectionStore.shared
     private var tasksSubscriptions = Set<AnyCancellable>()
     private lazy var tasksTabButton: TabButton = {
         let image = NSImage(systemSymbolName: "checklist", accessibilityDescription: "タスク") ?? NSImage()
@@ -446,7 +447,7 @@ final class BrowserViewController: NSViewController {
             notion.bottomAnchor.constraint(equalTo: webContainer.bottomAnchor)
         ])
         notionPanel = notion
-        let tasks = NSHostingView(rootView: NotionTasksPanel())
+        let tasks = NSHostingView(rootView: NotionTasksPanel(onOpenSettings: { [weak self] in self?.onOpenNotionSettings?() }))
         tasks.isHidden = true
         tasks.translatesAutoresizingMaskIntoConstraints = false
         chrome.addSubview(tasks)
@@ -460,7 +461,7 @@ final class BrowserViewController: NSViewController {
         NotionTasksStore.shared.$configuration.receive(on: RunLoop.main).sink { [weak self] _ in
             self?.refreshTasksAvailability()
         }.store(in: &tasksSubscriptions)
-        NotionConnectionStore.shared.$tokenValid.receive(on: RunLoop.main).sink { [weak self] _ in
+        notionConnection.$tokenValid.receive(on: RunLoop.main).sink { [weak self] _ in
             self?.refreshTasksAvailability()
         }.store(in: &tasksSubscriptions)
         updateNotionAppearance()
@@ -1466,7 +1467,7 @@ final class BrowserViewController: NSViewController {
             let encoder = JSONEncoder()
             encoder.outputFormatting = .sortedKeys
             let key = [(try? encoder.encode(store.data))?.base64EncodedString() ?? "",
-                       String(describing: selectedIndex), String(describing: notionPanel?.isHidden), String(describing: tasksPanel?.isHidden), String(NotionTasksStore.shared.available),
+                       String(describing: selectedIndex), String(describing: notionPanel?.isHidden), String(describing: tasksPanel?.isHidden), String(notionTabsConnected),
                        String(describing: view.effectiveAppearance.name)]
                 + tabs.map { "\(ObjectIdentifier($0)):\($0.profileID):\($0.displayName):\($0.webView.url?.absoluteString ?? "")" }
             let titlesMatch = tabButtons.count == tabs.count && zip(tabButtons, tabs).allSatisfy { button, tab in
@@ -1482,7 +1483,7 @@ final class BrowserViewController: NSViewController {
         pinnedTabStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         tabButtons = []
         let grayscale = store.data.grayscaleIcons
-        if !isSingleTabWindow && NotionTasksStore.shared.available {
+        if !isSingleTabWindow && notionTabsConnected {
             tasksTabButton.isDetachedLayout = false
             tasksTabButton.detachedOriginalTitle = nil
             tasksTabButton.detachedWidthConstraint?.isActive = false
@@ -1511,7 +1512,7 @@ final class BrowserViewController: NSViewController {
             tabStack.addArrangedSubview(notionTabButton)
         }
         for (i, tab) in tabs.enumerated() {
-            if !isSingleTabWindow && store.data.notionEnabled && i == notionPosition { addNotion() }
+            if !isSingleTabWindow && store.data.notionEnabled && notionTabsConnected && i == notionPosition { addNotion() }
             if i == firstUnpinnedIndex {
                 let divider = NSBox()
                 divider.boxType = .separator
@@ -1568,7 +1569,7 @@ final class BrowserViewController: NSViewController {
             tabStack.addArrangedSubview(button)
             tabButtons.append(button)
         }
-        if !isSingleTabWindow && store.data.notionEnabled && notionPosition == tabs.count { addNotion() }
+        if !isSingleTabWindow && store.data.notionEnabled && notionTabsConnected && notionPosition == tabs.count { addNotion() }
         if !isDetached {
             for item in tabStack.arrangedSubviews {
                 // Notion participates in the pinned order; keep the divider at
@@ -2005,7 +2006,7 @@ final class BrowserViewController: NSViewController {
         notes.show(profile: store.profile(selectedTab?.profileID ?? store.data.newTabProfileID))
     }
     @objc func toggleNotion(_ sender: Any?) {
-        guard !isSingleTabWindow, store.data.notionEnabled else { return }
+        guard !isSingleTabWindow, store.data.notionEnabled, notionTabsConnected else { return }
         tasksPanel?.isHidden = true
         addressPopover.close()
         updateNotionAppearance()
@@ -2018,7 +2019,7 @@ final class BrowserViewController: NSViewController {
         if !willShow { focusContent() }
     }
     func showNotion() {
-        guard !isSingleTabWindow, store.data.notionEnabled else { return }
+        guard !isSingleTabWindow, store.data.notionEnabled, notionTabsConnected else { return }
         _ = view
         tasksPanel?.isHidden = true
         updateNotionAppearance()
@@ -2061,11 +2062,19 @@ final class BrowserViewController: NSViewController {
         return false
     }
 
-    private func refreshTasksAvailability() {
+    private var notionTabsConnected: Bool {
+        NotionTaskRules.tabVisible(connected: notionConnection.tokenValid)
+    }
+
+    func refreshTasksAvailability() {
         guard isViewLoaded, !isSingleTabWindow else { return }
         let tasks = NotionTasksStore.shared
-        if !tasks.available { tasksPanel?.isHidden = true; updateNotionTabSelection() }
-        if NotionTaskRules.shouldAutoSelect(available: tasks.available, alreadySelected: tasks.configuration.autoSelected) {
+        if !notionTabsConnected {
+            // Panels overlay the last selected browser tab; closing them restores it.
+            hideNotion()
+            focusContent()
+        }
+        if NotionTaskRules.shouldAutoSelect(available: notionTabsConnected && tasks.available, alreadySelected: tasks.configuration.autoSelected) {
             tasks.configuration.autoSelected = true
             showTasks()
         }
@@ -2073,10 +2082,10 @@ final class BrowserViewController: NSViewController {
     }
 
     @objc func showTasks() {
-        guard !isSingleTabWindow, NotionTasksStore.shared.available else { return }
+        guard !isSingleTabWindow, notionTabsConnected else { return }
         hideNotion()
         notes.isHidden = true; switcher.isHidden = true
-        tasksPanel?.rootView = NotionTasksPanel()
+        tasksPanel?.rootView = NotionTasksPanel(onOpenSettings: { [weak self] in self?.onOpenNotionSettings?() })
         tasksPanel?.isHidden = false
         updateNotionTabSelection()
         updateChrome()

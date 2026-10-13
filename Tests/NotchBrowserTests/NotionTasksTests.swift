@@ -3,13 +3,31 @@ import Foundation
 @testable import NotchBrowser
 
 final class NotionTasksTests: XCTestCase {
-    func testUnconfirmedOrDifferentURLDoesNotCompleteChecklistOrShowTab() {
+    func testTabVisibilityRequiresOnlyConnection() {
+        XCTAssertTrue(NotionTaskRules.tabVisible(connected: true))
+        XCTAssertFalse(NotionTaskRules.tabVisible(connected: false))
+        XCTAssertFalse(NotionTaskRules.available(token: true, url: "", confirmedURL: nil),
+                       "The tab remains visible even when its data is unconfigured")
+    }
+    #if DEBUG
+    @MainActor func testTabSettingsAndUnconfiguredPreviewFixtures() {
+        let settings = NotionTasksStore(previewState: "tab-settings")
+        XCTAssertEqual(settings.mockState, "tab-settings")
+        XCTAssertTrue(settings.verified)
+        XCTAssertFalse(settings.sources.isEmpty)
+        let empty = NotionTasksStore(previewState: "unconfigured")
+        XCTAssertEqual(empty.configuration.url, "")
+        XCTAssertTrue(empty.tasks.isEmpty)
+        XCTAssertFalse(empty.available)
+    }
+    #endif
+    func testUnconfirmedOrDifferentURLDoesNotCompleteChecklist() {
         let url = "https://notion.so/0123456789abcdef0123456789abcdef"
         for confirmed in [Optional<String>.none, "https://notion.so/ffffffffffffffffffffffffffffffff"] {
             XCTAssertFalse(NotionTaskRules.available(token: true, url: url, confirmedURL: confirmed))
             let checklist = NotionTaskRules.checklist(tokenValid: true, checking: false, url: url, confirmedURL: confirmed)
             XCTAssertFalse(checklist.databaseURL)
-            XCTAssertEqual(checklist.hint, "2つそろうと、ノッチにタスクのタブが表示されます")
+            XCTAssertEqual(checklist.hint, "データベースの URL を確認してください")
         }
     }
     @MainActor func testEveryConfirmationFailureRevokesPreviousSuccessAndPersistsIt() async throws {
@@ -34,7 +52,7 @@ final class NotionTasksTests: XCTestCase {
             XCTAssertNotNil(store.message)
             let checklist = NotionTaskRules.checklist(tokenValid: true, checking: false, url: url, confirmedURL: store.configuration.confirmedURL)
             XCTAssertFalse(checklist.databaseURL)
-            XCTAssertEqual(checklist.hint, "2つそろうと、ノッチにタスクのタブが表示されます")
+            XCTAssertEqual(checklist.hint, "データベースの URL を確認してください")
             XCTAssertFalse(NotionTasksStore(defaults: defaults, tokenProvider: { "test" }).available)
         }
     }
@@ -88,7 +106,7 @@ final class NotionTasksTests: XCTestCase {
         XCTAssertFalse(store.verified)
         let checklist = NotionTaskRules.checklist(tokenValid: true, checking: false, url: store.configuration.url, confirmedURL: store.configuration.confirmedURL)
         XCTAssertFalse(checklist.databaseURL)
-        XCTAssertEqual(checklist.hint, "2つそろうと、ノッチにタスクのタブが表示されます")
+        XCTAssertEqual(checklist.hint, "データベースの URL を確認してください")
         XCTAssertNotNil(NotionTaskRules.errorLink(store.message!, url: store.configuration.url))
     }
     #endif
@@ -97,7 +115,7 @@ final class NotionTasksTests: XCTestCase {
         let unverified = NotionTaskRules.checklist(tokenValid: false, checking: false, url: url, confirmedURL: url)
         XCTAssertFalse(unverified.loggedIn, "A saved but unverified token must not show a checkmark")
         XCTAssertTrue(unverified.databaseURL)
-        XCTAssertEqual(unverified.hint, "2つそろうと、ノッチにタスクのタブが表示されます")
+        XCTAssertEqual(unverified.hint, "データベースの URL を確認してください")
         let checking = NotionTaskRules.checklist(tokenValid: true, checking: true, url: url, confirmedURL: url)
         XCTAssertFalse(checking.loggedIn)
         XCTAssertEqual(checking.hint, unverified.hint)
@@ -217,7 +235,7 @@ final class NotionTasksTests: XCTestCase {
         }
     }
     #endif
-    func testTabRequiresBothConnectionAndDatabaseURL() {
+    func testDataAccessRequiresBothConnectionAndConfirmedDatabaseURL() {
         let url = "https://notion.so/0123456789abcdef0123456789abcdef"
         XCTAssertTrue(NotionTaskRules.available(token: true, url: url, confirmedURL: url))
         XCTAssertFalse(NotionTaskRules.available(token: false, url: url, confirmedURL: url))

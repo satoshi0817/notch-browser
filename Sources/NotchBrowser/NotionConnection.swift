@@ -48,10 +48,17 @@ final class NotionConnectionStore: ObservableObject {
 
     #if DEBUG
     private var previewMock = false
+    /// Isolated connection for UI tests; disconnect never touches the keychain.
+    static func preview(connected: Bool) -> NotionConnectionStore {
+        let store = NotionConnectionStore()
+        store.previewMock = true
+        store.tokenValid = connected
+        return store
+    }
     #endif
     private init() {
         #if DEBUG
-        if ProcessInfo.processInfo.environment["NOTCH_TASKS_MOCK"] != nil || CommandLine.arguments.contains(where: { $0.hasPrefix("--tasks=") }) {
+        if ProcessInfo.processInfo.environment["NOTCH_TASKS_MOCK"] != nil || CommandLine.arguments.contains(where: { $0.hasPrefix("--tasks=") || $0.hasPrefix("--agents=") }) {
             previewMock = true
             tokenValid = true
             message = "トークンを確認しました"

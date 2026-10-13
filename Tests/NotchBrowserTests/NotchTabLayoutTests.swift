@@ -15,6 +15,7 @@ final class NotchTabLayoutTests: XCTestCase {
         ]
         settings.data.notionEnabled = true
         let browser = BrowserViewController()
+        browser.notionConnection = .preview(connected: true)
         browser.view.frame = NSRect(x: 0, y: 0, width: 1200, height: 700)
         for _ in 0..<12 { browser.newTab(nil) }
         browser.revealSelectedTabAfterNotchLayout()

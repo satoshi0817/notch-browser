@@ -109,6 +109,7 @@ final class HoverBehaviorTests: XCTestCase {
         settings.motion.style = .none
         store.data = settings
         let manager = NotchManager(shelfStore: ShelfStore(file: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("items.json")))
+        manager.browser.notionConnection = .preview(connected: true)
         let controller = NotchController(screen: screen, manager: manager)
         defer { controller.close() }
         controller.show()

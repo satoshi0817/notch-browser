@@ -973,7 +973,34 @@ struct NotionAgentsPanel: View {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !store.isSending
     }
 
+    @State private var showingSettings = false
     var body: some View {
+        VStack(spacing: 0) {
+            if showingSettings {
+                HStack { Button("‹ 戻る") { showingSettings = false }; Spacer() }.padding(12)
+            } else if settings.data.notionSavedAgents.isEmpty {
+                HStack { Spacer(); settingsButton }.padding(12)
+            }
+            if showingSettings {
+                NotionAgentsSettings(onOpenSettings: onOpenSettings).environmentObject(settings)
+            } else {
+                conversation
+            }
+        }
+        .foregroundStyle(NotionPanelTheme.ink)
+        .tint(NotionPanelTheme.blue)
+        .background(NotionPanelTheme.canvas)
+        .onAppear {
+            #if DEBUG
+            if CommandLine.arguments.contains("--agents=settings") { showingSettings = true }
+            #endif
+        }
+    }
+    private var settingsButton: some View {
+        Button { showingSettings = true } label: { Image(systemName: "gearshape") }
+            .help("エージェント設定").accessibilityLabel("エージェント設定を開く")
+    }
+    private var conversation: some View {
         VStack(spacing: 0) {
             if let notice = store.noticeText {
                 HStack { Image(systemName: "bell.badge.fill"); Text(notice); Spacer() }
@@ -983,7 +1010,12 @@ struct NotionAgentsPanel: View {
                                 in: RoundedRectangle(cornerRadius: 8))
                     .padding(.horizontal, 20).padding(.bottom, 10)
             }
-            if !store.hasToken {
+            if settings.data.notionSavedAgents.isEmpty {
+                VStack(spacing: 12) {
+                    Text("エージェントが設定されていません").foregroundStyle(.secondary)
+                    NotionTabEmptySettingsButton { showingSettings = true }
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if !store.hasToken {
                 VStack(alignment: .leading, spacing: 12) {
                     Label("Notionを接続", systemImage: "key").font(.headline)
                     Text("設定の「Notion」でトークンを登録してください。")
@@ -1237,6 +1269,7 @@ struct NotionAgentsPanel: View {
                 }
                 .disabled(!store.hasToken || store.visibleAgents.isEmpty || store.isRefreshing)
                 .help("エージェントと会話を強制取得")
+                if !settings.data.notionSavedAgents.isEmpty { settingsButton }
             }
             .buttonStyle(.plain).font(.caption).foregroundStyle(NotionPanelTheme.muted)
             .frame(height: 38).padding(.horizontal, 16)
@@ -1394,6 +1427,7 @@ private struct NotionThinkingView: View {
 }
 
 struct NotionAgentsSettings: View {
+    var onOpenSettings: () -> Void = {}
     @EnvironmentObject var settings: SettingsStore
     @ObservedObject private var agents = NotionAgentsStore.shared
     @ObservedObject private var connection = NotionConnectionStore.shared
@@ -1409,37 +1443,17 @@ struct NotionAgentsSettings: View {
 
     var body: some View {
         Form {
-            Section("固定ページに表示") {
-                Toggle("Notionカスタムエージェントを使う", isOn: Binding(
-                    get: { settings.data.notionEnabled },
-                    set: { enabled in
-                        if !enabled || connection.tokenValid { settings.data.notionEnabled = enabled }
-                    }))
-                    .disabled(!connection.tokenValid && !settings.data.notionEnabled)
-                Picker("タブの表示", selection: $settings.data.notionTabDisplay) {
-                    ForEach(NotionTabDisplay.allCases) { display in
-                        Text(display.title).tag(display)
-                    }
-                }
-                LabeledContent("アイコン") {
-                    Image(nsImage: NotionTabIcon.image(for: NSAppearance(named: .darkAqua)!, size: 28))
-                }
-                Text(connection.tokenValid
-                     ? "オフにするとエージェントのタブ・通知・ポーリングを停止します。"
-                     : "有効にするには、通常の設定画面「Notion」でトークンの接続を確認してください。")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            Section("チャットの外観") {
-                Picker("チャットの外観", selection: $settings.data.notionAppearance) {
-                    ForEach(NotionAppearance.allCases) { appearance in
-                        Text(appearance.title).tag(appearance)
-                    }
-                }
-            }
+            NotionTabConnectionSettings(onOpenSettings: onOpenSettings)
             Section("Notionで開く") {
-                TextField("ベースURL（例: https://app.dev.notion.com）", text: $baseURLDraft)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit(saveBaseURL)
+                HStack {
+                    Text("ベース URL").fixedSize()
+                    TextField("ベース URL", text: $baseURLDraft,
+                              prompt: Text("https://app.dev.notion.com"))
+                        .labelsHidden()
+                        .accessibilityLabel("ベース URL")
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit(saveBaseURL)
+                }
                 HStack {
                     Button("適用", action: saveBaseURL)
                     Button("自動に戻す") {
@@ -1451,6 +1465,7 @@ struct NotionAgentsSettings: View {
                 Text("空欄の場合は会話URLをそのまま使い、URLがない会話では通常のNotionを開きます。")
                     .font(.caption).foregroundStyle(.secondary)
                 if let baseURLMessage { Text(baseURLMessage).font(.caption).foregroundStyle(.orange) }
+
             }
             Section("登録したエージェント") {
                 Text("NotionのURLまたはエージェントIDを入力します。登録したものだけを監視します。")
@@ -1486,6 +1501,7 @@ struct NotionAgentsSettings: View {
                     }.disabled(!connection.tokenValid || agents.isRefreshing || settings.data.notionSavedAgents.isEmpty)
                     if let activity = agents.activityText { Text(activity).font(.caption).foregroundStyle(.secondary) }
                 }
+
             }
             Section("名前で探す") {
                 Text("名前の一部を入力して検索します。結果は50件ずつ読み込みます。")
@@ -1514,8 +1530,36 @@ struct NotionAgentsSettings: View {
                         else { Text("次のページを探す") }
                     }.disabled(isSearching)
                 }
+
             }
-            Section("エージェントの通知") {
+            Section("表示") {
+                VStack(alignment: .leading, spacing: 2) {
+                    Toggle("Notionカスタムエージェントを使う", isOn: Binding(
+                        get: { settings.data.notionEnabled },
+                        set: { enabled in
+                            if !enabled || connection.tokenValid { settings.data.notionEnabled = enabled }
+                        }))
+                        .disabled(!connection.tokenValid && !settings.data.notionEnabled)
+                    Text(connection.tokenValid
+                         ? "オフにするとエージェントのタブ・通知・ポーリングを停止します。"
+                         : "有効にするには、通常の設定画面「Notion」でトークンの接続を確認してください。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Picker("タブの表示", selection: $settings.data.notionTabDisplay) {
+                    ForEach(NotionTabDisplay.allCases) { display in
+                        Text(display.title).tag(display)
+                    }
+                }
+                LabeledContent("アイコン") {
+                    Image(nsImage: NotionTabIcon.image(for: NSAppearance(named: .darkAqua)!, size: 28))
+                }
+
+                Picker("チャットの外観", selection: $settings.data.notionAppearance) {
+                    ForEach(NotionAppearance.allCases) { appearance in
+                        Text(appearance.title).tag(appearance)
+                    }
+                }
+
                 Toggle("返信・確認待ちをノッチで通知", isOn: $settings.data.notionNotificationsEnabled)
                 Picker("通知を閉じるまで", selection: $settings.data.notionNotificationDuration) {
                     ForEach([5, 10, 15, 30, 60], id: \.self) { seconds in
@@ -1523,12 +1567,17 @@ struct NotionAgentsSettings: View {
                     }
                 }
                 .disabled(!settings.data.notionNotificationsEnabled)
+
             }
             if let error = agents.error { Text(error).foregroundStyle(.red) }
         }
         .formStyle(.grouped)
         .onAppear {
+            #if DEBUG
+            if !CommandLine.arguments.contains("--agents=settings") { agents.start() }
+            #else
             agents.start()
+            #endif
             baseURLDraft = settings.data.notionBaseURL ?? ""
             if !connection.tokenValid { Task { await connection.verifySaved() } }
         }

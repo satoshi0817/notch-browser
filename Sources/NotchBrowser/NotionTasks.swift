@@ -45,7 +45,7 @@ enum NotionTaskRules {
     struct Checklist: Equatable {
         let loggedIn: Bool
         let databaseURL: Bool
-        var hint: String { loggedIn && databaseURL ? "ノッチにタスクのタブが表示されています" : "2つそろうと、ノッチにタスクのタブが表示されます" }
+        var hint: String { loggedIn && databaseURL ? "ノッチにタスクのタブが表示されています" : "データベースの URL を確認してください" }
     }
     static func checklist(tokenValid: Bool, checking: Bool, url: String, confirmedURL: String?) -> Checklist {
         .init(loggedIn: tokenValid && !checking, databaseURL: available(token: true, url: url, confirmedURL: confirmedURL))
@@ -60,6 +60,7 @@ enum NotionTaskRules {
         }
         return nil
     }
+    static func tabVisible(connected: Bool) -> Bool { connected }
     static func shouldAutoSelect(available: Bool, alreadySelected: Bool) -> Bool { available && !alreadySelected }
     static func available(token: Bool, url: String, confirmedURL: String?) -> Bool {
         token && confirmedURL == url && NotionDatabaseInput.id(from: url) != nil
@@ -291,7 +292,7 @@ extension NotionDatabaseAPI {
                     statusColor: index == 7 ? "green" : (index % 2 == 0 ? "gray" : "blue"))
             }
             name = "チームのタスク"
-            if state == "settings" || state == "sources" {
+            if state == "settings" || state == "tab-settings" || state == "sources" {
                 configuration.url = "https://notion.so/0123456789abcdef0123456789abcdef"
                 sources = [.init(id: "mock-source-1", name: "チームのタスク")]
                 if state == "sources" { sources.append(.init(id: "mock-source-2", name: "プロジェクト")) }
@@ -300,6 +301,7 @@ extension NotionDatabaseAPI {
                 properties = [.init(id: "status", name: "状態", type: "status"), .init(id: "due", name: "期日", type: "date")]
                 configuration.mapping = .automatic(properties)
             }
+            if state == "unconfigured" { configuration.url = ""; configuration.confirmedURL = nil; tasks = []; verified = false }
             if state == "error" { verified = false; message = "このデータベースが NotchBrowser に共有されていません" }
             if state == "settings-error" {
                 configuration.url = "https://notion.so/0123456789abcdef0123456789abcdef"

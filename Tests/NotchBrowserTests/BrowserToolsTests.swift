@@ -451,6 +451,7 @@ final class BrowserToolsTests: XCTestCase {
         settings.pinnedTabs = []
         store.data = settings
         let browser = BrowserViewController()
+        browser.notionConnection = .preview(connected: true)
         let panel = NotchPanel(contentRect: NSRect(x: 100, y: 100, width: 960, height: 660),
                                styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.contentView = browser.view

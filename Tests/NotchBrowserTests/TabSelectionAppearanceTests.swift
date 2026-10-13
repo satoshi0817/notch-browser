@@ -3,6 +3,57 @@ import XCTest
 @testable import NotchBrowser
 
 final class TabSelectionAppearanceTests: XCTestCase {
+
+    @MainActor
+    func testDisconnectRemovesBothNotionTabsAndRestoresPreviousBrowserTab() throws {
+        _ = NSApplication.shared
+        let settings = SettingsStore.shared
+        let saved = settings.data
+        defer { settings.data = saved }
+        settings.data.pinnedTabs = [PinnedTab(name: "Previous", url: "about:blank")]
+        settings.data.notionEnabled = true
+        for showTasks in [false, true] {
+            let connection = NotionConnectionStore.preview(connected: true)
+            let browser = BrowserViewController()
+            browser.notionConnection = connection
+            _ = browser.view
+            browser.newTab(nil)
+
+            func buttons() -> [NSButton] {
+                Array(sequence(first: [browser.view], next: { level in
+                    let children = level.flatMap(\.subviews)
+                    return children.isEmpty ? nil : children
+                }).flatMap { $0 }.compactMap { $0 as? NSButton })
+            }
+            let initiallySelected = try XCTUnwrap(buttons().first { $0 is TabButton && $0.state == .on })
+            let previousTag = initiallySelected.tag
+            let previousLabel = initiallySelected.accessibilityLabel()
+            // updateChrome rebuilds browser-tab buttons. Follow the same logical tab,
+            // rather than retaining a button that has been removed from the hierarchy.
+            func previousButton() throws -> NSButton {
+                try XCTUnwrap(buttons().first {
+                    $0 is TabButton && $0.tag == previousTag && $0.accessibilityLabel() == previousLabel
+                })
+            }
+            let tasks = try XCTUnwrap(buttons().first { $0.accessibilityLabel() == "タスク" })
+            let agents = try XCTUnwrap(buttons().first { $0.accessibilityLabel() == "Notionエージェント" })
+            // Test each overlay, including switching from agents to tasks before disconnecting.
+            browser.refreshTasksAvailability()
+            browser.showNotion()
+            if showTasks { browser.showTasks() }
+            XCTAssertEqual(try previousButton().state, .off)
+            connection.disconnect()
+            browser.refreshTasksAvailability()
+            XCTAssertEqual(try previousButton().state, .on)
+            XCTAssertEqual(tasks.state, .off)
+            XCTAssertEqual(agents.state, .off)
+            XCTAssertNil(tasks.superview)
+            XCTAssertNil(agents.superview)
+            XCTAssertEqual(buttons().filter { $0 is TabButton && $0.state == .on }.count, 1,
+                           "Only the previous browser tab must be selected after disconnect")
+        }
+    }
+
     @MainActor
     func testNotionSelectionReplacesPinnedTabHighlightAndRestoresItOnClose() throws {
         _ = NSApplication.shared
@@ -11,6 +62,7 @@ final class TabSelectionAppearanceTests: XCTestCase {
         defer { settings.data = saved }
         settings.data.notionEnabled = true
         let browser = BrowserViewController()
+        browser.notionConnection = .preview(connected: true)
         _ = browser.view
         func button(_ label: String) throws -> NSButton {
             let views = sequence(first: [browser.view], next: { level in
@@ -37,6 +89,7 @@ final class TabSelectionAppearanceTests: XCTestCase {
         settings.data.notionEnabled = true
         settings.data.notionTabDisplay = .iconAndTitle
         let browser = BrowserViewController()
+        browser.notionConnection = .preview(connected: true)
         _ = browser.view
         func notionButton() throws -> NSButton {
             let views = sequence(first: [browser.view], next: { level in
