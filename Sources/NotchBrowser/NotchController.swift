@@ -914,6 +914,7 @@ final class NotchManager: NSObject, NSWindowDelegate {
         let data = SettingsStore.shared.data
         calendar.isEnabled = data.countdownEnabled
         calendar.thresholdMinutes = data.countdownMinutes
+        calendar.longEventLimit = data.calendarLongEventLimit
     }
 
     /// Syncs notch windows with connected displays and their settings.

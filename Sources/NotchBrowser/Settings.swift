@@ -158,6 +158,21 @@ enum ToolbarAction: String, Codable, CaseIterable, Identifiable {
     static let defaults: [Self] = [.back, .forward, .home, .reload, .address, .keepOpen, .settings, .quit]
 }
 
+enum CalendarLongEventLimit: Int, Codable, CaseIterable {
+    case unlimited = 0
+    case twoHours = 2
+    case threeHours = 3
+    case fourHours = 4
+    case sixHours = 6
+    case eightHours = 8
+
+    var label: String { self == .unlimited ? "制限なし" : "\(rawValue)時間以上" }
+
+    func excludes(duration: TimeInterval) -> Bool {
+        self != .unlimited && duration >= TimeInterval(rawValue * 3600)
+    }
+}
+
 struct SettingsData: Codable {
     var shortcuts = ShortcutPreferences()
     var profiles = [Profile(id: Profile.defaultID, name: "デフォルト")]
@@ -175,6 +190,7 @@ struct SettingsData: Codable {
     var countdownEnabled = true
     var calendarMarqueeEnabled = true
     var countdownMinutes = 30
+    var calendarLongEventLimit = CalendarLongEventLimit.eightHours
     var openTabBehavior = OpenTabBehavior.lastViewed
     var grayscaleIcons = false
     /// With grayscale icons, still show the selected tab's icon in color.
@@ -222,6 +238,8 @@ struct SettingsData: Codable {
         countdownEnabled = try c.decodeIfPresent(Bool.self, forKey: .countdownEnabled) ?? fallback.countdownEnabled
         calendarMarqueeEnabled = try c.decodeIfPresent(Bool.self, forKey: .calendarMarqueeEnabled) ?? fallback.calendarMarqueeEnabled
         countdownMinutes = try c.decodeIfPresent(Int.self, forKey: .countdownMinutes) ?? fallback.countdownMinutes
+        calendarLongEventLimit = (try? c.decode(CalendarLongEventLimit.self, forKey: .calendarLongEventLimit))
+            ?? fallback.calendarLongEventLimit
         hideFromScreenCapture = try c.decodeIfPresent(Bool.self, forKey: .hideFromScreenCapture) ?? fallback.hideFromScreenCapture
         openTabBehavior = try c.decodeIfPresent(OpenTabBehavior.self, forKey: .openTabBehavior) ?? fallback.openTabBehavior
         grayscaleIcons = try c.decodeIfPresent(Bool.self, forKey: .grayscaleIcons) ?? fallback.grayscaleIcons

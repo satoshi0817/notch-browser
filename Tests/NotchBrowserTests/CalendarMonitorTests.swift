@@ -30,6 +30,87 @@ final class CalendarMonitorTests: XCTestCase {
         XCTAssertEqual(result.startTime, formatter.string(from: current.startDate))
     }
 
+    func testEightHourBoundarySkipsExactlyEightHours() throws {
+        XCTAssertNil(badge([event(start: 60, end: 60 + 8 * 3600)]))
+        let shorter = event(start: 60, end: 60 + 8 * 3600 - 60)
+        XCTAssertEqual(try XCTUnwrap(badge([shorter])).startDate, shorter.startDate)
+        XCTAssertNil(badge([event(start: -3600, end: 7 * 3600)]))
+    }
+
+    func testOverlappingLongAndShortEventsSelectShortEvent() throws {
+        let long = event(start: -600, end: 8 * 3600)
+        let short = event(start: -300, end: 600)
+        XCTAssertEqual(try XCTUnwrap(badge([long, short])).startDate, short.startDate)
+        let upcomingShort = event(start: 120, end: 600)
+        XCTAssertEqual(try XCTUnwrap(badge([event(start: 60, end: 9 * 3600), upcomingShort])).startDate,
+                       upcomingShort.startDate)
+    }
+
+    func testOngoingLongEventAllowsNextUpcomingEvent() throws {
+        let next = event(start: 120, end: 600)
+        XCTAssertEqual(try XCTUnwrap(badge([event(start: -3600, end: 7 * 3600), next])).startDate,
+                       next.startDate)
+    }
+
+    func testCrossMidnightEventsUseElapsedDuration() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
+        let midnight = calendar.startOfDay(for: now)
+        let lateNight = midnight.addingTimeInterval(23 * 3600)
+        let crossing = event(start: 0, end: 0)
+        crossing.startDate = lateNight
+        crossing.endDate = lateNight.addingTimeInterval(8 * 3600)
+        func selected() -> CalendarBadge? {
+            CalendarMonitor.badge(for: [crossing], now: lateNight.addingTimeInterval(-60),
+                                  upcomingEnd: lateNight.addingTimeInterval(1800))
+        }
+        XCTAssertNil(selected())
+        crossing.endDate = lateNight.addingTimeInterval(8 * 3600 - 60)
+        XCTAssertEqual(try XCTUnwrap(selected()).startDate, lateNight)
+    }
+
+    func testUnlimitedIncludesLongEventsButStillExcludesAllDayEvents() throws {
+        let starts: [TimeInterval] = [60, -3600]
+        for start in starts {
+            let long = event(start: start, end: start + 24 * 3600)
+            XCTAssertEqual(try XCTUnwrap(CalendarMonitor.badge(for: [long], now: now,
+                upcomingEnd: now.addingTimeInterval(1800), longEventLimit: .unlimited)).startDate, long.startDate)
+            long.isAllDay = true
+            XCTAssertNil(CalendarMonitor.badge(for: [long], now: now,
+                upcomingEnd: now.addingTimeInterval(1800), longEventLimit: .unlimited))
+        }
+    }
+
+    func testLongEventLimitDefaultsAndInvalidValuesFallBackWithoutLosingSettings() throws {
+        XCTAssertEqual(SettingsData().calendarLongEventLimit, .eightHours)
+        let invalidValues: [String?] = [nil, "null", "99", "-1", "\"8\"", "true", "[]", "{}", "2.5"]
+        for value in invalidValues {
+            let field = value.map { ",\"calendarLongEventLimit\":\($0)" } ?? ""
+            let data = Data("{\"countdownMinutes\":45\(field)}".utf8)
+            let settings = try JSONDecoder().decode(SettingsData.self, from: data)
+            XCTAssertEqual(settings.calendarLongEventLimit, .eightHours, "value: \(value ?? "missing")")
+            XCTAssertEqual(settings.countdownMinutes, 45)
+        }
+    }
+
+    func testLongEventLimitChoicesRoundTripAndApplyInclusiveThresholds() throws {
+        XCTAssertEqual(CalendarLongEventLimit.allCases.map(\.rawValue), [0, 2, 3, 4, 6, 8])
+        for limit in CalendarLongEventLimit.allCases {
+            var settings = SettingsData()
+            settings.calendarLongEventLimit = limit
+            let encoded = try JSONEncoder().encode(settings)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+            XCTAssertEqual(object["calendarLongEventLimit"] as? Int, limit.rawValue)
+            XCTAssertEqual(try JSONDecoder().decode(SettingsData.self, from: encoded).calendarLongEventLimit, limit)
+            guard limit != .unlimited else { continue }
+            let duration = TimeInterval(limit.rawValue * 3600)
+            XCTAssertNil(CalendarMonitor.badge(for: [event(start: 60, end: 60 + duration)], now: now,
+                upcomingEnd: now.addingTimeInterval(1800), longEventLimit: limit))
+            XCTAssertNotNil(CalendarMonitor.badge(for: [event(start: 60, end: duration)], now: now,
+                upcomingEnd: now.addingTimeInterval(1800), longEventLimit: limit))
+        }
+    }
+
     func testUpcomingStillUsesEarliestStart() throws {
         let next = event(start: 61, end: 600)
         let result = try XCTUnwrap(badge([event(start: 300, end: 900), next]))

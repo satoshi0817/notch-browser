@@ -32,6 +32,7 @@ final class CalendarMonitor {
         }
     }
     var thresholdMinutes = 30 { didSet { refresh() } }
+    var longEventLimit = CalendarLongEventLimit.eightHours { didSet { refresh() } }
 
     private let store = EKEventStore()
     private var timer: Timer?
@@ -68,7 +69,8 @@ final class CalendarMonitor {
             let now = Date()
             let end = now.addingTimeInterval(TimeInterval(thresholdMinutes * 60))
             let predicate = store.predicateForEvents(withStart: now, end: end, calendars: nil)
-            badge = Self.badge(for: store.events(matching: predicate), now: now, upcomingEnd: end)
+            badge = Self.badge(for: store.events(matching: predicate), now: now, upcomingEnd: end,
+                               longEventLimit: longEventLimit)
         }
 
         if lastValue != .some(badge) {
@@ -77,9 +79,11 @@ final class CalendarMonitor {
         }
     }
 
-    static func badge(for events: [EKEvent], now: Date, upcomingEnd: Date) -> CalendarBadge? {
+    static func badge(for events: [EKEvent], now: Date, upcomingEnd: Date,
+                      longEventLimit: CalendarLongEventLimit = .eightHours) -> CalendarBadge? {
         let candidates = events.filter {
             !$0.isAllDay && $0.endDate > now && $0.startDate <= upcomingEnd && !isDeclined($0)
+                && !longEventLimit.excludes(duration: $0.endDate.timeIntervalSince($0.startDate))
         }
         let current = candidates.filter { $0.startDate <= now }.min { $0.startDate < $1.startDate }
         let next = current ?? candidates.min { $0.startDate < $1.startDate }

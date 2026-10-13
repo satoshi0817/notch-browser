@@ -425,6 +425,27 @@ struct GeneralSettings: View {
                 }
                 .disabled(!store.data.countdownEnabled)
                 .opacity(store.data.countdownEnabled ? 1 : 0.5)
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("長い予定を表示しない")
+                        Text("終日の予定はいつも表示しません")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    // Form の Picker 専用配置を避け、Stepper と同じ行末へ
+                    // 値側のポップアップを自然幅で右寄せする。
+                    Picker("長い予定を表示しない", selection: $store.data.calendarLongEventLimit) {
+                        ForEach(CalendarLongEventLimit.allCases, id: \.self) { limit in
+                            Text(limit.label).tag(limit)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .fixedSize()
+                }
+                // ラベルを含む行全体に適用し、オフ時は dim と操作不可を揃える。
+                .disabled(!store.data.countdownEnabled)
+                .opacity(store.data.countdownEnabled ? 1 : 0.5)
                 Text("Mac の「カレンダー」アプリの予定を使うため、オンのときだけカレンダーへのアクセスを求めます。タブで開くカレンダーのサイトとは別です。Google カレンダーは システム設定 › インターネットアカウント で追加できます。")
                     .font(.caption).foregroundStyle(.secondary)
             }
