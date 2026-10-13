@@ -49,10 +49,18 @@ struct NotionSettingsView: View {
     var body: some View {
         Form {
             Section("Notion接続") {
-                SecureField("内部インテグレーションのトークン", text: $tokenDraft)
+                HStack(alignment: .firstTextBaseline, spacing: NotionSettingsFieldLayout.spacing) {
+                    Text("内部インテグレーションのトークン")
+                        .frame(width: NotionSettingsFieldLayout.labelWidth, alignment: .leading)
+                    SecureField("", text: $tokenDraft)
                     .textFieldStyle(.roundedBorder)
+                    .labelsHidden()
+                    .frame(maxWidth: .infinity)
                     .accessibilityLabel("Notionのトークン")
                     .onSubmit { Task { await saveToken() } }
+                    Color.clear.frame(width: NotionSettingsFieldLayout.actionWidth, height: 0)
+                        .accessibilityHidden(true)
+                }
                 HStack {
                     Button {
                         Task { await saveToken() }
@@ -83,6 +91,7 @@ struct NotionSettingsView: View {
                 Text("トークンはMacのキーチェーンに保存します。エージェントを有効にするには、Notionへの接続を確認します。")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            NotionTasksSettings()
             Section("データベースの更新通知") {
                 Toggle("データベース更新をノッチで通知", isOn: $settings.data.notionDatabaseNotificationsEnabled)
                 Picker("通知を閉じるまで", selection: $settings.data.notionDatabaseNotificationDuration) {

@@ -90,7 +90,7 @@ struct NotionDatabaseAPI {
     let token: String
     var fetch: (URLRequest) async throws -> (Data, URLResponse) = { try await URLSession.shared.data(for: $0) }
 
-    private func request(_ path: String, body: [String: Any]? = nil, query: [URLQueryItem] = []) async throws -> [String: Any] {
+    func request(_ path: String, body: [String: Any]? = nil, query: [URLQueryItem] = []) async throws -> [String: Any] {
         guard !token.isEmpty else { throw NotionAPIError.missingToken }
         var components = URLComponents(string: "https://api.notion.com/v1/\(path)")!
         components.queryItems = query.isEmpty ? nil : query

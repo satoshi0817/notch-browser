@@ -13,6 +13,9 @@ final class NotionAgentsCache {
         return NotionAgentsCache(url: support.appendingPathComponent("NotchBrowser/NotionAgentsCache.json"))
     }()
 
+    // Multiple stores can share this cache. Keep merging and JSON encoding in
+    // the same critical section; locking only the file write leaves dictionaries racing.
+    private let lock = NSRecursiveLock()
     private let url: URL
     private var snapshot: Snapshot
     private var lastSavedData: Data?
@@ -25,15 +28,18 @@ final class NotionAgentsCache {
     }
 
     func threads(for agentID: String) -> [NotionThread] {
-        snapshot.threadsByAgent[agentID] ?? []
+        lock.lock(); defer { lock.unlock() }
+        return snapshot.threadsByAgent[agentID] ?? []
     }
 
     func messages(for threadID: String) -> [NotionMessage] {
-        snapshot.messagesByThread[threadID] ?? []
+        lock.lock(); defer { lock.unlock() }
+        return snapshot.messagesByThread[threadID] ?? []
     }
 
     @discardableResult
     func rememberThreads(_ fetched: [NotionThread], agentID: String) -> [NotionThread] {
+        lock.lock(); defer { lock.unlock() }
         var seen = Set<String>()
         let merged = (fetched + threads(for: agentID)).filter { seen.insert($0.id).inserted }
         snapshot.threadsByAgent[agentID] = Array(merged.prefix(200))
@@ -44,6 +50,7 @@ final class NotionAgentsCache {
 
     @discardableResult
     func rememberMessages(_ fetched: [NotionMessage], agentID: String, threadID: String) -> [NotionMessage] {
+        lock.lock(); defer { lock.unlock() }
         var seen = Set<String>()
         let merged = (fetched + messages(for: threadID)).filter { seen.insert($0.id).inserted }
         snapshot.messagesByThread[threadID] = Array(NotionMessage.oldestFirst(merged).suffix(500))
@@ -53,6 +60,7 @@ final class NotionAgentsCache {
     }
 
     func retainAgents(_ agentIDs: Set<String>) {
+        lock.lock(); defer { lock.unlock() }
         snapshot.threadsByAgent = snapshot.threadsByAgent.filter { agentIDs.contains($0.key) }
         snapshot.threadOwners = snapshot.threadOwners.filter { agentIDs.contains($0.value) }
         snapshot.messagesByThread = snapshot.messagesByThread.filter { snapshot.threadOwners[$0.key] != nil }
@@ -60,6 +68,7 @@ final class NotionAgentsCache {
     }
 
     func clear() {
+        lock.lock(); defer { lock.unlock() }
         snapshot = Snapshot()
         lastSavedData = nil
         try? FileManager.default.removeItem(at: url)

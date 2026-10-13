@@ -37,11 +37,30 @@ final class NotionConnectionStore: ObservableObject {
     @Published private(set) var isChecking = false
     @Published private(set) var message: String?
 
-    var hasStoredToken: Bool { NotionTokenStore.read() != nil }
+    var hasStoredToken: Bool {
+        #if DEBUG
+        if previewMock { return true }
+        #endif
+        return NotionTokenStore.read() != nil
+    }
 
-    private init() {}
+    #if DEBUG
+    private var previewMock = false
+    #endif
+    private init() {
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["NOTCH_TASKS_MOCK"] != nil || CommandLine.arguments.contains(where: { $0.hasPrefix("--tasks=") }) {
+            previewMock = true
+            tokenValid = true
+            message = "トークンを確認しました"
+        }
+        #endif
+    }
 
     func verifySaved() async {
+        #if DEBUG
+        if previewMock { tokenValid = true; return }
+        #endif
         guard !isChecking else { return }
         guard let token = NotionTokenStore.read() else {
             tokenValid = false; message = nil
@@ -69,6 +88,9 @@ final class NotionConnectionStore: ObservableObject {
 
     @discardableResult
     func save(_ raw: String) async -> Bool {
+        #if DEBUG
+        if previewMock { tokenValid = true; return true }
+        #endif
         let token = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !token.isEmpty, !isChecking else { return false }
         isChecking = true
@@ -80,6 +102,7 @@ final class NotionConnectionStore: ObservableObject {
                 message = "トークンをキーチェーンに保存できませんでした。"; return false
             }
             NotionAgentsStore.shared.storedTokenChanged()
+            await NotionTasksStore.shared.connectionChanged()
             tokenValid = true
             message = "トークンを確認しました"
             return true
@@ -90,6 +113,9 @@ final class NotionConnectionStore: ObservableObject {
     }
 
     func disconnect() {
+        #if DEBUG
+        if previewMock { tokenValid = false; message = nil; return }
+        #endif
         guard NotionTokenStore.save("") else {
             message = "キーチェーンの接続情報を削除できませんでした。"; return
         }
@@ -97,5 +123,6 @@ final class NotionConnectionStore: ObservableObject {
         message = nil
         SettingsStore.shared.data.notionEnabled = false
         NotionAgentsStore.shared.storedTokenChanged()
+        Task { @MainActor in NotionTasksStore.shared.connectionChanged() }
     }
 }

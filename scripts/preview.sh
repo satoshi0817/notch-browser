@@ -9,7 +9,7 @@ cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/NotchBrowser.icns "$APP/Contents/Resources/"
 SOURCES=(Sources/NotchBrowser/*.swift)
 SOURCES=(${SOURCES:#Sources/NotchBrowser/main.swift})
-swiftc -o "$APP/Contents/MacOS/NotchBrowser" "${SOURCES[@]}" scripts/DesignPreview.swift
+swiftc -D DEBUG -o "$APP/Contents/MacOS/NotchBrowser" "${SOURCES[@]}" scripts/DesignPreview.swift
 codesign --force --sign - "$APP"
 cat > build/preview-page.html <<'HTML'
 <!doctype html><meta charset="utf-8"><title>Preview workspace</title>

@@ -23,6 +23,7 @@ struct DesignPreview {
             PinnedTab(name: "ドキュメント", url: fixture.absoluteString, icon: .symbol("doc.text"), profileID: profile.id),
             PinnedTab(name: "チーム", url: fixture.absoluteString, icon: .symbol("bubble.left.and.bubble.right"), profileID: profile.id)
         ]
+        if CommandLine.arguments.contains("--no-pinned") { data.pinnedTabs = [] }
         for screen in NSScreen.screens { data.displays[screen.displayUUID] = DisplaySettings(enabled: screen == NSScreen.screens.first, width: CommandLine.arguments.contains("--compact") ? 600 : 960, height: 660) }
         SettingsStore.shared.data = data
         let manager = NotchManager(shelfStore: ShelfStore(file: fixture.deletingLastPathComponent().appendingPathComponent("preview-shelf.json")))
@@ -65,6 +66,18 @@ struct DesignPreview {
         if CommandLine.arguments.contains("--shelf") { manager.showShelf() }
         if let onboarding {
             DispatchQueue.main.async { onboarding.present() }
+        } else if CommandLine.arguments.contains(where: { $0.hasPrefix("--tasks=") }) {
+            DispatchQueue.main.async {
+                #if DEBUG
+                if CommandLine.arguments.contains("--tasks=settings-error") {
+                    settings.present(section: .notion)
+                    return
+                }
+                #endif
+                if CommandLine.arguments.contains("--tasks=settings") || CommandLine.arguments.contains("--tasks=sources") {
+                    settings.present(section: .notion)
+                } else { manager.browser.showTasks() }
+            }
         } else if CommandLine.arguments.contains("--notion-panel") {
             DispatchQueue.main.async { manager.showNotion() }
         } else if CommandLine.arguments.contains("--settings") || CommandLine.arguments.contains("--notion-settings") {
