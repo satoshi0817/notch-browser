@@ -8,17 +8,20 @@ struct NotionTaskSource: Codable, Identifiable, Hashable {
 struct NotionTaskMapping: Codable, Equatable {
     var status: String?
     var due: String?
-    var assignee: String?
     static func automatic(_ properties: [NotionDatabaseProperty]) -> Self {
         .init(status: properties.first { $0.type == "status" }?.name,
-              due: properties.first { $0.type == "date" }?.name,
-              assignee: properties.first { $0.type == "people" }?.name)
+              due: properties.first { $0.type == "date" }?.name)
     }
 }
-struct NotionTaskPerson: Codable, Identifiable, Hashable {
-    let id: String
-    let name: String
-    let avatar: URL?
+enum NotionTaskStatusCategory: String, Codable, CaseIterable {
+    case notStarted, inProgress, complete
+    var symbol: String {
+        switch self {
+        case .notStarted: "circle.fill"
+        case .inProgress: "circle.lefthalf.filled"
+        case .complete: "checkmark"
+        }
+    }
 }
 struct NotionTask: Codable, Identifiable, Hashable {
     let id: String
@@ -28,10 +31,12 @@ struct NotionTask: Codable, Identifiable, Hashable {
     let completed: Bool
     let due: Date?
     let edited: Date
-    let people: [NotionTaskPerson]
+    var statusCategory: NotionTaskStatusCategory? = nil
+    var statusColor: String? = nil
+    var category: NotionTaskStatusCategory { statusCategory ?? (completed ? .complete : .notStarted) }
 }
 enum NotionTaskFilter: String, CaseIterable {
-    case incomplete = "未完了", mine = "自分の担当", all = "すべて"
+    case incomplete = "未完了", all = "すべて"
 }
 enum NotionTaskGroup: String, CaseIterable {
     case overdue = "期限切れ", today = "今日", upcoming = "これから", undated = "期日なし"
@@ -75,9 +80,8 @@ enum NotionTaskRules {
         if calendar.isDate(due, inSameDayAs: now) { return .today }
         return due < calendar.startOfDay(for: now) ? .overdue : .upcoming
     }
-    static func rows(_ tasks: [NotionTask], filter: NotionTaskFilter, userID: String?, calendar: Calendar = .current) -> [NotionTask] {
-        tasks.filter { filter == .all || (filter == .incomplete && !$0.completed) ||
-            (filter == .mine && userID != nil && $0.people.contains { $0.id == userID }) }
+    static func rows(_ tasks: [NotionTask], filter: NotionTaskFilter, calendar: Calendar = .current) -> [NotionTask] {
+        tasks.filter { filter == .all || !$0.completed }
         .sorted {
             let left = $0.due.map { calendar.startOfDay(for: $0) } ?? .distantFuture
             let right = $1.due.map { calendar.startOfDay(for: $0) } ?? .distantFuture
@@ -156,7 +160,7 @@ extension NotionDatabaseAPI {
         guard !parsed.isEmpty else { throw NotionAPIError.invalidResponse }
         return .init(name: NotionDatabaseValue.text(["type": "title", "title": raw["title"] ?? []]), sources: parsed)
     }
-    func taskSchema(_ id: String, statusName: String?) async throws -> ([NotionDatabaseProperty], Set<String>) {
+    func taskSchema(_ id: String, statusName: String?) async throws -> ([NotionDatabaseProperty], Set<String>, [String: NotionTaskStatusCategory]) {
         let raw = try await request("data_sources/\(id)")
         let properties = raw["properties"] as? [String: [String: Any]] ?? [:]
         let schema = properties.compactMap { name, value -> NotionDatabaseProperty? in
@@ -168,9 +172,14 @@ extension NotionDatabaseAPI {
         let groups = status["groups"] as? [[String: Any]] ?? []
         // Status schemas order the groups as To-do, In progress, Complete.
         let ids = groups.last?["option_ids"] as? [String] ?? []
-        return (schema, Set(ids))
+        var categories: [String: NotionTaskStatusCategory] = [:]
+        for (index, group) in groups.enumerated() {
+            let category: NotionTaskStatusCategory = index == groups.count - 1 ? .complete : (index == 0 ? .notStarted : .inProgress)
+            for id in group["option_ids"] as? [String] ?? [] { categories[id] = category }
+        }
+        return (schema, Set(ids), categories)
     }
-    func tasks(source: String, mapping: NotionTaskMapping, completedIDs: Set<String>) async throws -> [NotionTask] {
+    func tasks(source: String, mapping: NotionTaskMapping, completedIDs: Set<String>, categories: [String: NotionTaskStatusCategory] = [:]) async throws -> [NotionTask] {
         var cursor: String?
         var tasks: [NotionTask] = []
         repeat {
@@ -183,17 +192,14 @@ extension NotionDatabaseAPI {
                 let properties = page["properties"] as? [String: [String: Any]] ?? [:]
                 let status = (mapping.status.flatMap { properties[$0] }?["status"] as? [String: Any]) ?? [:]
                 let date = (mapping.due.flatMap { properties[$0] }?["date"] as? [String: Any])?["start"] as? String
-                let people = mapping.assignee.flatMap { properties[$0] }?["people"] as? [[String: Any]] ?? []
                 tasks.append(.init(id: id,
                     title: properties.values.first { $0["type"] as? String == "title" }.map(NotionDatabaseValue.text) ?? "無題",
                     url: (page["url"] as? String).flatMap(URL.init(string:)), status: status["name"] as? String ?? "",
                     completed: completedIDs.contains(status["id"] as? String ?? ""),
                     due: date.flatMap(NotionTaskRules.parseDate),
                     edited: (page["last_edited_time"] as? String).flatMap(NotionMessage.parseDate) ?? .distantPast,
-                    people: people.compactMap { person in
-                        guard let id = person["id"] as? String, let name = person["name"] as? String, !name.isEmpty else { return nil }
-                        return .init(id: id, name: name, avatar: (person["avatar_url"] as? String).flatMap(URL.init(string:)))
-                    }))
+                    statusCategory: categories[status["id"] as? String ?? ""],
+                    statusColor: status["color"] as? String))
             }
             cursor = raw["has_more"] as? Bool == true ? raw["next_cursor"] as? String : nil
         } while cursor != nil
@@ -230,7 +236,6 @@ extension NotionDatabaseAPI {
         var mapping = NotionTaskMapping()
         var mappedSource: String?
         var autoSelected = false
-        var viewerID: String?
     }
     struct Cache: Codable {
         let url: String
@@ -258,11 +263,6 @@ extension NotionDatabaseAPI {
     @Published var filter: NotionTaskFilter { didSet { if !mock { defaults.set(filter.rawValue, forKey: "notionTasks.filter") } } }
     private var mock = false
     var available: Bool { NotionTaskRules.available(token: mock || tokenProvider() != nil, url: configuration.url, confirmedURL: configuration.confirmedURL) }
-    var canShowPeople: Bool { tasks.contains { !$0.people.isEmpty } }
-    var people: [NotionTaskPerson] {
-        Dictionary(grouping: tasks.flatMap(\.people), by: \.id).values.compactMap(\.first)
-            .sorted { $0.name == $1.name ? $0.id < $1.id : $0.name < $1.name }
-    }
     var isMock: Bool { mock }
     var mockState: String?
     init(defaults: UserDefaults = .standard, tokenProvider: @escaping () -> String? = { NotionTokenStore.read() },
@@ -285,11 +285,11 @@ extension NotionDatabaseAPI {
             let now = Date()
             tasks = state == "empty" ? [] : (0..<8).map { index in
                 .init(id: "mock-\(index)", title: ["デザインを確認する", "次のリリースを準備", "チームのタスクを整理"][index % 3],
-                    url: URL(string: "https://www.notion.so"), status: index == 7 ? "完了" : "進行中", completed: index == 7,
+                    url: URL(string: "https://www.notion.so"), status: index == 7 ? "完了" : (index % 2 == 0 ? "未着手" : "進行中"), completed: index == 7,
                     due: index == 6 ? nil : Calendar.current.date(byAdding: .day, value: index - 2, to: now), edited: now,
-                    people: [.init(id: "me", name: "田中", avatar: nil)])
+                    statusCategory: index == 7 ? .complete : (index % 2 == 0 ? .notStarted : .inProgress),
+                    statusColor: index == 7 ? "green" : (index % 2 == 0 ? "gray" : "blue"))
             }
-            configuration.viewerID = "me"
             name = "チームのタスク"
             if state == "settings" || state == "sources" {
                 configuration.url = "https://notion.so/0123456789abcdef0123456789abcdef"
@@ -297,11 +297,8 @@ extension NotionDatabaseAPI {
                 if state == "sources" { sources.append(.init(id: "mock-source-2", name: "プロジェクト")) }
                 configuration.source = sources.first?.id
                 verified = true
-                properties = [.init(id: "status", name: "状態", type: "status"), .init(id: "due", name: "期日", type: "date"), .init(id: "people", name: "担当者", type: "people")]
+                properties = [.init(id: "status", name: "状態", type: "status"), .init(id: "due", name: "期日", type: "date")]
                 configuration.mapping = .automatic(properties)
-            }
-            if state == "no-people" {
-                tasks = tasks.map { .init(id: $0.id, title: $0.title, url: $0.url, status: $0.status, completed: $0.completed, due: $0.due, edited: $0.edited, people: []) }
             }
             if state == "error" { verified = false; message = "このデータベースが NotchBrowser に共有されていません" }
             if state == "settings-error" {
@@ -315,6 +312,9 @@ extension NotionDatabaseAPI {
             }
         }
         #endif
+        if !mock, defaults.string(forKey: "notionTasks.filter") == "自分の担当" {
+            defaults.set(NotionTaskFilter.incomplete.rawValue, forKey: "notionTasks.filter")
+        }
     }
     private func loadCache() {
         let cache = defaults.data(forKey: "notionTasks.cache.v1").flatMap { try? JSONDecoder().decode(Cache.self, from: $0) }
@@ -370,9 +370,9 @@ extension NotionDatabaseAPI {
             guard let source = NotionTaskRules.selectedSource(configuration.source, sources: database.sources) else { throw NotionAPIError.invalidResponse }
             let needsMapping = remap || source != configuration.mappedSource
             name = database.name; sources = database.sources; configuration.source = source
-            let (schema, completed) = try await api.taskSchema(source, statusName: needsMapping ? nil : configuration.mapping.status)
+            let (schema, completed, categories) = try await api.taskSchema(source, statusName: needsMapping ? nil : configuration.mapping.status)
             let mapping = needsMapping ? NotionTaskMapping.automatic(schema) : configuration.mapping
-            let fetched = try await api.tasks(source: source, mapping: mapping, completedIDs: completed)
+            let fetched = try await api.tasks(source: source, mapping: mapping, completedIDs: completed, categories: categories)
             guard source == configuration.source, input == configuration.url, token == tokenProvider() else { return }
             properties = schema; configuration.mapping = mapping; configuration.mappedSource = source
             tasks = fetched; message = nil; verified = true

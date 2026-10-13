@@ -5,9 +5,11 @@ struct NotionConnectionAPI {
     let token: String
     var fetch: (URLRequest) async throws -> (Data, URLResponse) = { try await URLSession.shared.data(for: $0) }
 
-    private func get(_ path: String) async throws -> (Data, HTTPURLResponse) {
+    private func search(_ path: String) async throws -> (Data, HTTPURLResponse) {
         var request = URLRequest(url: URL(string: "https://api.notion.com/v1/\(path)")!)
-        request.httpMethod = "GET"
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = Data(#"{"page_size":1}"#.utf8)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("2025-09-03", forHTTPHeaderField: "Notion-Version")
         let (data, response) = try await fetch(request)
@@ -22,9 +24,9 @@ struct NotionConnectionAPI {
 
     func verify() async throws {
         guard !token.isEmpty else { throw NotionAPIError.missingToken }
-        let (userData, _) = try await get("users/me")
-        guard let user = try JSONSerialization.jsonObject(with: userData) as? [String: Any],
-              user["object"] as? String == "user", user["id"] as? String != nil else {
+        let (data, _) = try await search("search")
+        guard let result = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              result["object"] as? String == "list", result["results"] is [[String: Any]] else {
             throw NotionAPIError.invalidResponse
         }
     }

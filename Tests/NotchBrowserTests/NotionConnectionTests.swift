@@ -12,14 +12,17 @@ final class NotionConnectionTests: XCTestCase {
         var paths: [String] = []
         let api = NotionConnectionAPI(token: "secret", fetch: { request in
             XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer secret")
+            XCTAssertEqual(request.httpMethod, "POST")
+            let body = try JSONSerialization.jsonObject(with: request.httpBody!) as! [String: Any]
+            XCTAssertEqual(body["page_size"] as? Int, 1)
             paths.append(request.url!.path)
-            if request.url?.path == "/v1/users/me" {
-                return self.response(request, status: 200, body: #"{"object":"user","id":"user-1"}"#)
+            if request.url?.path == "/v1/search" {
+                return self.response(request, status: 200, body: #"{"object":"list","results":[]}"#)
             }
             return self.response(request, status: 403, body: #"{"message":"Agent listing forbidden"}"#)
         })
         try await api.verify()
-        XCTAssertEqual(paths, ["/v1/users/me"])
+        XCTAssertEqual(paths, ["/v1/search"])
     }
 
     func testInvalidTokenIsRejected() async {
@@ -36,9 +39,9 @@ final class NotionConnectionTests: XCTestCase {
         }
     }
 
-    func testMalformedBotUserIsRejected() async {
+    func testMalformedSearchResponseIsRejected() async {
         let api = NotionConnectionAPI(token: "secret", fetch: { request in
-            self.response(request, status: 200, body: #"{"object":"list","results":[]}"#)
+            self.response(request, status: 200, body: #"{"object":"list"}"#)
         })
         do {
             try await api.verify()

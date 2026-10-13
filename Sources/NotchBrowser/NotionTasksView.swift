@@ -61,17 +61,6 @@ enum NotionSettingsFieldLayout {
             DisclosureGroup("プロパティの設定") {
                 mappingPicker("状態", type: "status", selection: $store.configuration.mapping.status)
                 mappingPicker("期日", type: "date", selection: $store.configuration.mapping.due)
-                mappingPicker("担当者", type: "people", selection: $store.configuration.mapping.assignee)
-                if store.canShowPeople {
-                    Picker("自分の担当者名", selection: $store.configuration.viewerID) {
-                        Text("選択してください").tag(Optional<String>.none)
-                        ForEach(store.people) {
-                            Text($0.name).tag(Optional($0.id))
-                        }
-                    }
-                    Text("内部インテグレーションでは利用者を判別できないため、自分の名前を選択してください。")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
                 Button("適用して更新") { Task { await store.refresh() } }
             }
         }
@@ -96,9 +85,6 @@ enum NotionSettingsFieldLayout {
     var openingID = UUID()
     @ObservedObject private var store = NotionTasksStore.shared
     @State private var selected: NotionTask?
-    private var effectiveFilter: NotionTaskFilter {
-        store.filter == .mine && !store.canShowPeople ? .incomplete : store.filter
-    }
     var body: some View {
         GeometryReader { geometry in
             HStack(spacing: 0) {
@@ -135,8 +121,8 @@ enum NotionSettingsFieldLayout {
     private var list: some View {
         VStack(spacing: 0) {
             HStack {
-                Picker("表示", selection: Binding(get: { effectiveFilter }, set: { store.filter = $0 })) {
-                    ForEach(NotionTaskFilter.allCases.filter { $0 != .mine || store.canShowPeople }, id: \.self) {
+                Picker("表示", selection: $store.filter) {
+                    ForEach(NotionTaskFilter.allCases, id: \.self) {
                         Text($0.rawValue).tag($0)
                     }
                 }.pickerStyle(.segmented)
@@ -144,7 +130,7 @@ enum NotionSettingsFieldLayout {
                     .disabled(store.refreshing).help("更新")
             }.padding()
             if let message = store.message { Text(message).font(.caption).foregroundStyle(.red).padding(.horizontal) }
-            let rows = NotionTaskRules.rows(store.tasks, filter: effectiveFilter, userID: store.configuration.viewerID)
+            let rows = NotionTaskRules.rows(store.tasks, filter: store.filter)
             if rows.isEmpty {
                 Spacer()
                 Text(emptyMessage).foregroundStyle(.secondary).multilineTextAlignment(.center).padding()
@@ -158,7 +144,9 @@ enum NotionSettingsFieldLayout {
                                 Text(group.rawValue).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                                     .padding(.horizontal, 12).padding(.top, 16).padding(.bottom, 5)
                                 ForEach(items) { task in
-                                    Button { selected = task } label: { row(task) }.buttonStyle(.plain)
+                                    row(task)
+                                        .contentShape(Rectangle())
+                                        .onTapGesture { selected = task }
                                     Divider()
                                 }
                             }
@@ -169,40 +157,44 @@ enum NotionSettingsFieldLayout {
         }
     }
     private var emptyMessage: String {
-        if effectiveFilter == .mine && store.configuration.viewerID == nil { return "設定の「プロパティの設定」で自分の担当者名を選択してください" }
-        return effectiveFilter == .incomplete ? "未完了のタスクはありません" : "タスクはありません"
+        return store.filter == .incomplete ? "未完了のタスクはありません" : "タスクはありません"
+    }
+    private func taskColor(_ task: NotionTask) -> Color {
+        switch task.statusColor {
+        case "brown": .brown
+        case "orange": .orange
+        case "yellow": .yellow
+        case "green": .green
+        case "blue": .blue
+        case "purple": .purple
+        case "pink": .pink
+        case "red": .red
+        case "gray", "default": .secondary
+        default:
+            switch task.category {
+            case .notStarted: .secondary
+            case .inProgress: .blue
+            case .complete: .green
+            }
+        }
     }
     private func row(_ task: NotionTask) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: task.completed ? "checkmark.circle.fill" : "circle").foregroundStyle(task.completed ? .green : .secondary)
+            Image(systemName: task.category.symbol)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(taskColor(task)).frame(width: 16)
+                .accessibilityLabel(task.status)
             Text(task.title).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
-            if store.canShowPeople {
-                HStack(spacing: -6) {
-                    ForEach(Array(task.people.prefix(2))) { person in
-                        NotionTaskAvatar(person: person).help(person.name)
-                    }
-                }.frame(width: 38, alignment: .trailing)
-            }
+            Text(task.status).font(.system(size: 10)).lineLimit(1).padding(.horizontal, 4).padding(.vertical, 3)
+                .foregroundStyle(taskColor(task))
+                .background(taskColor(task).opacity(0.12), in: RoundedRectangle(cornerRadius: 4))
+                .frame(maxWidth: 64, alignment: .trailing)
             Text(task.due.map { NotionTaskRules.dateLabel($0) } ?? "").font(.caption).monospacedDigit()
                 .foregroundStyle(NotionTaskRules.group(task, now: Date(), calendar: .current) == .overdue ? Color.orange : Color.secondary)
                 .frame(width: 46, alignment: .trailing)
-            Text(task.status).font(.system(size: 10)).lineLimit(1).padding(4)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 4))
-                .frame(width: 64, alignment: .trailing)
         }.padding(.horizontal, 12).frame(height: 36)
             .background(selected?.id == task.id ? Color.accentColor.opacity(0.12) : .clear)
     }
-}
-private struct NotionTaskAvatar: View {
-    let person: NotionTaskPerson
-    var body: some View {
-        Group {
-            if let url = person.avatar {
-                AsyncImage(url: url) { image in image.resizable().scaledToFill() } placeholder: { initials }
-            } else { initials }
-        }.frame(width: 22, height: 22).clipShape(Circle())
-    }
-    private var initials: some View { Text(String(person.name.prefix(1))).font(.caption).frame(maxWidth: .infinity, maxHeight: .infinity).background(Color.accentColor.opacity(0.15)) }
 }
 @MainActor private struct NotionTaskDetail: View {
     let task: NotionTask
@@ -220,9 +212,6 @@ private struct NotionTaskAvatar: View {
                 Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 10) {
                     GridRow { Text("状態").foregroundStyle(.secondary); Text(task.status) }
                     GridRow { Text("期日").foregroundStyle(.secondary); Text(task.due.map { NotionTaskRules.dateLabel($0) } ?? "—") }
-                    if NotionTasksStore.shared.canShowPeople {
-                        GridRow { Text("担当者").foregroundStyle(.secondary); Text(task.people.map(\.name).joined(separator: ", ")) }
-                    }
                 }
                 Divider()
                 if loading {

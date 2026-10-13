@@ -133,8 +133,8 @@ final class NotionTasksTests: XCTestCase {
         XCTAssertTrue(blocks.contains { $0.type == "to_do" })
     }
     #endif
-    private func task(_ id: String, due: Date? = nil, edited: Date = .distantPast, completed: Bool = false, people: [NotionTaskPerson] = []) -> NotionTask {
-        .init(id: id, title: id, url: nil, status: "", completed: completed, due: due, edited: edited, people: people)
+    private func task(_ id: String, due: Date? = nil, edited: Date = .distantPast, completed: Bool = false) -> NotionTask {
+        .init(id: id, title: id, url: nil, status: "", completed: completed, due: due, edited: edited)
     }
     func testDatabaseURLIgnoresViewAndOtherQueryParameters() {
         let id = "0123456789abcdef0123456789abcdef"
@@ -152,7 +152,7 @@ final class NotionTasksTests: XCTestCase {
             .init(id: "c", name: "Other State", type: "status"),
             .init(id: "d", name: "Deadline", type: "date"),
             .init(id: "e", name: "Owner", type: "people")]
-        XCTAssertEqual(NotionTaskMapping.automatic(schema), .init(status: "State", due: "Deadline", assignee: "Owner"))
+        XCTAssertEqual(NotionTaskMapping.automatic(schema), .init(status: "State", due: "Deadline"))
         XCTAssertEqual(NotionTaskMapping.automatic([]), NotionTaskMapping())
     }
     func testGroupsAndSortByDayThenLastEditedDescending() throws {
@@ -170,21 +170,53 @@ final class NotionTasksTests: XCTestCase {
         XCTAssertEqual(NotionTaskRules.group(new, now: now, calendar: calendar), .today)
         XCTAssertEqual(NotionTaskRules.group(future, now: now, calendar: calendar), .upcoming)
         XCTAssertEqual(NotionTaskRules.group(undated, now: now, calendar: calendar), .undated)
-        XCTAssertEqual(NotionTaskRules.rows([old, undated, new, future, overdue], filter: .all, userID: nil, calendar: calendar).map(\.id),
+        XCTAssertEqual(NotionTaskRules.rows([old, undated, new, future, overdue], filter: .all, calendar: calendar).map(\.id),
                        ["overdue", "new", "old", "future", "undated"])
         XCTAssertEqual(NotionTaskRules.dateLabel(morning, now: now, calendar: calendar), "今日")
         XCTAssertEqual(NotionTaskRules.dateLabel(future.due!, now: now, calendar: calendar), "明日")
         XCTAssertEqual(NotionTaskRules.dateLabel(morning.addingTimeInterval(7 * 86400), now: now, calendar: calendar), "10/20")
     }
-    func testFiltersIncludeCompletedOnlyWhenRequestedAndUsePersonID() {
-        let person = NotionTaskPerson(id: "me", name: "同じ名前", avatar: nil)
-        let other = NotionTaskPerson(id: "other", name: "同じ名前", avatar: nil)
-        let tasks = [task("a", people: [person]), task("b", completed: true, people: [person]), task("c", people: [other])]
-        XCTAssertEqual(NotionTaskRules.rows(tasks, filter: .incomplete, userID: nil).map(\.id), ["a", "c"])
-        XCTAssertEqual(NotionTaskRules.rows(tasks, filter: .mine, userID: "me").map(\.id), ["a", "b"])
-        XCTAssertEqual(NotionTaskRules.rows(tasks, filter: .all, userID: nil).count, 3)
-        XCTAssertTrue(NotionTaskRules.rows(tasks, filter: .mine, userID: nil).isEmpty)
+    func testFiltersIncludeCompletedOnlyWhenRequested() {
+        let tasks = [task("a"), task("b", completed: true), task("c")]
+        XCTAssertEqual(NotionTaskFilter.allCases, [.incomplete, .all])
+        XCTAssertEqual(NotionTaskRules.rows(tasks, filter: .incomplete).map(\.id), ["a", "c"])
+        XCTAssertEqual(NotionTaskRules.rows(tasks, filter: .all).count, 3)
     }
+    @MainActor func testLegacyMineFilterMigratesAndPersistsIncomplete() throws {
+        let suite = "notion-filter-migration-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertEqual(NotionTasksStore(defaults: defaults).filter, .incomplete)
+        defaults.set("自分の担当", forKey: "notionTasks.filter")
+        XCTAssertEqual(NotionTasksStore(defaults: defaults).filter, .incomplete)
+        XCTAssertEqual(defaults.string(forKey: "notionTasks.filter"), "未完了")
+        XCTAssertEqual(NotionTasksStore(defaults: defaults).filter, .incomplete)
+    }
+    func testLegacyTaskAndMappingDecodeWithoutUserFields() throws {
+        let data = Data(#"{"id":"old","title":"Old","status":"Done","completed":true,"edited":0,"people":[{"id":"person","name":"Name"}]}"#.utf8)
+        let restored = try JSONDecoder().decode(NotionTask.self, from: data)
+        XCTAssertEqual(restored.category, .complete)
+        let mapping = try JSONDecoder().decode(NotionTaskMapping.self, from: Data(#"{"status":"State","due":"Date","assignee":"Owner"}"#.utf8))
+        XCTAssertEqual(mapping, .init(status: "State", due: "Date"))
+        let encoded = try XCTUnwrap(String(data: JSONEncoder().encode(restored), encoding: .utf8))
+        XCTAssertFalse(encoded.contains("people"))
+    }
+    func testCategorySymbolsAreNotCheckboxes() {
+        XCTAssertEqual(NotionTaskStatusCategory.notStarted.symbol, "circle.fill")
+        XCTAssertEqual(NotionTaskStatusCategory.inProgress.symbol, "circle.lefthalf.filled")
+        XCTAssertEqual(NotionTaskStatusCategory.complete.symbol, "checkmark")
+    }
+    #if DEBUG
+    @MainActor func testMocksIncludeEveryStatusCategoryAndTwoFilters() {
+        for state in ["list", "detail", "no-people", "sources", "settings"] {
+            let store = NotionTasksStore(previewState: state)
+            XCTAssertEqual(store.filter, .incomplete)
+            XCTAssertEqual(Set(store.tasks.map(\.category)), Set(NotionTaskStatusCategory.allCases))
+            XCTAssertTrue(store.tasks.allSatisfy { $0.statusColor != nil })
+            XCTAssertFalse(store.properties.contains { $0.type == "people" })
+        }
+    }
+    #endif
     func testTabRequiresBothConnectionAndDatabaseURL() {
         let url = "https://notion.so/0123456789abcdef0123456789abcdef"
         XCTAssertTrue(NotionTaskRules.available(token: true, url: url, confirmedURL: url))
@@ -265,16 +297,39 @@ final class NotionTasksTests: XCTestCase {
         }
         let db = try await api.taskDatabase("db")
         XCTAssertEqual(db.name, "Tasks")
-        let (schema, complete) = try await api.taskSchema(db.sources[0].id, statusName: nil)
-        let tasks = try await api.tasks(source: "source", mapping: .automatic(schema), completedIDs: complete)
+        let (schema, complete, categories) = try await api.taskSchema(db.sources[0].id, statusName: nil)
+        let tasks = try await api.tasks(source: "source", mapping: .automatic(schema), completedIDs: complete, categories: categories)
         XCTAssertEqual(tasks.map(\.id), ["a", "b"])
         XCTAssertTrue(tasks.allSatisfy(\.completed))
+        XCTAssertTrue(tasks.allSatisfy { $0.category == .complete })
+        XCTAssertEqual(categories["open"], .notStarted)
+        XCTAssertEqual(categories["done"], .complete)
         XCTAssertFalse(recorder.paths.contains { $0.contains("blocks") })
         let blocks = try await api.taskBlocks("page")
         XCTAssertEqual(blocks.map(\.id), ["child", "nested", "last"])
         XCTAssertEqual(blocks.map(\.depth), [0, 1, 0])
         _ = try await api.taskBlocks("page")
         XCTAssertEqual(recorder.paths.filter { $0 == "/v1/blocks/child/children" }.count, 2, "Reopening must refetch expiring image URLs")
+    }
+    func testStatusCategoriesUseSchemaIDsAndColorsUsePageStatus() async throws {
+        let api = NotionDatabaseAPI(token: "test") { request in
+            let json: String
+            if request.url!.path == "/v1/data_sources/source" {
+                json = #"{"properties":{"State":{"id":"s","type":"status","status":{"groups":[{"name":"Custom A","option_ids":["todo"]},{"name":"Custom B","option_ids":["active"]},{"name":"Custom C","option_ids":["done"]}]}}}}"#
+            } else {
+                XCTAssertEqual(request.url!.path, "/v1/data_sources/source/query")
+                json = #"{"results":[{"id":"task","properties":{"State":{"type":"status","status":{"id":"active","name":"Review","color":"purple"}}}}],"has_more":false}"#
+            }
+            return (Data(json.utf8), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+        }
+        let (schema, completed, categories) = try await api.taskSchema("source", statusName: nil)
+        XCTAssertEqual(categories, ["todo": .notStarted, "active": .inProgress, "done": .complete])
+        XCTAssertEqual(completed, ["done"])
+        let tasks = try await api.tasks(source: "source", mapping: .automatic(schema), completedIDs: completed, categories: categories)
+        let task = try XCTUnwrap(tasks.first)
+        XCTAssertEqual(task.category, .inProgress)
+        XCTAssertEqual(task.statusColor, "purple")
+        XCTAssertFalse(task.completed)
     }
     func test429RetriesReadOnlyQuery() async throws {
         final class Counter { var value = 0 }
