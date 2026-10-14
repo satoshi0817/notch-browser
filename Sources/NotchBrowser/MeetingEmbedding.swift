@@ -147,18 +147,18 @@ struct MeetingEmbeddingTable {
         guard rows > 0, dimensions > 0, !overflow, !byteOverflow, data.count == bytes, scale.isFinite else { throw MeetingModelError.invalidEmbedding }
         self.data = data; self.rows = rows; self.dimensions = dimensions; self.scale = scale
     }
-    func inputValues(tokens: [Int], length: Int, pad: Int = MeetingModelManifest.pad) throws -> [Float16] {
+    func inputValues(tokens: [Int], length: Int, pad: Int = MeetingModelManifest.pad) throws -> [UInt16] {
         guard length >= tokens.count, length <= MeetingModelManifest.sequenceLength, pad >= 0, pad < rows,
               tokens.allSatisfy({ $0 >= 0 && $0 < rows }) else { throw MeetingModelError.invalidEmbedding }
-        var values: [Float16] = []; values.reserveCapacity(length * dimensions)
+        var values: [UInt16] = []; values.reserveCapacity(length * dimensions)
         try data.withUnsafeBytes { raw in
             for index in 0..<length {
                 let token = index < tokens.count ? tokens[index] : pad
                 for dimension in 0..<dimensions {
                     let offset = (token * dimensions + dimension) * 2
                     let bf16 = raw.loadUnaligned(fromByteOffset: offset, as: UInt16.self).littleEndian
-                    let value = Float16(Float(bitPattern: UInt32(bf16) << 16) * scale)
-                    guard value.isFinite else { throw MeetingModelError.invalidEmbedding }
+                    let value = MeetingFP16.bits(Float(bitPattern: UInt32(bf16) << 16) * scale)
+                    guard MeetingFP16.isFinite(value) else { throw MeetingModelError.invalidEmbedding }
                     values.append(value)
                 }
             }
@@ -234,11 +234,11 @@ actor CoreMLMeetingEmbeddingProvider: MeetingEmbeddingProvider {
         let values = try table.inputValues(tokens: tokens, length: length)
         let embeds = try MLMultiArray(shape: [1, NSNumber(value: length), 512], dataType: .float16)
         let mask = try MLMultiArray(shape: [1, NSNumber(value: length)], dataType: .float16)
-        let buffer = embeds.dataPointer.bindMemory(to: Float16.self, capacity: values.count)
+        let buffer = embeds.dataPointer.bindMemory(to: UInt16.self, capacity: values.count)
         for index in values.indices { buffer[index] = values[index] }
-        let maskBuffer = mask.dataPointer.bindMemory(to: Float16.self, capacity: length)
+        let maskBuffer = mask.dataPointer.bindMemory(to: UInt16.self, capacity: length)
         for index in 0..<length {
-            maskBuffer[index] = index < tokens.count ? 1 : 0
+            maskBuffer[index] = index < tokens.count ? 0x3c00 : 0x0000 // fp16 1 / 0
         }
         let inputs = try MLDictionaryFeatureProvider(dictionary: [MeetingModelManifest.inputEmbeddings: embeds, MeetingModelManifest.attentionMask: mask])
         let result = try await model.prediction(from: inputs)

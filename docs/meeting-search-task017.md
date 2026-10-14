@@ -47,6 +47,14 @@ notes_readyの要約・メモだけを文に分割して保存する。画像・
 
 ## 推論経路
 
+### universalビルドのfp16修正
+
+Intel macOSではSwiftのFloat16型が利用できないため、本番コードはMeetingFP16でFloatのIEEE 754ビット列をUInt16のbinary16へ変換する。丸めは最近接・偶数丸め。符号付きゼロ、非正規数、通常数の仮数繰り上がり、オーバーフロー、inf / NaNを処理する。BF16の行をFloatに復元して√512倍する順序は維持し、MLMultiArray(.float16)のメモリへUInt16ビット列を書き込む。attention_maskの1は0x3c00、0は0x0000。不正な埋め込み値は従来通り拒否する。
+
+変換テストを5件追加（arm64で5件、IntelではネイティブFloat16との比較テストを除く4件）。arm64専用の参照テスト以外はSwiftのFloat16型を使用しない。別の独立検証プログラムをワークツリー内で実行し、全65536種類のBF16×√512と全31743個の有限fp16区間に対する中点・前後値・正負のネイティブ変換との一致を確認した（不一致0）。
+
+arm64 / x86_64のswift build -c releaseはSwiftPMのマニフェストコンパイル時のサンドボックス拒否で停止した。SDK・ワークツリー内のmodule cacheを明示した両tripleのRelease型チェックは成功し、全テストコードの型チェックも両tripleで成功した。テストメソッド数はarm64で予定402件、Intelではarm64専用の比較を除いて予定401件で、SwiftPMによる全件実行は未実施。Git操作・配布用アプリの変更は行っていない。実Core MLモデルのIntel上での推論は未検証。
+
 `tokenizer.json` に書かれたBPE語彙・マージ順位、byte fallback、normalizer、pre_tokenizer、added_tokens、TemplateProcessingを読み取る。BOS/EOSの追加位置はファイルのテンプレートに従う。BOS=2 / EOS=1 / PAD=0。特殊トークンを含め最大512トークンに切り詰め、トークン数以上の最小の固定長（32 / 48 / 64 / 128 / 256 / 512）を選び、`MLModelConfiguration.functionName = embed_<S>` で読み込む。
 
 `embeddings.bf16` をメモリマップし、262144行×512次元のlittle-endian BF16からトークンIDの行を取り出す。値を√512倍してfp16に変換し、`inputs_embeds [1,S,512]` と `attention_mask [1,S]`（実トークン1・右パディング0）を渡す。パディングにはPAD=0の行を使う。読み込む関数の入出力shapeと入力dtypeを検証する。出力 `embedding [1,768]` の先頭256次元を取り、L2再正規化する。

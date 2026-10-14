@@ -357,7 +357,7 @@ final class MeetingSearchTests: XCTestCase {
         let data = Data([0x00, 0x00, 0x80, 0x3f, 0x00, 0x40, 0x80, 0xbf]) // [0, 1], [2, -1]
         let table = try MeetingEmbeddingTable(data: data, rows: 2, dimensions: 2)
         let values = try table.inputValues(tokens: [1], length: 2)
-        XCTAssertEqual(values.map(Float.init), [45.25, -22.625, 0, 22.625])
+        XCTAssertEqual(values, [0x51a8, 0xcda8, 0x0000, 0x4da8]) // 45.25, -22.625, 0, 22.625
         XCTAssertThrowsError(try table.inputValues(tokens: [2], length: 1))
         XCTAssertThrowsError(try table.inputValues(tokens: [-1], length: 1))
         XCTAssertThrowsError(try table.inputValues(tokens: [1, 1], length: 1))
