@@ -167,32 +167,82 @@ struct MeetingEmbeddingTable {
     }
 }
 
-actor CoreMLMeetingEmbeddingProvider: MeetingEmbeddingProvider {
+actor CoreMLMeetingEmbeddingProvider: MeetingStagedEmbeddingProvider {
     nonisolated let identity = MeetingModelManifest.identity
     private var compiledURL: URL?
     private var models: [Int: MLModel] = [:]
     private var tokenizer: MeetingGemmaTokenizer?
     private var table: MeetingEmbeddingTable?
     private let directory: URL
-    init(directory: URL? = nil) {
+    init(directory: URL? = nil, timeouts: MeetingPreparationTimeouts = .init(), clock: any MeetingPreparationClock = MeetingSystemClock()) {
+        self.timeouts = timeouts; self.clock = clock
         self.directory = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("NotchBrowser/meeting-search/model/" + MeetingModelManifest.revision)
     }
-    func prepare() async throws {
+    private var timeouts = MeetingPreparationTimeouts()
+    private var clock: any MeetingPreparationClock = MeetingSystemClock()
+    private var cpuAndGPU = false
+    private let compilation = MeetingCompileCoordinator<(URL, MLModel, Bool)>()
+    func resetForRetry() async {
+        guard !(await compilation.isRunning) else { return }
+        compiledURL = nil; models.removeAll(); tokenizer = nil; table = nil; cpuAndGPU = false
+    }
+    func prepare() async throws { try await prepare(report: { _ in }) }
+    func prepare(report: @escaping @Sendable (MeetingPreparationState) async -> Void) async throws {
+        MeetingSearchLog.logger.info("preparation start")
         guard #available(macOS 15, *) else { throw MeetingModelError.unsupported }
         guard MeetingModelManifest.configured else { throw MeetingModelError.unconfigured }
         if compiledURL != nil { return }
+        let directory = self.directory; let timeouts = self.timeouts; let clock = self.clock
+        try await Self.downloadFiles(directory: directory, timeouts: timeouts, clock: clock, report: report)
+        MeetingSearchLog.logger.info("download end")
+        await report(.compile)
+        MeetingSearchLog.logger.info("vocabulary start")
+        let resources = try await meetingWithTimeout(seconds: timeouts.vocabulary, clock: clock, stage: .vocabulary) {
+            let tokenizer = try MeetingGemmaTokenizer(data: Data(contentsOf: directory.appendingPathComponent(MeetingModelManifest.tokenizerPath)))
+            let table = try MeetingEmbeddingTable(data: Data(contentsOf: directory.appendingPathComponent(MeetingModelManifest.embeddingsPath), options: .mappedIfSafe))
+            return (tokenizer, table)
+        }
+        MeetingSearchLog.logger.info("vocabulary end; compile start")
+        let compiledLocation = MeetingCompiledLocation()
+        let prepared = try await compilation.run(timeouts: timeouts, clock: clock, waiting: { await report(.compileWaiting) }) { fallback in
+            let compiled: URL
+            if let existing = compiledLocation.get() { compiled = existing }
+            else {
+                compiled = try await MLModel.compileModel(at: directory.appendingPathComponent(MeetingModelManifest.packagePath))
+                compiledLocation.set(compiled)
+            }
+            let first = try Self.loadModel(compiled: compiled, length: 32, cpuAndGPU: fallback)
+            return (compiled, first, fallback)
+        }
+        try Task.checkCancellation()
+        self.tokenizer = resources.0; self.table = resources.1
+        compiledURL = prepared.0; models = [32: prepared.1]; cpuAndGPU = prepared.2
+        MeetingSearchLog.logger.info("compile end")
+    }
+    private static func downloadFiles(directory: URL, timeouts: MeetingPreparationTimeouts, clock: any MeetingPreparationClock,
+                                      report: @escaping @Sendable (MeetingPreparationState) async -> Void) async throws {
+        let total = Int64(MeetingModelManifest.artifacts.reduce(0) { $0 + $1.size })
+        var downloaded: Int64 = 0
+        await report(.download(bytes: 0, total: total))
+        MeetingSearchLog.logger.info("download start")
         for artifact in MeetingModelManifest.artifacts {
             let destination = directory.appendingPathComponent(artifact.path)
             try Task.checkCancellation()
-            if FileManager.default.fileExists(atPath: destination.path) {
-                try MeetingModelManifest.requireVerifiedFile(destination, artifact: artifact)
+            if try meetingReuseVerifiedFile(destination, artifact: artifact) {
+                downloaded += Int64(artifact.size)
+                await report(.download(bytes: downloaded, total: total))
                 continue
             }
-            let (download, response) = try await URLSession.shared.download(from: MeetingModelManifest.downloadURL(artifact))
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let base = downloaded
+            let downloader = MeetingModelDownload(destination: directory.appendingPathComponent(UUID().uuidString + ".download"), filename: artifact.path) { bytes in
+                await report(.download(bytes: base + bytes, total: total))
+            }
+            let download = try await downloader.start(url: MeetingModelManifest.downloadURL(artifact), timeouts: timeouts, clock: clock)
             defer { try? FileManager.default.removeItem(at: download) }
-            guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw MeetingModelError.checksum }
             try MeetingModelManifest.requireVerifiedFile(download, artifact: artifact)
+            try Task.checkCancellation()
             try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
             let staging = destination.deletingLastPathComponent().appendingPathComponent(UUID().uuidString + ".download")
             try FileManager.default.copyItem(at: download, to: staging)
@@ -200,20 +250,16 @@ actor CoreMLMeetingEmbeddingProvider: MeetingEmbeddingProvider {
             if FileManager.default.fileExists(atPath: destination.path) {
                 _ = try FileManager.default.replaceItemAt(destination, withItemAt: staging)
             } else { try FileManager.default.moveItem(at: staging, to: destination) }
+            downloaded += Int64(artifact.size)
+            await report(.download(bytes: downloaded, total: total))
         }
-        // Recheck every file immediately before compilation/loading.
         for artifact in MeetingModelManifest.artifacts {
             try MeetingModelManifest.requireVerifiedFile(directory.appendingPathComponent(artifact.path), artifact: artifact)
         }
-        let tokenizer = try MeetingGemmaTokenizer(data: Data(contentsOf: directory.appendingPathComponent(MeetingModelManifest.tokenizerPath)))
-        let table = try MeetingEmbeddingTable(data: Data(contentsOf: directory.appendingPathComponent(MeetingModelManifest.embeddingsPath), options: .mappedIfSafe))
-        let compiled = try await MLModel.compileModel(at: directory.appendingPathComponent(MeetingModelManifest.packagePath))
-        let first = try loadModel(compiled: compiled, length: 32)
-        self.tokenizer = tokenizer; self.table = table; models = [32: first]; compiledURL = compiled
     }
     @available(macOS 15, *)
-    private func loadModel(compiled: URL, length: Int) throws -> MLModel {
-        let configuration = MLModelConfiguration(); configuration.computeUnits = .all; configuration.functionName = "embed_\(length)"
+    private static func loadModel(compiled: URL, length: Int, cpuAndGPU: Bool) throws -> MLModel {
+        let configuration = MLModelConfiguration(); configuration.computeUnits = cpuAndGPU ? .cpuAndGPU : .all; configuration.functionName = "embed_\(length)"
         let model = try MLModel(contentsOf: compiled, configuration: configuration)
         let inputs = model.modelDescription.inputDescriptionsByName
         let embedding = inputs[MeetingModelManifest.inputEmbeddings]?.multiArrayConstraint
@@ -226,23 +272,31 @@ actor CoreMLMeetingEmbeddingProvider: MeetingEmbeddingProvider {
     func embedding(_ text: String, isQuery: Bool) async throws -> [Float] {
         guard #available(macOS 15, *) else { throw MeetingModelError.unsupported }
         guard let compiledURL, let tokenizer, let table else { throw MeetingModelError.invalidEmbedding }
-        let tokens = try tokenizer.encode((isQuery ? identity.queryPrefix : identity.documentPrefix) + text, limit: MeetingModelManifest.sequenceLength)
-        let length = MeetingModelManifest.functionLength(tokenCount: tokens.count)
-        let model: MLModel
-        if let existing = models[length] { model = existing }
-        else { model = try loadModel(compiled: compiledURL, length: length); models[length] = model }
-        let values = try table.inputValues(tokens: tokens, length: length)
-        let embeds = try MLMultiArray(shape: [1, NSNumber(value: length), 512], dataType: .float16)
-        let mask = try MLMultiArray(shape: [1, NSNumber(value: length)], dataType: .float16)
-        let buffer = embeds.dataPointer.bindMemory(to: UInt16.self, capacity: values.count)
-        for index in values.indices { buffer[index] = values[index] }
-        let maskBuffer = mask.dataPointer.bindMemory(to: UInt16.self, capacity: length)
-        for index in 0..<length {
-            maskBuffer[index] = index < tokens.count ? 0x3c00 : 0x0000 // fp16 1 / 0
+        let identity = self.identity; let existingModels = models; let cpuAndGPU = self.cpuAndGPU
+        MeetingSearchLog.logger.debug("embedding start")
+        let result = try await meetingWithTimeout(seconds: timeouts.embedding, clock: clock, stage: .embedding) {
+            let tokens = try tokenizer.encode((isQuery ? identity.queryPrefix : identity.documentPrefix) + text, limit: MeetingModelManifest.sequenceLength)
+            let length = MeetingModelManifest.functionLength(tokenCount: tokens.count)
+            let model: MLModel
+            if let existing = existingModels[length] { model = existing }
+            else { model = try Self.loadModel(compiled: compiledURL, length: length, cpuAndGPU: cpuAndGPU) }
+            let values = try table.inputValues(tokens: tokens, length: length)
+            let embeds = try MLMultiArray(shape: [1, NSNumber(value: length), 512], dataType: .float16)
+            let mask = try MLMultiArray(shape: [1, NSNumber(value: length)], dataType: .float16)
+            let buffer = embeds.dataPointer.bindMemory(to: UInt16.self, capacity: values.count)
+            for index in values.indices { buffer[index] = values[index] }
+            let maskBuffer = mask.dataPointer.bindMemory(to: UInt16.self, capacity: length)
+            for index in 0..<length {
+                maskBuffer[index] = index < tokens.count ? 0x3c00 : 0x0000 // fp16 1 / 0
+            }
+            let inputs = try MLDictionaryFeatureProvider(dictionary: [MeetingModelManifest.inputEmbeddings: embeds, MeetingModelManifest.attentionMask: mask])
+            let result = try await model.prediction(from: inputs)
+            guard let output = result.featureValue(for: MeetingModelManifest.output)?.multiArrayValue, output.count == 768 else { throw MeetingModelError.invalidEmbedding }
+            return (MeetingSearchRanking.normalized((0..<output.count).map { output[$0].floatValue }), length, model)
         }
-        let inputs = try MLDictionaryFeatureProvider(dictionary: [MeetingModelManifest.inputEmbeddings: embeds, MeetingModelManifest.attentionMask: mask])
-        let result = try await model.prediction(from: inputs)
-        guard let output = result.featureValue(for: MeetingModelManifest.output)?.multiArrayValue, output.count == 768 else { throw MeetingModelError.invalidEmbedding }
-        return MeetingSearchRanking.normalized((0..<output.count).map { output[$0].floatValue })
+        try Task.checkCancellation()
+        models[result.1] = result.2
+        MeetingSearchLog.logger.debug("embedding end")
+        return result.0
     }
 }

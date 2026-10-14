@@ -98,7 +98,7 @@ final class NotionMeetingsHostingView: NSHostingView<NotionMeetingsPanel> {
             if ["detail", "progress", "empty-tabs"].contains(store.mockState ?? "") { selected = store.meetings.first }
             if let state = searchPreview {
                 search.preview(state: state.rawValue, meetings: store.meetings)
-                if state != .list && state != .preparing {
+                if state != .list && !state.isPreparation {
                     searchInput.edit(state == .empty ? "先月の採用" : state == .typing ? "リリース" : "先月のリリース")
                     if state == .typing { searchFocused = true }
                     parsedQuery = .parse(query)
@@ -178,7 +178,17 @@ final class NotionMeetingsHostingView: NSHostingView<NotionMeetingsPanel> {
                             .allowsHitTesting(!query.isEmpty)
                     }.frame(minWidth: 0, maxWidth: .infinity)
             }
-            if search.supported && search.preparing { Text(search.progressLabel).font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 12).padding(.bottom, 6) }
+            if search.supported && (search.preparing || search.preparation == .failed) {
+                HStack {
+                    Text(search.progressLabel).font(.caption).foregroundStyle(.secondary)
+                    if search.preparation == .failed {
+                        Button("再試行") { Task { await search.retry() } }
+                            .buttonStyle(.plain).foregroundStyle(.blue).font(.caption)
+                    }
+                    Spacer()
+                }.frame(height: MeetingPreparationLayout.rowHeight)
+                    .padding(.horizontal, 12).padding(.bottom, 6)
+            }
             if !query.isEmpty, let range = parsedQuery.range {
                 HStack {
                     HStack(spacing: 6) {

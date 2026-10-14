@@ -110,3 +110,75 @@ r2の018統合前には最適化Release実行ファイルを `.build/NotchBrowse
 mkdir -p .build/tmp
 TMPDIR="$PWD/.build/tmp" swift test
 ```
+## 017b: 準備進捗・期限・再試行
+
+`MeetingSearchStore.preparation` は idle → download → compile → ingest → ready、エラー時は failed を公開する。download は取得済みの実バイト＋SHA-256検証済みの再利用ファイルのサイズを、全6ファイル合計 **584,748,275 bytes** で割った整数パーセント。遅れて届くdownload通知でcompileに戻ったり、パーセントが減ったりしない。
+
+- download: 「意味検索を準備中・モデルをダウンロード中 32%」
+- compile（tokenizer/語彙読み込みを含む）: 「意味検索を準備中・初回の準備中（数分かかります）」
+- ingest: 「意味検索を準備中・12/48件」
+- failed: 灰色「意味検索を準備できませんでした」＋「再試行」。再試行はモデルのメモリ状態をリセットし、最初から開始する。ディスク上のモデルファイルはサイズ＋内容SHA-256を再検証し、合格したファイルだけ再利用する。
+
+018の本文取得からsummary+notesを先に取り込むので、準備中・失敗中も文字一致検索を利用できる。文字起こし・画像はインデックスに含めない。macOS 15未満では従来どおり文字一致検索のみ。
+
+`MeetingPreparationTimeouts` の初期値は、stall60秒、compile/モデル読み込み300秒（各試行）、tokenizer/語彙読み込み120秒、各embedding60秒、各Notion本文取得60秒。provider/storeにtimeoutsと`MeetingPreparationClock`を注入できる。ダウンロード全体の期限は削除した。増加した受信バイト通知ごとにstall期限を更新し、最後の増加から60秒間進捗がない場合だけタイムアウトとする。HTTP/通信エラーや検証不一致は通常の失敗。不正なキャッシュファイルは削除し、不足ファイルとともに同じ準備処理で取り直す。
+
+ダウンロードと検証、コンパイル、tokenizer/語彙読み込み、embedding（関数の遅延読み込みを含む）はMainActor外で実行する。コンパイル/初回モデル読み込みは`MeetingCompileCoordinator`が実行中Taskを1つだけ保持し、同時リクエストも同じTaskを待つ。300秒は待機表示へ切り替える期限で、Core MLを停止したとみなす期限ではない。期限切れ時はcompileWaiting「意味検索を準備中・初回の準備の完了を待っています」と表示して文字一致検索を継続し、別のコンパイルやcpuAndGPU読み込みを開始しない。遅れて成功すれば自動でingest → readyに進む。実際に終了して失敗した場合だけ、コンパイル済みURLがあれば再利用して`.cpuAndGPU`で順次再読み込みする。こちらも期限切れ後は同じ実行の完了を待ち、実際の失敗後にfailedとなる。再試行/resetも実行中のコンパイルを破棄しない。embeddingなど他の処理は従来どおり期限切れの結果を破棄する。
+
+失敗時の「再試行」は詳細の「Notion で開く」と同じ青いテキストリンクの見た目（plainスタイル、背景/枠なし）。download/compile/compileWaiting/ingest/failedは同じHStackを使い、`MeetingPreparationLayout.rowHeight = 18pt`と下余白6ptを共有する。失敗状態だけが一覧を押し下げる差をなくした。
+
+Loggerはsubsystem `com.satoshi0817.NotchBrowser`、category `meeting-search`。各段階の開始・終了・失敗、ファイル名と受信バイト数のみを記録する。議事録本文、検索語、認証値、任意のエラー本文は記録しない。
+
+017b追加テスト22件（初版18件から今回4件増、017bの旧タイムアウト期待値も今回仕様へ修正）。追加ケースは同時コンパイル要求の共有、サイズ/SHA-256検証済みファイルのみ再利用、共通行高、遅いコンパイル成功後の自動ready復帰。017bの既存ケースではフェイクclockを2200秒進めながら55秒ごとの進捗で継続すること、stall、期限切れ後の非重複待機、遅い失敗後だけ順次フォールバックを検証する。既存018/017テストは変更しない。フェイクprovider/clockを使用し、実モデルをダウンロードしない。
+
+DEBUG DesignPreview（新しい4状態、既存引数も維持）:
+
+```sh
+./scripts/preview.sh --defaults-suite=task017b-download --notion-connection=connected --select-tab=meetings --meeting-search=preparing-download
+./scripts/preview.sh --defaults-suite=task017b-compile --notion-connection=connected --select-tab=meetings --meeting-search=preparing-compile
+./scripts/preview.sh --defaults-suite=task017b-ingest --notion-connection=connected --select-tab=meetings --meeting-search=preparing-ingest
+./scripts/preview.sh --defaults-suite=task017b-failed --notion-connection=connected --select-tab=meetings --meeting-search=preparing-failed
+```
+
+プレビューの状態名・固定32%/12/48の値・モック本文は`#if DEBUG`内。Releaseには含めない。実モデルのネットワーク取得、Core MLの実機でのcompile/フォールバック、GUI表示はこの作業では未検証。
+
+検証: DEBUG本体、全テストコード、DesignPreview、およびarm64/x86_64のRelease構成の型チェックは成功。`TMPDIR="$PWD/.build/tmp" swift test` はワークツリー外のモジュールキャッシュ書き込みで停止。キャッシュをワークツリー内に指定した再実行も `sandbox-exec: sandbox_apply: Operation not permitted` でマニフェスト評価が停止し、テスト実行は0件。権限昇格やsandbox設定変更は行っていない。
+
+### Logger全呼び出し監査（017b修正）
+
+SourcesとscriptsのLogger生成/呼び出しを検索。生成1箇所、ログ呼び出し17箇所で、すべてmeeting-search Loggerを使用する。動的な段階名は任意Stringから固定値の`MeetingSearchLogStage` enumへ変更し、本文/題名/検索語を段階名として渡せないようにした。動的値は固定段階名・ピン留めmanifest由来のファイル名・受信バイト数だけで、すべて明示的に`.public`。例外本文、URL、会議ID、本文、題名、検索語、トークンはログに渡さない。
+
+| ファイル / 呼び出し | 記録内容 | 動的値とprivacy |
+| --- | --- | --- |
+| MeetingSearchPreparation / Logger生成 | subsystem/categoryの固定文字列 | なし |
+| MeetingSearchPreparation / timeout開始 | 段階名 + start | 固定enum rawValue: public |
+| MeetingSearchPreparation / timeout終了 | 段階名 + end | 固定enum rawValue: public |
+| MeetingSearchPreparation / timeout失敗 | 段階名 + failed | 固定enum rawValue: public。例外本文なし |
+| MeetingSearchPreparation / compile期限 | compile deadline; waiting for active operation | なし |
+| MeetingSearchPreparation / fallback開始 | compile finished with failure; retrying cpuAndGPU | なし |
+| MeetingSearchPreparation / 受信進捗 | download、ファイル名、受信バイト数 | manifest由来のファイル名: public、Int64バイト数: public |
+| MeetingEmbedding / prepare開始 | preparation start | なし |
+| MeetingEmbedding / download終了 | download end | なし |
+| MeetingEmbedding / vocabulary開始 | vocabulary start | なし |
+| MeetingEmbedding / vocabulary終了・compile開始 | vocabulary end; compile start | なし |
+| MeetingEmbedding / compile終了 | compile end | なし |
+| MeetingEmbedding / download開始 | download start | なし |
+| MeetingEmbedding / embedding開始 | embedding start | なし（埋め込む文章なし） |
+| MeetingEmbedding / embedding終了 | embedding end | なし |
+| MeetingSearch / ingest開始 | ingest start | なし |
+| MeetingSearch / ingest終了 | ingest end | なし |
+| MeetingSearch / prepare失敗 | preparation failed | なし（例外本文なし） |
+
+Release監査: `MeetingSearchPreviewState`全体、4つのpreparing-*リテラルを使うstore.preview、Viewのプレビュー分岐は`#if DEBUG`内。新しいcompileWaitingは実運用の状態/文言であり、プレビューのリテラルではない。既存DEBUG起動引数は維持した。
+
+今回の再検証: DEBUG本体、全テストコード、DesignPreview、arm64/x86_64のRelease構成の型チェックは成功。DEBUGを指定しない全ソースのSIL生成も成功し、preparing-download/compile/ingest/failedのstring_literalは0件だった。実モデルとGUIの実機確認は未実施。swift testの実行制限は上記と同じ。
+
+### 017b プランA（表示期限15分）
+
+上記の300秒/compileWaiting表示をプランAで置き換えた。compileの表示期限は900秒（15分）で、順次フォールバックを含む初回準備全体に1つの期限を適用する。期限切れ時は実行中のコンパイル/読み込みを停止せず、既存のfailed行「意味検索を準備できませんでした」＋青い「再試行」リンクを表示する。内部では同じTaskを待ち、文字一致検索を維持する。遅れて成功すれば自動でingestへ進み、取り込み完了後にreadyになる。
+
+この表示上の失敗中に再試行を押すと、表示だけを既存のcompile「意味検索を準備中・初回の準備中（数分かかります）」へ戻す。provider呼び出し、reset、コンパイル、ダウンロード、タイマーの再起動は行わない。実際の準備失敗後の再試行は従来どおり。表示上の失敗を示すフラグはメモリのみで、アプリ再起動後はidleから通常の準備を始める。UIのView・リンクスタイル・18ptの行高は変更していない。
+
+プランAのフェイクclockテストを4件追加（899秒時点/900秒での失敗表示と遅い成功、再試行が表示だけであること、fallbackも元の900秒期限を共有すること、新しいstoreの初期状態）。017bテストは計26件。018/017既存テストは変更していない。この依頼以外の追加実装は行っていない。
+
+プランA検証: DEBUG本体、全テストコード、arm64/x86_64のRelease構成の型チェックは成功。テスト実行は既知のsandbox制限により未確認。UI/実モデルの実機確認は行っていない。

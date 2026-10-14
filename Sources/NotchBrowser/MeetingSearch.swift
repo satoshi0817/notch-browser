@@ -141,15 +141,22 @@ enum MeetingSearchRanking {
     @Published private(set) var total = 0
     @Published private(set) var updated: Date?
     @Published private(set) var error: String?
-    var supported: Bool { if #available(macOS 15, *) { return true }; return false }
-    var progressLabel: String { "意味検索を準備中・\(completed)/\(total)件" }
+    @Published private(set) var preparation: MeetingPreparationState = .idle
+    private let semanticSupport: Bool?
+    private let timeouts: MeetingPreparationTimeouts
+    private let clock: any MeetingPreparationClock
+    private var retryInput: ([NotionMeeting], (String) async throws -> [NotionTaskBlock])?
+    var supported: Bool { if let semanticSupport { return semanticSupport }; if #available(macOS 15, *) { return true }; return false }
+    var progressLabel: String { preparation.label }
     var modelStatus: String { preparing ? "準備中" : modelPrepared ? "使える" : "未ダウンロード" }
     private let provider: any MeetingEmbeddingProvider
     private let cacheURL: URL?
     private var generation = UUID()
     private var indexing = false
-    init(provider: any MeetingEmbeddingProvider = CoreMLMeetingEmbeddingProvider(), cacheURL: URL? = nil, persist: Bool = true) {
-        self.provider = provider
+    private var retrying = false
+    private var waitingForCompile = false
+    init(provider: any MeetingEmbeddingProvider = CoreMLMeetingEmbeddingProvider(), cacheURL: URL? = nil, persist: Bool = true, semanticSupport: Bool? = nil, timeouts: MeetingPreparationTimeouts = .init(), clock: any MeetingPreparationClock = MeetingSystemClock()) {
+        self.provider = provider; self.semanticSupport = semanticSupport; self.timeouts = timeouts; self.clock = clock
         #if DEBUG
         let preview = CommandLine.arguments.contains(where: { $0.hasPrefix("--meeting-search=") })
         #else
@@ -165,25 +172,31 @@ enum MeetingSearchRanking {
         }
     }
     func clear() {
-        generation = UUID(); sentences = []; completed = 0; total = 0; updated = nil; ready = false; preparing = false; error = nil
+        waitingForCompile = false
+        preparation = .idle; generation = UUID(); sentences = []; completed = 0; total = 0; updated = nil; ready = false; preparing = false; error = nil
         if let cacheURL, FileManager.default.fileExists(atPath: cacheURL.path) {
             do { try FileManager.default.removeItem(at: cacheURL) }
             catch { self.error = "検索キャッシュを消去できませんでした" }
         }
     }
-    func index(meetings: [NotionMeeting], load: (String) async throws -> [NotionTaskBlock]) async {
+    func index(meetings: [NotionMeeting], load: @escaping (String) async throws -> [NotionTaskBlock]) async {
         guard !indexing else { return }; indexing = true
         defer { indexing = false }
+        retryInput = (meetings, load)
+        waitingForCompile = false
         let generation = self.generation
         let eligible = meetings.filter { $0.status == "notes_ready" }
         total = eligible.count; completed = 0; preparing = supported; ready = false; error = nil
+        if supported { preparation = .download(bytes: 0, total: Int64(MeetingModelManifest.artifacts.reduce(0) { $0 + $1.size })) }
         sentences.removeAll { row in !eligible.contains { $0.id == row.meetingID } }
+        var bodyFailed = false
         // Re-fetch even within the same edited minute, including child blocks.
         for meeting in eligible {
             do {
                 var fresh: [MeetingSearchSentence] = []
                 for section in [meeting.summary, meeting.notes].compactMap({ $0 }) {
-                    fresh += MeetingSearchRanking.sentences(meeting: meeting, section: section, blocks: try await load(section))
+                    let blocks = try await meetingWithTimeout(seconds: timeouts.body, clock: clock, stage: .body) { try await load(section) }
+                    fresh += MeetingSearchRanking.sentences(meeting: meeting, section: section, blocks: blocks)
                 }
                 guard generation == self.generation, !Task.isCancelled else { return }
                 let old = sentences.filter { $0.meetingID == meeting.id }
@@ -194,28 +207,78 @@ enum MeetingSearchRanking {
             } catch {
                 guard generation == self.generation else { return }
                 sentences.removeAll { $0.meetingID == meeting.id }
-                self.error = "議事録の取り込みに失敗しました"
+                bodyFailed = true; self.error = "議事録の取り込みに失敗しました"
             }
         }
         guard generation == self.generation else { return }
         updated = Date(); save()
         if supported {
             do {
-                try await provider.prepare()
-                guard generation == self.generation, !Task.isCancelled else { return }
-                modelPrepared = true
-                for i in sentences.indices where sentences[i].vector.isEmpty {
-                    let vector = MeetingSearchRanking.normalized(try await provider.embedding(sentences[i].text, isQuery: false))
-                    guard generation == self.generation, !Task.isCancelled else { return }
-                    guard vector.count == 256 else { throw MeetingModelError.invalidEmbedding }
-                    sentences[i].vector = vector
+                if bodyFailed { throw MeetingModelError.invalidEmbedding }
+                if let staged = provider as? any MeetingStagedEmbeddingProvider {
+                    try await staged.prepare { [weak self] state in
+                        await self?.receive(state, generation: generation)
+                    }
+                } else {
+                    preparation = .compile
+                    let provider = self.provider
+                    try await meetingWithTimeout(seconds: timeouts.compile, clock: clock) { try await provider.prepare() }
                 }
-                ready = true; preparing = false; save()
+                guard generation == self.generation, !Task.isCancelled else { return }
+                waitingForCompile = false; preparing = true; error = nil
+                modelPrepared = true; completed = 0
+                preparation = .ingest(completed: 0, total: total)
+                MeetingSearchLog.logger.info("ingest start")
+                for meeting in eligible {
+                    for i in sentences.indices where sentences[i].meetingID == meeting.id && sentences[i].vector.isEmpty {
+                        let provider = self.provider; let text = sentences[i].text
+                        let vector = MeetingSearchRanking.normalized(try await meetingWithTimeout(seconds: timeouts.embedding, clock: clock, stage: .embedding) {
+                            try await provider.embedding(text, isQuery: false)
+                        })
+                        guard generation == self.generation, !Task.isCancelled else { return }
+                        guard vector.count == 256 else { throw MeetingModelError.invalidEmbedding }
+                        sentences[i].vector = vector
+                    }
+                    completed += 1; preparation = .ingest(completed: completed, total: total)
+                }
+                MeetingSearchLog.logger.info("ingest end")
+                preparation = .ready; ready = true; preparing = false; save()
             } catch {
                 guard generation == self.generation else { return }
-                self.error = error.localizedDescription; ready = false; preparing = false
+                waitingForCompile = false
+                MeetingSearchLog.logger.error("preparation failed")
+                preparation = .failed; self.error = "意味検索を準備できませんでした"; ready = false; preparing = false
             }
         }
+    }
+    private func receive(_ state: MeetingPreparationState, generation: UUID) {
+        guard generation == self.generation, preparing || waitingForCompile else { return }
+        if state == .compileWaiting {
+            waitingForCompile = true
+            preparation = .failed; preparing = false; ready = false
+            error = "意味検索を準備できませんでした"
+            return
+        }
+        // Delegate callbacks can arrive out of order; never regress a stage or bytes.
+        if waitingForCompile, case .download = state { return }
+        if (preparation == .compile || preparation == .compileWaiting), case .download = state { return }
+        if case let .download(old, _) = preparation, case let .download(new, _) = state, new < old { return }
+        preparation = state
+    }
+    func retry() async {
+        if indexing && waitingForCompile {
+            preparation = .compile; preparing = true; error = nil
+            return
+        }
+        guard !indexing, !retrying, let (meetings, load) = retryInput else { return }
+        retrying = true; indexing = true
+        defer { retrying = false }
+        let previousGeneration = generation
+        if let staged = provider as? any MeetingStagedEmbeddingProvider { await staged.resetForRetry() }
+        indexing = false
+        guard previousGeneration == generation else { return }
+        generation = UUID()
+        await index(meetings: meetings, load: load)
     }
     private func save() {
         guard let cacheURL, let data = try? JSONEncoder().encode(MeetingSearchCache(identity: provider.identity, sentences: sentences, updated: updated)) else { return }
@@ -227,14 +290,24 @@ enum MeetingSearchRanking {
     func search(meetings: [NotionMeeting], query: MeetingSearchQuery) async -> [MeetingSearchHit] {
         var vector: [Float]?
         if ready && !query.text.isEmpty {
-            if let values = try? await provider.embedding(query.text, isQuery: true) { vector = MeetingSearchRanking.normalized(values) }
+            let provider = self.provider
+            if let values = try? await meetingWithTimeout(seconds: timeouts.embedding, clock: clock, stage: .queryEmbedding, operation: { try await provider.embedding(query.text, isQuery: true) }) { vector = MeetingSearchRanking.normalized(values) }
             if vector?.count != 256 { vector = nil }
         }
         return MeetingSearchRanking.hits(meetings: meetings, sentences: sentences, query: query, queryVector: vector)
     }
     #if DEBUG
     func preview(state: String, meetings: [NotionMeeting]) {
-        total = 48; completed = 12; preparing = state == "preparing"; ready = !preparing; modelPrepared = !preparing; updated = Date()
+        total = 48; completed = 12
+        switch state {
+        case "preparing-download": preparation = .download(bytes: 32, total: 100)
+        case "preparing-compile": preparation = .compile
+        case "preparing-failed": preparation = .failed
+        case "preparing", "preparing-ingest": preparation = .ingest(completed: 12, total: 48)
+        default: preparation = .ready
+        }
+        preparing = preparation != .ready && preparation != .failed
+        ready = preparation == .ready; modelPrepared = ready; updated = Date()
         sentences = meetings.flatMap { MeetingSearchRanking.sentences(meeting: $0, section: "notes", blocks: NotionMeetingsStore.previewBlocks(section: "notes")) }
     }
     #endif

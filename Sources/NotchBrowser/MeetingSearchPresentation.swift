@@ -71,6 +71,11 @@ struct MeetingSearchInputState: Equatable {
 #if DEBUG
 enum MeetingSearchPreviewState: String, CaseIterable {
     case list, results, empty, detail, preparing, settings, typing
+    case preparingDownload = "preparing-download"
+    case preparingCompile = "preparing-compile"
+    case preparingIngest = "preparing-ingest"
+    case preparingFailed = "preparing-failed"
+    var isPreparation: Bool { self == .preparing || self == .preparingDownload || self == .preparingCompile || self == .preparingIngest || self == .preparingFailed }
     case detailHighlight = "detail-highlight"
     var holdsHighlight: Bool { self == .detail || self == .detailHighlight }
     static func parse(arguments: [String]) -> Self? {
