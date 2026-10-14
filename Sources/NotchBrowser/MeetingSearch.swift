@@ -1,72 +1,16 @@
 import Foundation
-import SwiftUI
+import Combine
 
-enum MeetingSearchDateLabels {
-    static func updated(_ date: Date?, timeZone: TimeZone = .current) -> String {
-        guard let date else { return "未更新" }
-        let formatter = DateFormatter(); formatter.locale = Locale(identifier: "ja_JP")
-        formatter.calendar = Calendar(identifier: .gregorian); formatter.timeZone = timeZone
-        formatter.dateFormat = "M月d日 H:mm"
-        return formatter.string(from: date)
-    }
-}
-
-struct MeetingSearchRange: Equatable {
-    let start: Date
-    let end: Date
-    func contains(_ date: Date?) -> Bool { date.map { $0 >= start && $0 < end } ?? false }
-    func label(calendar: Calendar = .current) -> String {
-        let last = calendar.date(byAdding: .day, value: -1, to: end) ?? end
-        func day(_ date: Date) -> String { "\(calendar.component(.month, from: date))月\(calendar.component(.day, from: date))日" }
-        return "\(day(start))〜\(day(last))"
-    }
-}
 struct MeetingSearchQuery: Equatable {
     let text: String
-    let range: MeetingSearchRange?
-    static func parse(_ input: String, now: Date = Date(), calendar: Calendar = .current) -> Self {
-        var text = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        var range: MeetingSearchRange?
-        for (word, component, offset) in [("先月", Calendar.Component.month, -1), ("今月", .month, 0), ("先週", .weekOfYear, -1), ("今週", .weekOfYear, 0)] {
-            if text.contains(word), let date = calendar.date(byAdding: component, value: offset, to: now), let interval = calendar.dateInterval(of: component, for: date) {
-                range = .init(start: interval.start, end: interval.end); text = text.replacingOccurrences(of: word, with: ""); break
-            }
-        }
-        if range == nil, let regex = try? NSRegularExpression(pattern: "(?<![0-9])(?:(\\d{4})年)?(1[0-2]|[1-9])月"),
-           let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)), let full = Range(match.range, in: text), let monthRange = Range(match.range(at: 2), in: text), let month = Int(text[monthRange]) {
-            let year = Range(match.range(at: 1), in: text).flatMap { Int(text[$0]) } ?? calendar.component(.year, from: now)
-            if let start = calendar.date(from: DateComponents(year: year, month: month, day: 1)), let end = calendar.date(byAdding: .month, value: 1, to: start) { range = .init(start: start, end: end) }
-            text.removeSubrange(full)
-        }
-        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if text.hasPrefix("の") { text.removeFirst() }
-        return .init(text: text, range: range)
-    }
+    static func parse(_ input: String) -> Self { .init(text: input.trimmingCharacters(in: .whitespacesAndNewlines)) }
 }
-protocol MeetingEmbeddingProvider {
-    var identity: MeetingEmbeddingIdentity { get }
-    func prepare() async throws
-    func embedding(_ text: String, isQuery: Bool) async throws -> [Float]
-}
-struct MeetingEmbeddingIdentity: Codable, Equatable {
-    let model: String
-    let dimensions: Int
-    let documentPrefix: String
-    let queryPrefix: String
-    var revision: String = ""
-}
-struct MeetingSearchSentence: Codable, Equatable {
+struct MeetingSearchSentence: Equatable {
     let meetingID: String
     let sectionID: String
     let blockID: String
     let text: String
     let edited: Date
-    var vector: [Float]
-}
-struct MeetingSearchCache: Codable {
-    let identity: MeetingEmbeddingIdentity
-    var sentences: [MeetingSearchSentence]
-    var updated: Date?
 }
 struct MeetingSearchHit: Identifiable, Equatable {
     var id: String { meetingID }
@@ -77,39 +21,29 @@ struct MeetingSearchHit: Identifiable, Equatable {
     let score: Float
 }
 enum MeetingSearchRanking {
-    static let threshold: Float = 0.45
-    static func normalized(_ values: [Float]) -> [Float] {
-        guard values.count >= 256, values.allSatisfy(\.isFinite) else { return [] }
-        let slice = Array(values.prefix(256)); let norm = sqrt(slice.reduce(Float(0)) { $0 + $1 * $1 })
-        return norm > 0 ? slice.map { $0 / norm } : []
-    }
-    static func hits(meetings: [NotionMeeting], sentences: [MeetingSearchSentence], query: MeetingSearchQuery, queryVector: [Float]? = nil) -> [MeetingSearchHit] {
-        let eligible = meetings.filter { $0.status == "notes_ready" && (query.range?.contains($0.calendarStart) ?? true) }
+    static func hits(meetings: [NotionMeeting], sentences: [MeetingSearchSentence], query: MeetingSearchQuery) -> [MeetingSearchHit] {
         let terms = query.text.lowercased().split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        guard !terms.isEmpty else { return [] }
         var best: [String: MeetingSearchHit] = [:]
-        for meeting in eligible {
+        for meeting in meetings where meeting.status == "notes_ready" {
             let rows = sentences.filter { $0.meetingID == meeting.id }
-            for row in rows.isEmpty ? [MeetingSearchSentence(meetingID: meeting.id, sectionID: "", blockID: "", text: "", edited: meeting.edited, vector: [])] : rows {
-                let score: Float
-                if terms.isEmpty { score = 1 }
-                else if let queryVector, queryVector.count == 256, row.vector.count == 256 {
-                    score = zip(queryVector, row.vector).reduce(Float(0)) { $0 + $1.0 * $1.1 }
-                } else {
-                    let haystack = (meeting.title + " " + row.text).lowercased()
-                    score = Float(terms.filter { haystack.contains($0) }.count) / Float(terms.count)
-                }
-                guard score >= threshold else { continue }
+            let candidates = rows.isEmpty ? [MeetingSearchSentence(meetingID: meeting.id, sectionID: "", blockID: "", text: "", edited: meeting.edited)] : rows
+            for row in candidates {
+                let haystack = (meeting.title + " " + row.text).lowercased()
+                let score = Float(terms.filter { haystack.contains($0) }.count) / Float(terms.count)
+                guard score >= 0.45 else { continue }
                 let hit = MeetingSearchHit(meetingID: meeting.id, sectionID: row.sectionID, blockID: row.blockID, sentence: row.text, score: score)
                 if score > (best[meeting.id]?.score ?? -1) { best[meeting.id] = hit }
             }
         }
         return Array(best.values.sorted { $0.score == $1.score ? $0.meetingID < $1.meetingID : $0.score > $1.score }.prefix(20))
     }
+
     static func sentences(meeting: NotionMeeting, section: String, blocks: [NotionTaskBlock]) -> [MeetingSearchSentence] {
         guard meeting.status == "notes_ready", section == meeting.summary || section == meeting.notes else { return [] }
         return blocks.filter { $0.type != "image" && $0.image == nil && !$0.text.isEmpty }.flatMap { block in
             sentenceTexts(block.text).map {
-                .init(meetingID: meeting.id, sectionID: section, blockID: block.id, text: $0, edited: max(meeting.edited, block.edited), vector: [])
+                .init(meetingID: meeting.id, sectionID: section, blockID: block.id, text: $0, edited: max(meeting.edited, block.edited))
             }
         }
     }
@@ -134,205 +68,29 @@ enum MeetingSearchRanking {
 @MainActor final class MeetingSearchStore: ObservableObject {
     static let shared = MeetingSearchStore()
     @Published private(set) var sentences: [MeetingSearchSentence] = []
-    @Published private(set) var preparing = false
-    @Published private(set) var ready = false
-    @Published private(set) var modelPrepared = false
-    @Published private(set) var completed = 0
-    @Published private(set) var total = 0
-    @Published private(set) var updated: Date?
-    @Published private(set) var error: String?
-    @Published private(set) var preparation: MeetingPreparationState = .idle
-    private let semanticSupport: Bool?
-    private let timeouts: MeetingPreparationTimeouts
-    private let clock: any MeetingPreparationClock
-    private var retryInput: ([NotionMeeting], (String) async throws -> [NotionTaskBlock])?
-    var supported: Bool { if let semanticSupport { return semanticSupport }; if #available(macOS 15, *) { return true }; return false }
-    var progressLabel: String { preparation.label }
-    var modelStatus: String { preparing ? "準備中" : modelPrepared ? "使える" : "未ダウンロード" }
-    private let provider: any MeetingEmbeddingProvider
-    private let cacheURL: URL?
     private var generation = UUID()
-    private var indexing = false
-    private var retrying = false
-    private var waitingForCompile = false
-    init(provider: any MeetingEmbeddingProvider = CoreMLMeetingEmbeddingProvider(), cacheURL: URL? = nil, persist: Bool = true, semanticSupport: Bool? = nil, timeouts: MeetingPreparationTimeouts = .init(), clock: any MeetingPreparationClock = MeetingSystemClock()) {
-        self.provider = provider; self.semanticSupport = semanticSupport; self.timeouts = timeouts; self.clock = clock
-        #if DEBUG
-        let preview = CommandLine.arguments.contains(where: { $0.hasPrefix("--meeting-search=") })
-        #else
-        let preview = false
-        #endif
-        self.cacheURL = persist && !preview ? (cacheURL ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?.appendingPathComponent("NotchBrowser/meeting-search/cache.json")) : nil
-        if let url = self.cacheURL, let data = try? Data(contentsOf: url), let cache = try? JSONDecoder().decode(MeetingSearchCache.self, from: data), cache.identity == provider.identity {
-            sentences = cache.sentences.map { row in
-                var row = row
-                if row.vector.count != 256 { row.vector = [] }
-                return row
-            }; updated = cache.updated
-        }
-    }
-    func clear() {
-        waitingForCompile = false
-        preparation = .idle; generation = UUID(); sentences = []; completed = 0; total = 0; updated = nil; ready = false; preparing = false; error = nil
-        if let cacheURL, FileManager.default.fileExists(atPath: cacheURL.path) {
-            do { try FileManager.default.removeItem(at: cacheURL) }
-            catch { self.error = "検索キャッシュを消去できませんでした" }
-        }
-    }
-    func index(meetings: [NotionMeeting], load: @escaping (String) async throws -> [NotionTaskBlock]) async {
-        guard !indexing else { return }; indexing = true
-        defer { indexing = false }
-        retryInput = (meetings, load)
-        waitingForCompile = false
-        let generation = self.generation
-        let eligible = meetings.filter { $0.status == "notes_ready" }
-        total = eligible.count; completed = 0; preparing = supported; ready = false; error = nil
-        if supported { preparation = .download(bytes: 0, total: Int64(MeetingModelManifest.artifacts.reduce(0) { $0 + $1.size })) }
-        sentences.removeAll { row in !eligible.contains { $0.id == row.meetingID } }
-        var bodyFailed = false
-        // Re-fetch even within the same edited minute, including child blocks.
-        for meeting in eligible {
+    func clear() { generation = UUID(); sentences = [] }
+    func index(meetings: [NotionMeeting], load: (String) async throws -> [NotionTaskBlock]) async {
+        let current = UUID(); generation = current
+        var fresh: [MeetingSearchSentence] = []
+        for meeting in meetings where meeting.status == "notes_ready" {
             do {
-                var fresh: [MeetingSearchSentence] = []
+                var rows: [MeetingSearchSentence] = []
                 for section in [meeting.summary, meeting.notes].compactMap({ $0 }) {
-                    let blocks = try await meetingWithTimeout(seconds: timeouts.body, clock: clock, stage: .body) { try await load(section) }
-                    fresh += MeetingSearchRanking.sentences(meeting: meeting, section: section, blocks: blocks)
+                    rows += MeetingSearchRanking.sentences(meeting: meeting, section: section, blocks: try await load(section))
                 }
-                guard generation == self.generation, !Task.isCancelled else { return }
-                let old = sentences.filter { $0.meetingID == meeting.id }
-                for i in fresh.indices {
-                    if let previous = old.first(where: { $0.blockID == fresh[i].blockID && $0.text == fresh[i].text && $0.edited == fresh[i].edited }) { fresh[i].vector = previous.vector }
-                }
-                sentences.removeAll { $0.meetingID == meeting.id }; sentences += fresh; completed += 1
-            } catch {
-                guard generation == self.generation else { return }
-                sentences.removeAll { $0.meetingID == meeting.id }
-                bodyFailed = true; self.error = "議事録の取り込みに失敗しました"
-            }
+                fresh += rows
+            } catch { /* Failed bodies must not retain stale matches. */ }
+            guard generation == current, !Task.isCancelled else { return }
         }
-        guard generation == self.generation else { return }
-        updated = Date(); save()
-        if supported {
-            do {
-                if bodyFailed { throw MeetingModelError.invalidEmbedding }
-                if let staged = provider as? any MeetingStagedEmbeddingProvider {
-                    try await staged.prepare { [weak self] state in
-                        await self?.receive(state, generation: generation)
-                    }
-                } else {
-                    preparation = .compile
-                    let provider = self.provider
-                    try await meetingWithTimeout(seconds: timeouts.compile, clock: clock) { try await provider.prepare() }
-                }
-                guard generation == self.generation, !Task.isCancelled else { return }
-                waitingForCompile = false; preparing = true; error = nil
-                modelPrepared = true; completed = 0
-                preparation = .ingest(completed: 0, total: total)
-                MeetingSearchLog.logger.info("ingest start")
-                for meeting in eligible {
-                    for i in sentences.indices where sentences[i].meetingID == meeting.id && sentences[i].vector.isEmpty {
-                        let provider = self.provider; let text = sentences[i].text
-                        let vector = MeetingSearchRanking.normalized(try await meetingWithTimeout(seconds: timeouts.embedding, clock: clock, stage: .embedding) {
-                            try await provider.embedding(text, isQuery: false)
-                        })
-                        guard generation == self.generation, !Task.isCancelled else { return }
-                        guard vector.count == 256 else { throw MeetingModelError.invalidEmbedding }
-                        sentences[i].vector = vector
-                    }
-                    completed += 1; preparation = .ingest(completed: completed, total: total)
-                }
-                MeetingSearchLog.logger.info("ingest end")
-                preparation = .ready; ready = true; preparing = false; save()
-            } catch {
-                guard generation == self.generation else { return }
-                waitingForCompile = false
-                MeetingSearchLog.logger.error("preparation failed")
-                preparation = .failed; self.error = "意味検索を準備できませんでした"; ready = false; preparing = false
-            }
-        }
-    }
-    private func receive(_ state: MeetingPreparationState, generation: UUID) {
-        guard generation == self.generation, preparing || waitingForCompile else { return }
-        if state == .compileWaiting {
-            waitingForCompile = true
-            preparation = .failed; preparing = false; ready = false
-            error = "意味検索を準備できませんでした"
-            return
-        }
-        // Delegate callbacks can arrive out of order; never regress a stage or bytes.
-        if waitingForCompile, case .download = state { return }
-        if (preparation == .compile || preparation == .compileWaiting), case .download = state { return }
-        if case let .download(old, _) = preparation, case let .download(new, _) = state, new < old { return }
-        preparation = state
-    }
-    func retry() async {
-        if indexing && waitingForCompile {
-            preparation = .compile; preparing = true; error = nil
-            return
-        }
-        guard !indexing, !retrying, let (meetings, load) = retryInput else { return }
-        retrying = true; indexing = true
-        defer { retrying = false }
-        let previousGeneration = generation
-        if let staged = provider as? any MeetingStagedEmbeddingProvider { await staged.resetForRetry() }
-        indexing = false
-        guard previousGeneration == generation else { return }
-        generation = UUID()
-        await index(meetings: meetings, load: load)
-    }
-    private func save() {
-        guard let cacheURL, let data = try? JSONEncoder().encode(MeetingSearchCache(identity: provider.identity, sentences: sentences, updated: updated)) else { return }
-        do {
-            try FileManager.default.createDirectory(at: cacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try data.write(to: cacheURL, options: .atomic)
-        } catch { self.error = "検索キャッシュを保存できませんでした" }
+        sentences = fresh
     }
     func search(meetings: [NotionMeeting], query: MeetingSearchQuery) async -> [MeetingSearchHit] {
-        var vector: [Float]?
-        if ready && !query.text.isEmpty {
-            let provider = self.provider
-            if let values = try? await meetingWithTimeout(seconds: timeouts.embedding, clock: clock, stage: .queryEmbedding, operation: { try await provider.embedding(query.text, isQuery: true) }) { vector = MeetingSearchRanking.normalized(values) }
-            if vector?.count != 256 { vector = nil }
-        }
-        return MeetingSearchRanking.hits(meetings: meetings, sentences: sentences, query: query, queryVector: vector)
+        MeetingSearchRanking.hits(meetings: meetings, sentences: sentences, query: query)
     }
     #if DEBUG
     func preview(state: String, meetings: [NotionMeeting]) {
-        total = 48; completed = 12
-        switch state {
-        case "preparing-download": preparation = .download(bytes: 32, total: 100)
-        case "preparing-compile": preparation = .compile
-        case "preparing-failed": preparation = .failed
-        case "preparing", "preparing-ingest": preparation = .ingest(completed: 12, total: 48)
-        default: preparation = .ready
-        }
-        preparing = preparation != .ready && preparation != .failed
-        ready = preparation == .ready; modelPrepared = ready; updated = Date()
         sentences = meetings.flatMap { MeetingSearchRanking.sentences(meeting: $0, section: "notes", blocks: NotionMeetingsStore.previewBlocks(section: "notes")) }
     }
     #endif
-}
-
-struct MeetingSearchSettingsPage: View {
-    @ObservedObject private var search = MeetingSearchStore.shared
-    var body: some View {
-        Form {
-            Section("意味検索") {
-                if search.supported {
-                    LabeledContent("モデル状態", value: search.modelStatus)
-                    LabeledContent("取り込んだ件数", value: "\(Set(search.sentences.map(\.meetingID)).count)件")
-                    LabeledContent("最終更新", value: MeetingSearchDateLabels.updated(search.updated))
-                    Button("キャッシュを消去") { search.clear() }
-                    if let error = search.error { Text(error).font(.caption).foregroundStyle(.secondary) }
-                } else { Text("macOS 15 以上で使えます").foregroundStyle(.secondary) }
-            }
-        }.formStyle(.grouped)
-        .task {
-            #if DEBUG
-            if CommandLine.arguments.contains("--meeting-search=settings") {
-                search.preview(state: "settings", meetings: NotionMeetingsStore.shared.meetings)
-            }
-            #endif
-        }
-    }
 }

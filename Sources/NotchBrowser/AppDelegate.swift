@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var updatesStarted = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        MeetingSearchLegacyCleanup.runAtStartup()
         var firstRun = OnboardingState.shouldPresent()
         #if DEBUG
         if SettingsPreviewLaunch.parse(arguments: CommandLine.arguments) != nil { firstRun = false }

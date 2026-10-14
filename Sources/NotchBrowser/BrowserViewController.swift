@@ -2454,10 +2454,7 @@ final class TabButtonCell: NSButtonCell {
 
     override func drawBezel(withFrame frame: NSRect, in controlView: NSView) {
         if let button = controlView as? TabButton, button.isDetachedLayout, !button.detachedContentFullyVisible { return }
-        guard state == .on else {
-            super.drawBezel(withFrame: frame, in: controlView)
-            return
-        }
+        guard state == .on else { return }
         NSColor.systemBlue.setFill()
         NSBezierPath(roundedRect: frame.insetBy(dx: 1, dy: 1), xRadius: 5, yRadius: 5).fill()
     }

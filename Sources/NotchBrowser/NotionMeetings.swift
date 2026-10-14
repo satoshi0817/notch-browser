@@ -222,7 +222,7 @@ extension NotionDatabaseAPI {
         displayLimit = [10, 25, 50].contains(savedLimit) ? savedLimit : 50
         #if DEBUG
         mockState = previewState ?? CommandLine.arguments.first { $0.hasPrefix("--meetings=") }.map { String($0.dropFirst(11)) }
-        let searchPreview = CommandLine.arguments.first { $0.hasPrefix("--meeting-search=") }.map { String($0.dropFirst("--meeting-search=".count)) }
+        let searchPreview = MeetingSearchPreviewState.parse(arguments: CommandLine.arguments)?.rawValue
         if searchPreview != nil { mockState = "search" }
         if let state = mockState {
             meetings = state == "empty" ? [] : (0..<6).compactMap { index in

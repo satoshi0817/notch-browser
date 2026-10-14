@@ -71,6 +71,8 @@ struct DesignPreview {
                 case .meetings: manager.browser.showMeetings()
                 }
             }
+        } else if MeetingSearchPreviewState.parse(arguments: CommandLine.arguments) != nil {
+            requestedPreviewAction = { manager.browser.showMeetings() }
         } else if CommandLine.arguments.contains(where: { $0.hasPrefix("--meetings=") }) {
             requestedPreviewAction = { manager.browser.showMeetings() }
         }

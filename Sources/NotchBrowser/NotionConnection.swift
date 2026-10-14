@@ -81,6 +81,7 @@ final class NotionConnectionStore: ObservableObject {
     #if DEBUG
     typealias PreviewState = NotionConnectionState
     static func previewState(arguments: [String]) -> PreviewState? {
+        if MeetingSearchPreviewState.parse(arguments: arguments) != nil { return .connected }
         if arguments.contains("--meetings=pinned-unconnected") { return .unconnected }
         if arguments.contains("--meetings=error") { return .unverified }
         if let explicit = arguments.first(where: { $0.hasPrefix("--notion-connection=") }) {

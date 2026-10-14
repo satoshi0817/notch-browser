@@ -75,7 +75,7 @@ final class NotionMeetingsHostingView: NSHostingView<NotionMeetingsPanel> {
     }
     @FocusState private var searchFocused: Bool
     private var query: String { searchInput.text }
-    @State private var parsedQuery = MeetingSearchQuery(text: "", range: nil)
+    @State private var parsedQuery = MeetingSearchQuery(text: "")
     @State private var hits: [MeetingSearchHit] = []
     @State private var selectedHit: MeetingSearchHit?
     @State private var revealIdentity = UUID()
@@ -98,8 +98,8 @@ final class NotionMeetingsHostingView: NSHostingView<NotionMeetingsPanel> {
             if ["detail", "progress", "empty-tabs"].contains(store.mockState ?? "") { selected = store.meetings.first }
             if let state = searchPreview {
                 search.preview(state: state.rawValue, meetings: store.meetings)
-                if state != .list && !state.isPreparation {
-                    searchInput.edit(state == .empty ? "先月の採用" : state == .typing ? "リリース" : "先月のリリース")
+                if state != .list {
+                    searchInput.edit(state == .empty ? "該当しない語" : "リリース")
                     if state == .typing { searchFocused = true }
                     parsedQuery = .parse(query)
                     hits = MeetingSearchRanking.hits(meetings: store.meetings, sentences: search.sentences, query: parsedQuery)
@@ -119,7 +119,6 @@ final class NotionMeetingsHostingView: NSHostingView<NotionMeetingsPanel> {
         .onChange(of: hits) { _, hits in escapeController.hasResults = !hits.isEmpty }
         .onChange(of: escapeController.resetID) { _, _ in clearSearch() }
         .onChange(of: search.sentences) { _, _ in scheduleSearch() }
-        .onChange(of: search.ready) { _, _ in scheduleSearch() }
         .onDisappear { searchTask?.cancel() }
         .onExitCommand {
             if !escapeController.clearIfActive(meetingsVisible: true) { onUnhandledEscape() }
@@ -166,7 +165,7 @@ final class NotionMeetingsHostingView: NSHostingView<NotionMeetingsPanel> {
             NotionTabListHeader(refreshing: store.refreshing,
                                onRefresh: { if connection.tokenValid { Task { await store.refresh() } } },
                                onSettings: { showingSettings = true }, settingsLabel: "議事録設定") {
-                TextField("議事録を探す（例：先月の採用の話）", text: Binding(get: { query }, set: { searchInput.edit($0) }))
+                TextField("議事録を探す", text: Binding(get: { query }, set: { searchInput.edit($0) }))
                     .focused($searchFocused)
                     .textFieldStyle(.plain).padding(.leading, 6).padding(.trailing, 26).padding(.vertical, 5)
                     .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 5))
@@ -178,36 +177,13 @@ final class NotionMeetingsHostingView: NSHostingView<NotionMeetingsPanel> {
                             .allowsHitTesting(!query.isEmpty)
                     }.frame(minWidth: 0, maxWidth: .infinity)
             }
-            if search.supported && (search.preparing || search.preparation == .failed) {
-                HStack {
-                    Text(search.progressLabel).font(.caption).foregroundStyle(.secondary)
-                    if search.preparation == .failed {
-                        Button("再試行") { Task { await search.retry() } }
-                            .buttonStyle(.plain).foregroundStyle(.blue).font(.caption)
-                    }
-                    Spacer()
-                }.frame(height: MeetingPreparationLayout.rowHeight)
-                    .padding(.horizontal, 12).padding(.bottom, 6)
-            }
-            if !query.isEmpty, let range = parsedQuery.range {
-                HStack {
-                    HStack(spacing: 6) {
-                        Text(range.label())
-                        Button { searchInput.allPeriods(); scheduleSearch(immediate: true) } label: { Image(systemName: "xmark") }
-                            .buttonStyle(.plain).accessibilityLabel("全期間で探す")
-                    }.padding(.horizontal, 8).padding(.vertical, 4)
-                        .background(Color.secondary.opacity(0.12), in: Capsule())
-                    Spacer()
-                }.font(.caption).foregroundStyle(.secondary).padding(.horizontal, 12).padding(.bottom, 6)
-            }
             if let message = store.message { Text(message).font(.caption).foregroundStyle(.red).padding(.horizontal) }
             if store.refreshing { ProgressView().padding() }
             if searchInput.mode == .searching {
                 if hits.isEmpty {
                     Spacer()
-                    Text(parsedQuery.range == nil ? "見つかりませんでした" : "この期間には見つかりませんでした")
+                    Text("見つかりませんでした")
                     Text("言い方を変えて試してください").font(.caption).foregroundStyle(.secondary).padding(.top, 4)
-                    if parsedQuery.range != nil { Button("全期間で探す") { searchInput.allPeriods(); scheduleSearch(immediate: true) }.padding(8) }
                     Spacer()
                 } else {
                     ScrollView { LazyVStack(spacing: 0) {
@@ -269,11 +245,11 @@ final class NotionMeetingsHostingView: NSHostingView<NotionMeetingsPanel> {
         }.font(.caption).foregroundStyle(.secondary)
     }
 
-    private func clearSearch() { searchTask?.cancel(); searchInput.escape(); escapeController.hasResults = false; parsedQuery = .init(text: "", range: nil); hits = []; selectedHit = nil; showingSettings = false }
+    private func clearSearch() { searchTask?.cancel(); searchInput.escape(); escapeController.hasResults = false; parsedQuery = .init(text: ""); hits = []; selectedHit = nil; showingSettings = false }
     private func scheduleSearch(immediate: Bool = false) {
         searchTask?.cancel()
         let snapshot = searchInput; let input = snapshot.text
-        guard !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { hits = []; parsedQuery = .init(text: "", range: nil); return }
+        guard !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { hits = []; parsedQuery = .init(text: ""); return }
         searchTask = Task {
             if !immediate { try? await Task.sleep(for: .milliseconds(300)) }
             guard !Task.isCancelled else { return }

@@ -57,27 +57,17 @@ struct MeetingMatchHighlightState: Equatable {
 struct MeetingSearchInputState: Equatable {
     enum Mode: Equatable { case dateOrdered, searching }
     private(set) var text = ""
-    private(set) var ignoresDateRange = false
     var mode: Mode { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .dateOrdered : .searching }
-    mutating func edit(_ text: String) { self.text = text; ignoresDateRange = false }
-    mutating func allPeriods() { ignoresDateRange = true }
-    mutating func escape() { text = ""; ignoresDateRange = false }
-    func parsed(now: Date = Date(), calendar: Calendar = .current) -> MeetingSearchQuery {
-        let query = MeetingSearchQuery.parse(text, now: now, calendar: calendar)
-        return .init(text: query.text, range: ignoresDateRange ? nil : query.range)
-    }
+    mutating func edit(_ text: String) { self.text = text }
+    mutating func escape() { text = "" }
+    func parsed() -> MeetingSearchQuery { .parse(text) }
 }
 
 #if DEBUG
 enum MeetingSearchPreviewState: String, CaseIterable {
-    case list, results, empty, detail, preparing, settings, typing
-    case preparingDownload = "preparing-download"
-    case preparingCompile = "preparing-compile"
-    case preparingIngest = "preparing-ingest"
-    case preparingFailed = "preparing-failed"
-    var isPreparation: Bool { self == .preparing || self == .preparingDownload || self == .preparingCompile || self == .preparingIngest || self == .preparingFailed }
+    case list, results, empty, typing
     case detailHighlight = "detail-highlight"
-    var holdsHighlight: Bool { self == .detail || self == .detailHighlight }
+    var holdsHighlight: Bool { self == .detailHighlight }
     static func parse(arguments: [String]) -> Self? {
         arguments.first { $0.hasPrefix("--meeting-search=") }.flatMap { Self(rawValue: String($0.dropFirst("--meeting-search=".count))) }
     }
