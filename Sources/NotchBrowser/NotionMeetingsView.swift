@@ -31,7 +31,7 @@ final class NotionMeetingsHostingView: NSHostingView<NotionMeetingsPanel> {
         }.formStyle(.grouped)
     }
     private var dataSettings: some View {
-        Section("データ") {
+        Section("議事録") {
             HStack(alignment: .firstTextBaseline, spacing: NotionSettingsFieldLayout.spacing) {
                 Text("議事録のページ URL").fixedSize(horizontal: true, vertical: false).lineLimit(1)
                 TextField("議事録のページ URL", text: $store.fallback, prompt: Text("https://www.notion.so/…"))
@@ -44,6 +44,7 @@ final class NotionMeetingsHostingView: NSHostingView<NotionMeetingsPanel> {
             }.frame(minWidth: 0, maxWidth: .infinity)
             Text("空欄のときは、参加した議事録を自動で探します").font(.caption).foregroundStyle(.secondary)
             if let message = store.message { Text(message).foregroundStyle(.red) }
+            NotionCacheSettingsRow(updated: store.lastUpdated, clear: store.clearCache)
         }
     }
     private var displaySettings: some View {
@@ -68,6 +69,8 @@ final class NotionMeetingsHostingView: NSHostingView<NotionMeetingsPanel> {
     @ObservedObject private var store = NotionMeetingsStore.shared
     @State private var showingSettings = false
     @State private var selected: NotionMeeting?
+    @State private var deletedSelection = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject private var search = MeetingSearchStore.shared
     private var searchInput: MeetingSearchInputState {
         get { escapeController.input }
@@ -85,12 +88,13 @@ final class NotionMeetingsHostingView: NSHostingView<NotionMeetingsPanel> {
     #endif
     var body: some View {
         VStack(spacing: 0) {
-            NotionConnectionNotice(onOpenSettings: onOpenSettings)
+            if !store.hasCache { NotionConnectionNotice(onOpenSettings: onOpenSettings) }
             if showingSettings && !connection.showsConnectionError {
                 HStack { Button("‹ 戻る") { showingSettings = false }; Spacer() }.padding(12)
             }
             panelContent
         }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: store.meetings.map(\.id))
         .background(Color(nsColor: .windowBackgroundColor))
         .task {
             #if DEBUG
@@ -107,14 +111,18 @@ final class NotionMeetingsHostingView: NSHostingView<NotionMeetingsPanel> {
                 }
             }
             #endif
-            if connection.tokenValid { await store.refresh() }
+            if connection.tokenValid { await store.refresh(force: false) }
         }
         .task(id: connection.state) {
-            if connection.tokenValid { await store.refresh() } else { selected = nil }
+            if connection.tokenValid { await store.refresh(force: false) } else { selected = nil }
         }
         .onChange(of: store.meetings) { _, meetings in
-            if let id = selected?.id { selected = meetings.first { $0.id == id } }
+            if let id = selected?.id {
+                deletedSelection = store.hasCache && NotionPageRefreshRules.deletedSelection(id, rows: meetings)
+                selected = meetings.first { $0.id == id }; if deletedSelection { selectedHit = nil }
+            }
         }
+        .onChange(of: store.hasCache) { _, cached in if !cached { deletedSelection = false } }
         .onChange(of: query) { _, _ in scheduleSearch() }
         .onChange(of: hits) { _, hits in escapeController.hasResults = !hits.isEmpty }
         .onChange(of: escapeController.resetID) { _, _ in clearSearch() }
@@ -127,10 +135,12 @@ final class NotionMeetingsHostingView: NSHostingView<NotionMeetingsPanel> {
     @ViewBuilder private var panelContent: some View {
         if connection.showsConnectionError {
             Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)
+                .overlay { if store.hasCache { splitContent } }
         } else if showingSettings {
             NotionMeetingsSettingsPage(onOpenSettings: onOpenSettings)
         } else if connection.showsLoading {
-            NotionConnectionLoading().frame(maxWidth: .infinity, maxHeight: .infinity)
+            if store.hasCache { splitContent }
+            else { NotionConnectionLoading().frame(maxWidth: .infinity, maxHeight: .infinity) }
         } else {
             splitContent
         }
@@ -142,7 +152,8 @@ final class NotionMeetingsHostingView: NSHostingView<NotionMeetingsPanel> {
                 list.frame(width: (geometry.size.width - 1) / 2)
                 Divider()
                 Group {
-                    if let selected {
+                    if deletedSelection { NotionDeletedItemView() }
+                    else if let selected {
                         NotionMeetingDetail(meeting: selected, hit: selectedHit)
                             .id(detailIdentity(selected) + (selectedHit == nil ? "" : revealIdentity.uuidString))
                     } else { Text("議事録を選ぶと内容が表示されます").foregroundStyle(.tertiary) }
@@ -152,7 +163,7 @@ final class NotionMeetingsHostingView: NSHostingView<NotionMeetingsPanel> {
     }
 
     private func detailIdentity(_ meeting: NotionMeeting) -> String {
-        let parts: [String] = [meeting.id, meeting.status, meeting.summary ?? "", meeting.notes ?? "", meeting.transcript ?? ""]
+        let parts: [String] = [meeting.id]
         return parts.joined()
     }
 
@@ -163,6 +174,7 @@ final class NotionMeetingsHostingView: NSHostingView<NotionMeetingsPanel> {
     private var list: some View {
         VStack(spacing: 0) {
             NotionTabListHeader(refreshing: store.refreshing,
+                               failureHelp: store.hasCache && store.message != nil ? NotionPageRefreshRules.failureHelp(store.lastUpdated) : nil,
                                onRefresh: { if connection.tokenValid { Task { await store.refresh() } } },
                                onSettings: { showingSettings = true }, settingsLabel: "議事録設定") {
                 TextField("議事録を探す", text: Binding(get: { query }, set: { searchInput.edit($0) }))
@@ -177,8 +189,8 @@ final class NotionMeetingsHostingView: NSHostingView<NotionMeetingsPanel> {
                             .allowsHitTesting(!query.isEmpty)
                     }.frame(minWidth: 0, maxWidth: .infinity)
             }
-            if let message = store.message { Text(message).font(.caption).foregroundStyle(.red).padding(.horizontal) }
-            if store.refreshing { ProgressView().padding() }
+            if let message = store.message, !store.hasCache { Text(message).font(.caption).foregroundStyle(.red).padding(.horizontal) }
+            if store.refreshing && !store.hasCache { ProgressView().padding() }
             if searchInput.mode == .searching {
                 if hits.isEmpty {
                     Spacer()
@@ -220,7 +232,7 @@ final class NotionMeetingsHostingView: NSHostingView<NotionMeetingsPanel> {
 
     private func meetingRow(_ meeting: NotionMeeting, hit: MeetingSearchHit? = nil) -> some View {
         Button {
-            selectedHit = hit; selected = meeting
+            deletedSelection = false; selectedHit = hit; selected = meeting
             if hit != nil { revealIdentity = UUID() }
         } label: {
             Group {
@@ -234,6 +246,7 @@ final class NotionMeetingsHostingView: NSHostingView<NotionMeetingsPanel> {
                 .background(selected?.id == meeting.id ? Color.accentColor.opacity(0.12) : .clear)
                 .contentShape(Rectangle())
         }.buttonStyle(.plain)
+        .transition(.opacity)
         .contextMenu { Link("Notion で開く", destination: meeting.url) }
     }
 
@@ -292,6 +305,13 @@ private struct NotionMeetingStatusChip: View {
     @State private var error: String?
     @State private var highlight = MeetingMatchHighlightState()
     @State private var highlightTask: Task<Void, Never>?
+    init(meeting: NotionMeeting, hit: MeetingSearchHit? = nil) {
+        self.meeting = meeting; self.hit = hit
+        let cached = NotionMeetingsStore.shared.bodies.filter { id, _ in meeting.sections.contains { $0.1 == id } }
+        _bodies = State(initialValue: cached)
+        _selection = State(initialValue: hit?.sectionID ?? meeting.summary ?? meeting.notes ?? meeting.transcript ?? "summary")
+        _loading = State(initialValue: cached.isEmpty)
+    }
     private var sections: [(String, String)] {
         [("要約", meeting.summary ?? "summary"), ("メモ", meeting.notes ?? "notes"),
          ("文字起こし", meeting.transcript ?? "transcript")]
@@ -312,6 +332,10 @@ private struct NotionMeetingStatusChip: View {
                     }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
                 }.contextMenu { Link("Notion で開く", destination: meeting.url) }
                 .task { await load() }
+                .onChange(of: store.bodies) { _, latest in
+                    for (_, id) in meeting.sections { if let body = latest[id] { bodies[id] = body } }
+                }
+                .onChange(of: meeting) { _, _ in Task { await load() } }
                 .onChange(of: loading) { _, loading in
                     if !loading { revealMatch(proxy: proxy) }
                 }
@@ -367,8 +391,10 @@ private struct NotionMeetingStatusChip: View {
     }
 
     private func load() async {
-        loading = true; error = nil; bodies = [:]
-        selection = sections[0].1
+        error = nil
+        for (_, id) in meeting.sections { if let body = store.bodies[id] { bodies[id] = body } }
+        loading = bodies.isEmpty
+        if selection.isEmpty { selection = sections[0].1 }
         #if DEBUG
         if let argument = CommandLine.arguments.first(where: { $0.hasPrefix("--meeting-section=") }),
            let index = ["summary", "notes", "transcript"].firstIndex(of: String(argument.dropFirst(18))) {

@@ -6,6 +6,10 @@ struct DesignPreview {
     static func main() {
         precondition(Bundle.main.bundleIdentifier == "com.satoshi0817.NotchBrowser.DesignPreview")
         #if DEBUG
+        // TASK-NOTCH-020: offline cache states and a pinned failure tooltip.
+        if let argument = CommandLine.arguments.first(where: { $0.hasPrefix("--cache-state=") }) {
+            precondition(["cached", "refreshing", "failed", "settings"].contains(String(argument.dropFirst(14))))
+        }
         let selectedNotionTab = NotionPreviewTab.parse(arguments: CommandLine.arguments)
         // Read the connection fixture before constructing the browser or any live stores.
         let connectionPreview = NotionConnectionStore.launchPreviewState

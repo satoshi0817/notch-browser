@@ -133,8 +133,8 @@ enum NotionTaskRules {
         return NotionMessage.parseDate(value)
     }
 }
-struct NotionTaskBlock: Identifiable, Hashable {
-    struct Run: Hashable {
+struct NotionTaskBlock: Codable, Identifiable, Hashable {
+    struct Run: Codable, Hashable {
         let text: String
         let url: URL?
     }
@@ -142,8 +142,8 @@ struct NotionTaskBlock: Identifiable, Hashable {
     let type: String
     let text: String
     let checked: Bool
-    let link: URL?
-    let image: URL?
+    var link: URL?
+    var image: URL?
     let depth: Int
     var runs: [Run] = []
     var speaker: String? = nil
@@ -213,11 +213,14 @@ extension NotionDatabaseAPI {
         }
         return (schema, Set(ids), categories)
     }
-    func tasks(source: String, mapping: NotionTaskMapping, completedIDs: Set<String>, categories: [String: NotionTaskStatusCategory] = [:]) async throws -> [NotionTask] {
+    func tasks(source: String, mapping: NotionTaskMapping, completedIDs: Set<String>, categories: [String: NotionTaskStatusCategory] = [:], editedSince: Date? = nil) async throws -> [NotionTask] {
         var cursor: String?
         var tasks: [NotionTask] = []
         repeat {
             var body: [String: Any] = ["page_size": 100]
+            if let editedSince {
+                body["filter"] = ["timestamp": "last_edited_time", "last_edited_time": ["on_or_after": ISO8601DateFormatter().string(from: editedSince)]]
+            }
             if let cursor { body["start_cursor"] = cursor }
             let raw = try await request("data_sources/\(source)/query", body: body)
             guard let results = raw["results"] as? [[String: Any]] else { throw NotionAPIError.invalidResponse }
@@ -271,16 +274,25 @@ extension NotionDatabaseAPI {
         var mappedSource: String?
         var autoSelected = false
     }
+    // Retain the old schema type for existing callers; v1 data is not restored.
     struct Cache: Codable {
         let url: String
         let source: String?
         let tasks: [NotionTask]
     }
+    private let cache: NotionPageCache<NotionTask>
+    private var generation = UUID()
+    @Published private(set) var bodies: [String: [NotionTaskBlock]] = [:]
+    @Published private(set) var lastUpdated: Date?
+    private var fullUpdated: Date?
+    var hasCache: Bool { lastUpdated != nil }
+    private var scope: String { configuration.url + "|" + (configuration.source ?? "") }
     private let defaults: UserDefaults
     private let tokenProvider: () -> String?
     private let apiFactory: (String) -> NotionDatabaseAPI
     @Published var configuration: Configuration { didSet {
         if oldValue.url != configuration.url { configuration.confirmedURL = nil }
+        if !mock && (oldValue.url != configuration.url || oldValue.source != configuration.source || oldValue.mapping != configuration.mapping) { clearCache() }
         if !mock { defaults.set(try? JSONEncoder().encode(configuration), forKey: "notionTasks.configuration") }
     } }
     @Published var tasks: [NotionTask] = []
@@ -300,16 +312,22 @@ extension NotionDatabaseAPI {
     var isMock: Bool { mock }
     var mockState: String?
     init(defaults: UserDefaults = SettingsDefaults.current, tokenProvider: @escaping () -> String? = { NotionTokenStore.read() },
-         apiFactory: @escaping (String) -> NotionDatabaseAPI = { NotionDatabaseAPI(token: $0) }, previewState: String? = nil) {
+         apiFactory: @escaping (String) -> NotionDatabaseAPI = { NotionDatabaseAPI(token: $0) }, previewState: String? = nil, cacheURL: URL? = nil) {
         self.defaults = defaults
+        cache = NotionPageCache(name: "NotionTasksCache", url: cacheURL)
         self.tokenProvider = tokenProvider
         self.apiFactory = apiFactory
         configuration = defaults.data(forKey: "notionTasks.configuration").flatMap { try? JSONDecoder().decode(Configuration.self, from: $0) } ?? Configuration()
         filter = defaults.string(forKey: "notionTasks.filter").flatMap(NotionTaskFilter.init(rawValue:)) ?? .incomplete
-        loadCache()
         #if DEBUG
+        if previewState == nil && !CommandLine.arguments.contains(where: { $0.hasPrefix("--tasks=") || $0.hasPrefix("--meetings=") || $0.hasPrefix("--cache-state=") }) && ProcessInfo.processInfo.environment["NOTCH_TASKS_MOCK"] == nil { loadCache() }
+        #else
+        loadCache()
+        #endif
+        #if DEBUG
+        let cacheState = CommandLine.arguments.first { $0.hasPrefix("--cache-state=") }.map { String($0.dropFirst(14)) }
         let argument = CommandLine.arguments.first { $0.hasPrefix("--tasks=") }.map { String($0.dropFirst("--tasks=".count)) }
-        if let state = previewState ?? ProcessInfo.processInfo.environment["NOTCH_TASKS_MOCK"] ?? argument ?? (CommandLine.arguments.contains(where: { $0.hasPrefix("--meetings=") }) ? "empty" : nil) {
+        if let state = cacheState == "settings" ? "settings" : (previewState ?? (cacheState != nil ? "list" : nil) ?? ProcessInfo.processInfo.environment["NOTCH_TASKS_MOCK"] ?? argument ?? (CommandLine.arguments.contains(where: { $0.hasPrefix("--meetings=") }) ? "empty" : nil)) {
             mock = true
             mockState = state
             configuration.autoSelected = false
@@ -346,19 +364,32 @@ extension NotionDatabaseAPI {
                 message = NotionTaskRules.errorMessage(NotionAPIError.server(404, "object_not_found"))
             }
         }
+        if cacheState != nil {
+            lastUpdated = Calendar.current.date(from: DateComponents(year: 2026, month: 10, day: 15, hour: 1, minute: 52))
+            refreshing = cacheState == "refreshing"
+            if cacheState == "failed" { message = "offline" }
+        }
         #endif
         if !mock, defaults.string(forKey: "notionTasks.filter") == "自分の担当" {
             defaults.set(NotionTaskFilter.incomplete.rawValue, forKey: "notionTasks.filter")
         }
     }
     private func loadCache() {
-        let cache = defaults.data(forKey: "notionTasks.cache.v1").flatMap { try? JSONDecoder().decode(Cache.self, from: $0) }
-        tasks = cache?.url == configuration.url && cache?.source == configuration.source ? Array((cache?.tasks ?? []).prefix(1000)) : []
+        defaults.removeObject(forKey: "notionTasks.cache.v1")
+        let value = cache.load(scope: scope)
+        tasks = value.rows; bodies = value.bodies; lastUpdated = value.updated; fullUpdated = value.fullUpdated
+    }
+    private func saveCache() {
+        guard !mock else { return }
+        cache.save(.init(scope: scope, rows: tasks, bodies: bodies, updated: lastUpdated, fullUpdated: fullUpdated))
+    }
+    func clearCache() {
+        generation = UUID(); tasks = []; bodies = [:]; lastUpdated = nil; fullUpdated = nil; message = nil
+        if !mock { cache.clear(); defaults.removeObject(forKey: "notionTasks.cache.v1") }
     }
     func connectionChanged() {
         guard !mock else { return }
-        tasks = []; verified = false; message = nil
-        defaults.removeObject(forKey: "notionTasks.cache.v1")
+        clearCache(); verified = false
     }
     func configure() async {
         guard !mock else { return }
@@ -370,16 +401,17 @@ extension NotionDatabaseAPI {
         guard let token = tokenProvider() else { message = "Notion に接続してください"; return }
         checking = true; verified = false; message = nil
         let input = configuration.url
+        let currentGeneration = generation
         defer { checking = false }
         do {
             let db = try await apiFactory(token).taskDatabase(id)
-            guard input == configuration.url, token == tokenProvider() else { return }
+            guard currentGeneration == generation, input == configuration.url, token == tokenProvider() else { return }
             name = db.name; sources = db.sources
             let oldSource = configuration.source
             configuration.source = NotionTaskRules.selectedSource(configuration.source, sources: sources)
             await refresh(remap: oldSource != configuration.source, confirming: true)
         } catch {
-            guard input == configuration.url, token == tokenProvider() else { return }
+            guard currentGeneration == generation, input == configuration.url, token == tokenProvider() else { return }
             verified = false; message = NotionTaskRules.errorMessage(error)
         }
     }
@@ -392,29 +424,46 @@ extension NotionDatabaseAPI {
         }
         await refresh(remap: true)
     }
-    func refresh(remap: Bool = false, confirming: Bool = false) async {
-        guard !mock, !refreshing, verified || confirming, let token = tokenProvider() else { return }
+    func refresh(remap: Bool = false, confirming: Bool = false, force: Bool = true) async {
+        guard !mock, NotionPageRefreshRules.shouldStart(refreshing: refreshing, force: force, updated: lastUpdated, now: Date()), verified || confirming, let token = tokenProvider() else { return }
         refreshing = true
         let input = configuration.url
+        var requestGeneration = generation
+        let started = Date()
+        let full = NotionPageRefreshRules.full(force: force || remap, updated: fullUpdated, now: started)
         defer { refreshing = false }
         do {
             let api = apiFactory(token)
             guard let databaseID = NotionDatabaseInput.id(from: input) else { return }
             let database = try await api.taskDatabase(databaseID)
-            guard input == configuration.url, token == tokenProvider() else { return }
+            guard requestGeneration == generation, input == configuration.url, token == tokenProvider() else { return }
             guard let source = NotionTaskRules.selectedSource(configuration.source, sources: database.sources) else { throw NotionAPIError.invalidResponse }
             let needsMapping = remap || source != configuration.mappedSource
             name = database.name; sources = database.sources; configuration.source = source
+            requestGeneration = generation
             let (schema, completed, categories) = try await api.taskSchema(source, statusName: needsMapping ? nil : configuration.mapping.status)
+            guard requestGeneration == generation, token == tokenProvider() else { return }
             let mapping = needsMapping ? NotionTaskMapping.automatic(schema) : configuration.mapping
-            let fetched = try await api.tasks(source: source, mapping: mapping, completedIDs: completed, categories: categories)
-            guard source == configuration.source, input == configuration.url, token == tokenProvider() else { return }
-            properties = schema; configuration.mapping = mapping; configuration.mappedSource = source
-            tasks = fetched; message = nil; verified = true
-            defaults.set(try? JSONEncoder().encode(Cache(url: input, source: source, tasks: Array(fetched.prefix(1000)))), forKey: "notionTasks.cache.v1")
+            configuration.mapping = mapping; configuration.mappedSource = source
+            requestGeneration = generation
+            let fetched = try await api.tasks(source: source, mapping: mapping, completedIDs: completed, categories: categories, editedSince: full ? nil : lastUpdated?.addingTimeInterval(-60))
+            guard requestGeneration == generation, source == configuration.source, input == configuration.url, token == tokenProvider() else { return }
+            properties = schema
+            let previous = tasks
+            let currentGeneration = generation
+            var refreshedBodies = bodies
+            for row in fetched where bodies[row.id] != nil && previous.first(where: { $0.id == row.id })?.edited != row.edited {
+                refreshedBodies[row.id] = try await api.taskBlocks(row.id)
+                guard currentGeneration == generation, token == tokenProvider() else { return }
+            }
+            tasks = Array(NotionPageRefreshRules.merge(previous, fetched: fetched, full: full).prefix(NotionPageRefreshRules.rowLimit))
+            bodies = refreshedBodies.filter { id, _ in tasks.contains { $0.id == id } }
+            message = nil; verified = true; lastUpdated = started
+            if full { fullUpdated = started }
+            saveCache()
         } catch {
-            guard input == configuration.url, token == tokenProvider() else { return }
-            message = NotionTaskRules.errorMessage(error); verified = false
+            guard requestGeneration == generation, input == configuration.url, token == tokenProvider() else { return }
+            message = NotionTaskRules.errorMessage(error); if !hasCache { verified = false }
         }
     }
     func blocks(for id: String) async throws -> [NotionTaskBlock] {
@@ -425,8 +474,12 @@ extension NotionDatabaseAPI {
             return Self.previewBlocks()
         }
         #endif
-        guard let token = NotionTokenStore.read() else { throw NotionAPIError.missingToken }
-        return try await NotionDatabaseAPI(token: token).taskBlocks(id)
+        if let body = bodies[id] { return body }
+        guard let token = tokenProvider() else { throw NotionAPIError.missingToken }
+        let currentGeneration = generation
+        let body = try await apiFactory(token).taskBlocks(id)
+        guard currentGeneration == generation, token == tokenProvider() else { throw CancellationError() }
+        bodies[id] = body; saveCache(); return body
     }
     #if DEBUG
     static func previewBlocks() -> [NotionTaskBlock] {

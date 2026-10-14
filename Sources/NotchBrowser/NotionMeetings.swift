@@ -22,7 +22,7 @@ enum NotionMeetingDateLabels {
     }
 }
 
-struct NotionMeeting: Identifiable, Equatable {
+struct NotionMeeting: Codable, Identifiable, Equatable {
     let id: String
     let title: String
     let status: String
@@ -195,10 +195,18 @@ extension NotionDatabaseAPI {
 
 @MainActor final class NotionMeetingsStore: ObservableObject {
     static let shared = NotionMeetingsStore()
+    private var searchBodies: [String: [NotionTaskBlock]] = [:]
+    private let cache: NotionPageCache<NotionMeeting>
+    @Published private(set) var bodies: [String: [NotionTaskBlock]] = [:]
+    @Published private(set) var lastUpdated: Date?
+    var hasCache: Bool { lastUpdated != nil }
     private let defaults: UserDefaults
     private let tokenProvider: () -> String?
     private let apiFactory: (String) -> NotionDatabaseAPI
-    @Published var fallback: String { didSet { if !isMock { defaults.set(fallback, forKey: "notionMeetings.fallback"); generation = UUID(); MeetingSearchStore.shared.clear() }; meetings = []; message = nil } }
+    @Published var fallback: String { didSet {
+        guard oldValue != fallback else { return }
+        if !isMock { defaults.set(fallback, forKey: "notionMeetings.fallback"); clearCache() }
+    } }
     @Published var meetings: [NotionMeeting] = []
     @Published var refreshing = false
     @Published var message: String?
@@ -214,17 +222,31 @@ extension NotionDatabaseAPI {
     private(set) var mockState: String?
     var isMock: Bool { mockState != nil }
     init(defaults: UserDefaults = SettingsDefaults.current, tokenProvider: @escaping () -> String? = { NotionTokenStore.read() },
-         apiFactory: @escaping (String) -> NotionDatabaseAPI = { NotionDatabaseAPI(token: $0) }, previewState: String? = nil) {
+         apiFactory: @escaping (String) -> NotionDatabaseAPI = { NotionDatabaseAPI(token: $0) }, previewState: String? = nil, cacheURL: URL? = nil) {
+        cache = NotionPageCache(name: "NotionMeetingsCache", url: cacheURL)
         self.defaults = defaults; self.tokenProvider = tokenProvider; self.apiFactory = apiFactory
         fallback = defaults.string(forKey: "notionMeetings.fallback") ?? ""
         newestFirst = defaults.object(forKey: "notionMeetings.newestFirst") as? Bool ?? true
         let savedLimit = defaults.integer(forKey: "notionMeetings.displayLimit")
         displayLimit = [10, 25, 50].contains(savedLimit) ? savedLimit : 50
         #if DEBUG
-        mockState = previewState ?? CommandLine.arguments.first { $0.hasPrefix("--meetings=") }.map { String($0.dropFirst(11)) }
+        let cacheState = CommandLine.arguments.first { $0.hasPrefix("--cache-state=") }.map { String($0.dropFirst(14)) }
+        let previewing = previewState != nil || cacheState != nil || CommandLine.arguments.contains { $0.hasPrefix("--meetings=") || $0.hasPrefix("--tasks=") || $0.hasPrefix("--meeting-search=") }
+        #else
+        let previewing = false
+        #endif
+        if !previewing {
+            let snapshot = cache.load(scope: fallback)
+            meetings = snapshot.rows; bodies = snapshot.bodies; lastUpdated = snapshot.updated
+        }
+        #if DEBUG
+        mockState = (cacheState == "settings" ? "settings" : nil) ?? previewState ?? (cacheState != nil ? "list" : nil) ?? CommandLine.arguments.first { $0.hasPrefix("--meetings=") }.map { String($0.dropFirst(11)) }
         let searchPreview = MeetingSearchPreviewState.parse(arguments: CommandLine.arguments)?.rawValue
         if searchPreview != nil { mockState = "search" }
         if let state = mockState {
+            if cacheState != nil { lastUpdated = Calendar.current.date(from: DateComponents(year: 2026, month: 10, day: 15, hour: 1, minute: 52)) }
+            refreshing = cacheState == "refreshing"
+            if cacheState == "failed" { message = "offline" }
             meetings = state == "empty" ? [] : (0..<6).compactMap { index in
                 let start = searchPreview != nil ? Calendar.current.date(byAdding: .day, value: index + 5, to: Calendar.current.dateInterval(of: .month, for: Calendar.current.date(byAdding: .month, value: -1, to: Date())!)!.start)! : Date().addingTimeInterval(Double(-index * 86400))
                 let formatter = ISO8601DateFormatter()
@@ -244,17 +266,48 @@ extension NotionDatabaseAPI {
         #endif
     }
     private func api(_ token: String) -> NotionDatabaseAPI { var api = apiFactory(token); api.version = "2026-03-11"; return api }
-    func connectionChanged() { guard !isMock else { return }; generation = UUID(); meetings = []; message = nil; MeetingSearchStore.shared.clear() }
-    func refresh() async {
-        guard !isMock, !refreshing, let token = tokenProvider() else { return }
+    private func saveCache() {
+        guard !isMock else { return }
+        cache.save(.init(scope: fallback, rows: meetings, bodies: bodies, updated: lastUpdated))
+    }
+    func clearCache() {
+        generation = UUID(); meetings = []; bodies = [:]; searchBodies = [:]; lastUpdated = nil; message = nil
+        if !isMock { cache.clear() }
+        MeetingSearchStore.shared.clear()
+    }
+    func connectionChanged() { guard !isMock else { return }; clearCache() }
+    func refresh(force: Bool = true) async {
+        guard !isMock, NotionPageRefreshRules.shouldStart(refreshing: refreshing, force: force, updated: lastUpdated, now: Date()), let token = tokenProvider() else { return }
         let generation = self.generation; let input = fallback
+        let started = Date()
         refreshing = true
         defer { refreshing = false }
         do {
             let fetched = try await api(token).meetingNotes(fallback: input)
             guard generation == self.generation, input == fallback, token == tokenProvider() else { return }
-            meetings = fetched; message = nil
-            await MeetingSearchStore.shared.index(meetings: fetched) { try await self.blocks($0) }
+            var refreshedBodies = bodies
+            for row in fetched {
+                guard let old = meetings.first(where: { $0.id == row.id }),
+                      NotionPageRefreshRules.meetingBodyChanged(old: old, new: row) else { continue }
+                for (_, id) in old.sections { searchBodies.removeValue(forKey: id) }
+                for (_, id) in row.sections where bodies[id] != nil || old.status != "notes_ready" && row.status == "notes_ready" && old.sections.contains(where: { bodies[$0.1] != nil }) {
+                    refreshedBodies[id] = try await api(token).meetingBody(id)
+                    guard generation == self.generation, token == tokenProvider() else { return }
+                }
+            }
+            meetings = NotionPageRefreshRules.merge(meetings, fetched: fetched, full: true)
+            let valid = Set(fetched.flatMap { $0.sections.map { $0.1 } })
+            searchBodies = searchBodies.filter { valid.contains($0.key) }
+            bodies = refreshedBodies.filter { valid.contains($0.key) }
+            message = nil; lastUpdated = started; saveCache()
+            await MeetingSearchStore.shared.index(meetings: fetched) { id in
+                if let body = self.bodies[id] { return body }
+                if let body = self.searchBodies[id] { return body }
+                let body = try await self.api(token).meetingBody(id)
+                guard generation == self.generation, token == self.tokenProvider() else { throw CancellationError() }
+                self.searchBodies[id] = body
+                return body
+            }
         } catch {
             guard generation == self.generation, input == fallback, token == tokenProvider() else { return }
             message = error.localizedDescription
@@ -264,10 +317,13 @@ extension NotionDatabaseAPI {
         #if DEBUG
         if isMock { return ["progress", "empty-tabs"].contains(mockState ?? "") ? [] : Self.previewBlocks(section: id) }
         #endif
+        if let body = bodies[id] { return body }
+        if let body = searchBodies[id] { bodies[id] = body; saveCache(); return body }
         guard let token = tokenProvider() else { throw NotionAPIError.missingToken }
         let generation = self.generation
         let result = try await api(token).meetingBody(id)
         guard generation == self.generation, token == tokenProvider() else { throw CancellationError() }
+        bodies[id] = result; saveCache()
         return result
     }
     #if DEBUG

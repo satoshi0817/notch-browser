@@ -2191,7 +2191,7 @@ final class BrowserViewController: NSViewController {
         tasksPanel?.isHidden = false
         updateNotionTabSelection()
         updateChrome()
-        Task { await NotionTasksStore.shared.refresh() }
+        Task { await NotionTasksStore.shared.refresh(force: false) }
     }
 
     @objc func showMeetings() {
@@ -2203,6 +2203,7 @@ final class BrowserViewController: NSViewController {
         meetingsPanel?.isHidden = false
         updateNotionTabSelection()
         updateChrome()
+        Task { await NotionMeetingsStore.shared.refresh(force: false) }
     }
 
     // MARK: Modals

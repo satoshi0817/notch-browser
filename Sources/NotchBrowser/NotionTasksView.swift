@@ -2,13 +2,15 @@ import SwiftUI
 
 struct NotionTabListHeader<Leading: View>: View {
     let refreshing: Bool
+    var failureHelp: String? = nil
     let onRefresh: () -> Void
     let onSettings: () -> Void
     let settingsLabel: String
     let leading: () -> Leading
-    init(refreshing: Bool, onRefresh: @escaping () -> Void, onSettings: @escaping () -> Void,
+    init(refreshing: Bool, failureHelp: String? = nil, onRefresh: @escaping () -> Void, onSettings: @escaping () -> Void,
          settingsLabel: String, @ViewBuilder leading: @escaping () -> Leading) {
         self.refreshing = refreshing
+        self.failureHelp = failureHelp
         self.onRefresh = onRefresh
         self.onSettings = onSettings
         self.settingsLabel = settingsLabel
@@ -17,8 +19,7 @@ struct NotionTabListHeader<Leading: View>: View {
     var body: some View {
         HStack(spacing: 8) {
             leading()
-            Button(action: onRefresh) { Image(systemName: "arrow.clockwise") }
-                .disabled(refreshing).help("更新")
+            NotionRefreshButton(refreshing: refreshing, failureHelp: failureHelp, action: onRefresh)
             Button(action: onSettings) { Image(systemName: "gearshape") }
                 .help(settingsLabel).accessibilityLabel("\(settingsLabel)を開く")
         }.padding()
@@ -97,6 +98,7 @@ enum NotionSettingsFieldLayout {
             Picker("タスクの既定フィルタ", selection: $store.filter) {
                 ForEach(NotionTaskFilter.allCases, id: \.self) { Text($0.rawValue).tag($0) }
             }
+            NotionCacheSettingsRow(updated: store.lastUpdated, clear: store.clearCache)
         }
         .task { if connection.tokenValid && store.available { await store.configure() } }
     }
@@ -122,9 +124,11 @@ enum NotionSettingsFieldLayout {
     @State private var showingSettings = false
     @ObservedObject private var store = NotionTasksStore.shared
     @State private var selected: NotionTask?
+    @State private var deletedSelection = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
         VStack(spacing: 0) {
-            NotionConnectionNotice(onOpenSettings: onOpenSettings)
+            if !store.hasCache { NotionConnectionNotice(onOpenSettings: onOpenSettings) }
             if showingSettings && !connection.showsConnectionError {
                 HStack { Button("‹ 戻る") { showingSettings = false }; Spacer() }.padding(12)
             } else if !connection.showsConnectionError && store.configuration.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -132,10 +136,12 @@ enum NotionSettingsFieldLayout {
             }
             if connection.showsConnectionError {
                 Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .overlay { if store.hasCache { taskContent } }
             } else if showingSettings {
                 NotionTasksSettingsPage(onOpenSettings: onOpenSettings)
             } else if connection.showsLoading {
-                NotionConnectionLoading().frame(maxWidth: .infinity, maxHeight: .infinity)
+                if store.hasCache { taskContent }
+                else { NotionConnectionLoading().frame(maxWidth: .infinity, maxHeight: .infinity) }
             } else if store.configuration.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Spacer()
                 VStack(spacing: 12) {
@@ -146,38 +152,52 @@ enum NotionSettingsFieldLayout {
                 }
                 Spacer()
             } else {
-                GeometryReader { geometry in
-                    HStack(spacing: 0) {
-                        if geometry.size.width >= 640 {
-                            list.frame(width: (geometry.size.width - 1) / 2)
-                            Divider()
-                            Group {
-                                if let selected { detail(selected, narrow: false) }
-                                else { Text("タスクを選ぶと詳細が表示されます").foregroundStyle(.tertiary) }
-                            }.frame(width: (geometry.size.width - 1) / 2, height: geometry.size.height)
-                        } else if let selected {
-                            detail(selected, narrow: true).frame(maxWidth: .infinity)
-                        } else {
-                            list.frame(maxWidth: .infinity)
-                        }
-                    }
-                }
+                taskContent
             }
         }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: store.tasks.map(\.id))
         .background(Color(nsColor: .windowBackgroundColor))
         .task(id: openingID) {
             #if DEBUG
             if ["tab-settings", "settings", "sources", "settings-error"].contains(store.mockState ?? "") { showingSettings = true }
             if ["detail", "loading", "no-body"].contains(store.mockState ?? "") { selected = store.tasks.first }
             #endif
-            if connection.tokenValid { await store.refresh() }
+            if connection.tokenValid { await store.refresh(force: false) }
         }
         .onChange(of: connection.state) { _, state in
-            if state == .connected { Task { await store.refresh() } }
+            if state == .connected { Task { await store.refresh(force: false) } }
         }
-        .onChange(of: store.configuration.source) { _, _ in selected = nil }
+        .onChange(of: store.configuration.source) { _, _ in selected = nil; deletedSelection = false }
+        .onChange(of: store.hasCache) { _, cached in if !cached { deletedSelection = false } }
         .onChange(of: store.tasks) { _, tasks in
-            if let id = selected?.id { selected = tasks.first { $0.id == id } }
+            if let id = selected?.id {
+                deletedSelection = store.hasCache && NotionPageRefreshRules.deletedSelection(id, rows: tasks)
+                selected = tasks.first { $0.id == id }
+            }
+        }
+    }
+    private var taskContent: some View {
+        GeometryReader { geometry in
+            HStack(spacing: 0) {
+                if geometry.size.width >= 640 {
+                    list.frame(width: (geometry.size.width - 1) / 2)
+                    Divider()
+                    Group {
+                        if deletedSelection { NotionDeletedItemView() }
+                        else if let selected { detail(selected, narrow: false) }
+                        else { Text("タスクを選ぶと詳細が表示されます").foregroundStyle(.tertiary) }
+                    }.frame(width: (geometry.size.width - 1) / 2, height: geometry.size.height)
+                } else if deletedSelection {
+                    VStack(alignment: .leading) {
+                        Button("‹ 一覧") { deletedSelection = false }.buttonStyle(.plain).padding(20)
+                        NotionDeletedItemView()
+                    }
+                } else if let selected {
+                    detail(selected, narrow: true).frame(maxWidth: .infinity)
+                } else {
+                    list.frame(maxWidth: .infinity)
+                }
+            }
         }
     }
     private func detail(_ task: NotionTask, narrow: Bool) -> some View {
@@ -193,6 +213,7 @@ enum NotionSettingsFieldLayout {
     private var list: some View {
         VStack(spacing: 0) {
             NotionTabListHeader(refreshing: store.refreshing,
+                               failureHelp: store.hasCache && store.message != nil ? NotionPageRefreshRules.failureHelp(store.lastUpdated) : nil,
                                onRefresh: { Task { await store.refresh() } },
                                onSettings: { showingSettings = true }, settingsLabel: "タスク設定") {
                 Picker("表示", selection: $store.filter) {
@@ -201,7 +222,8 @@ enum NotionSettingsFieldLayout {
                     }
                 }.pickerStyle(.segmented)
             }
-            if let message = store.message { Text(message).font(.caption).foregroundStyle(.red).padding(.horizontal) }
+            if let message = store.message, !store.hasCache { Text(message).font(.caption).foregroundStyle(.red).padding(.horizontal) }
+            if store.refreshing && !store.hasCache { ProgressView().padding() }
             let rows = NotionTaskRules.rows(store.tasks, filter: store.filter)
             if rows.isEmpty {
                 Spacer()
@@ -218,7 +240,8 @@ enum NotionSettingsFieldLayout {
                                 ForEach(items) { task in
                                     row(task)
                                         .contentShape(Rectangle())
-                                        .onTapGesture { selected = task }
+                                        .onTapGesture { deletedSelection = false; selected = task }
+                                        .transition(.opacity)
                                     Divider()
                                 }
                             }
@@ -272,9 +295,16 @@ enum NotionSettingsFieldLayout {
     let task: NotionTask
     let back: () -> Void
     let narrow: Bool
+    @ObservedObject private var store = NotionTasksStore.shared
     @State private var blocks: [NotionTaskBlock] = []
     @State private var loading = true
     @State private var error: String?
+    init(task: NotionTask, back: @escaping () -> Void, narrow: Bool) {
+        self.task = task; self.back = back; self.narrow = narrow
+        let cached = NotionTasksStore.shared.bodies[task.id]
+        _blocks = State(initialValue: cached ?? [])
+        _loading = State(initialValue: cached == nil)
+    }
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -292,9 +322,12 @@ enum NotionSettingsFieldLayout {
                 else if blocks.isEmpty { Text("本文はありません").foregroundStyle(.tertiary) }
                 else { ForEach(blocks) { block in NotionTaskBlockView(block: block) } }
             }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
+        }.onChange(of: store.bodies) { _, bodies in
+            if let body = bodies[task.id] { blocks = body }
         }.task {
-            loading = true
-            do { blocks = try await NotionTasksStore.shared.blocks(for: task.id) }
+            if let cached = store.bodies[task.id] { blocks = cached; loading = false }
+            else { loading = true }
+            do { blocks = try await store.blocks(for: task.id) }
             catch { self.error = error.localizedDescription }
             loading = false
         }

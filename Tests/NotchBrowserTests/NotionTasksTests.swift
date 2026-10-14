@@ -382,16 +382,22 @@ final class NotionTasksTests: XCTestCase {
         configuration.source = "source"
         defaults.set(try JSONEncoder().encode(configuration), forKey: "notionTasks.configuration")
         defaults.set(try JSONEncoder().encode(NotionTasksStore.Cache(url: configuration.url, source: "source", tasks: (0..<1005).map { task("\($0)") })), forKey: "notionTasks.cache.v1")
-        let store = NotionTasksStore(defaults: defaults)
-        XCTAssertEqual(store.tasks.count, 1000)
+        let cacheURL = FileManager.default.temporaryDirectory.appendingPathComponent("notion-tasks-\(UUID()).json")
+        defer { try? FileManager.default.removeItem(at: cacheURL) }
+        let store = NotionTasksStore(defaults: defaults, tokenProvider: { nil }, cacheURL: cacheURL)
+        XCTAssertTrue(store.tasks.isEmpty, "Discard the old UserDefaults cache")
+        XCTAssertNil(defaults.data(forKey: "notionTasks.cache.v1"))
         store.configuration.autoSelected = true
         store.filter = .all
-        let restored = NotionTasksStore(defaults: defaults)
+        let cache = NotionPageCache<NotionTask>(name: "test", url: cacheURL)
+        cache.save(.init(scope: configuration.url + "|source", rows: [task("cached")], updated: Date()))
+        let restored = NotionTasksStore(defaults: defaults, tokenProvider: { nil }, cacheURL: cacheURL)
         XCTAssertTrue(restored.configuration.autoSelected)
         XCTAssertEqual(restored.filter, .all)
+        XCTAssertEqual(restored.tasks.map(\.id), ["cached"])
         configuration.source = "other"
         defaults.set(try JSONEncoder().encode(configuration), forKey: "notionTasks.configuration")
-        XCTAssertTrue(NotionTasksStore(defaults: defaults).tasks.isEmpty, "Do not display another source's cache")
+        XCTAssertTrue(NotionTasksStore(defaults: defaults, tokenProvider: { nil }, cacheURL: cacheURL).tasks.isEmpty, "Do not display another source's cache")
         store.connectionChanged()
         XCTAssertNil(defaults.data(forKey: "notionTasks.cache.v1"))
     }
