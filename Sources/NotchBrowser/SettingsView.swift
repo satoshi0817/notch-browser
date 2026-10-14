@@ -62,12 +62,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 }
 
 enum SettingsSection: String, CaseIterable, Identifiable {
-    case tabs = "固定ページ", notion = "Notion", profiles = "プロファイル", displays = "ディスプレイ", motion = "動き", toolbar = "ボタン配置", general = "一般"
+    case tabs = "固定ページ", notion = "Notion", semanticSearch = "意味検索", profiles = "プロファイル", displays = "ディスプレイ", motion = "動き", toolbar = "ボタン配置", general = "一般"
     var id: Self { self }
     var symbol: String {
         switch self {
         case .tabs: "square.stack"
         case .notion: "bubble.left.and.bubble.right"
+        case .semanticSearch: "magnifyingglass"
         case .profiles: "person.crop.circle"
         case .displays: "display"
         case .motion: "waveform.path"
@@ -124,6 +125,7 @@ struct SettingsView: View {
                     switch section {
                     case .tabs: PinnedTabsSettings(initialSelection: pinnedSelection, onOpenConnection: { section = .notion })
                     case .notion: NotionSettingsView(onOpenPinnedPages: { section = NotionSettingsView.pageSettingsDestination })
+                    case .semanticSearch: MeetingSearchSettingsPage()
                     case .profiles: ProfilesSettings()
                     case .displays: DisplaysSettings()
                     case .motion: MotionSettingsView()
@@ -162,6 +164,7 @@ struct SettingsPreviewLaunch {
         switch String(pane.dropFirst("--settings-pane=".count)) {
         case "pinned": section = .tabs
         case "notion": section = .notion
+        case "semantic-search": section = .semanticSearch
         default: return nil
         }
         let selection = arguments.first(where: { $0.hasPrefix("--pinned-selection=") })

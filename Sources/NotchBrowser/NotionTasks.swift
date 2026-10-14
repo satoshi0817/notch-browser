@@ -149,6 +149,7 @@ struct NotionTaskBlock: Identifiable, Hashable {
     var speaker: String? = nil
     var timestamp: String? = nil
     var listNumber = 1
+    var edited: Date = .distantPast
     static func parse(_ raw: [String: Any], depth: Int) -> Self {
         let type = raw["type"] as? String ?? "unsupported"
         let value = raw[type] as? [String: Any] ?? [:]
@@ -164,7 +165,8 @@ struct NotionTaskBlock: Identifiable, Hashable {
                 let url = (item["href"] as? String) ?? ((content["link"] as? [String: Any])?["url"] as? String)
                 return Run(text: item["plain_text"] as? String ?? content["content"] as? String ?? "", url: url.flatMap(URL.init(string:)))
             }, speaker: (value["speaker"] as? String) ?? ((value["speaker"] as? [String: Any])?["name"] as? String),
-            timestamp: (value["timestamp"] as? String) ?? (value["start_time"] as? String))
+            timestamp: (value["timestamp"] as? String) ?? (value["start_time"] as? String),
+            edited: (raw["last_edited_time"] as? String).flatMap(NotionMessage.parseDate) ?? .distantPast)
     }
 }
 struct NotionTaskDatabase {

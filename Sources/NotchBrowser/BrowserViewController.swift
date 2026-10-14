@@ -164,7 +164,8 @@ final class BrowserViewController: NSViewController {
     private var findGeneration = 0
     private let notes = ScratchpadView()
     private var notionPanel: NSHostingView<NotionAgentsPanel>?
-    private var meetingsPanel: NSHostingView<NotionMeetingsPanel>?
+    private var meetingsPanel: NotionMeetingsHostingView?
+    let meetingSearchEscape = MeetingSearchEscapeController()
     private lazy var meetingsTabButton: TabButton = {
         let button = TabButton(title: "議事録", image: NSImage(systemSymbolName: "person.2", accessibilityDescription: "議事録") ?? NSImage(), target: self, action: #selector(showMeetings))
         button.bezelStyle = .recessed
@@ -471,7 +472,8 @@ final class BrowserViewController: NSViewController {
             tasks.bottomAnchor.constraint(equalTo: webContainer.bottomAnchor)
         ])
         tasksPanel = tasks
-        let meetings = NSHostingView(rootView: NotionMeetingsPanel(onOpenSettings: { [weak self] in self?.onOpenNotionSettings?() }))
+        let meetings = NotionMeetingsHostingView(rootView: NotionMeetingsPanel(onOpenSettings: { [weak self] in self?.onOpenNotionSettings?() }, escapeController: meetingSearchEscape,
+            onUnhandledEscape: { [weak self] in _ = self?.dismissOverlay() }))
         meetings.isHidden = true
         meetings.translatesAutoresizingMaskIntoConstraints = false
         chrome.addSubview(meetings)
@@ -2136,6 +2138,7 @@ final class BrowserViewController: NSViewController {
         }
     }
     func dismissOverlay() -> Bool {
+        if clearMeetingSearchOnEscape() { return true }
         if meetingsPanel?.isHidden == false { hideNotion(); updateChrome(); focusContent(); return true }
         if tasksPanel?.isHidden == false { tasksPanel?.isHidden = true; updateNotionTabSelection(); updateChrome(); focusContent(); return true }
         if addressPopover.isShown { addressPopover.close(); focusContent(); return true }
@@ -2144,6 +2147,10 @@ final class BrowserViewController: NSViewController {
         if !switcher.isHidden { closeSwitcher(nil); return true }
         if !findBar.isHidden { closeFind(nil); return true }
         return false
+    }
+
+    func clearMeetingSearchOnEscape() -> Bool {
+        meetingSearchEscape.clearIfActive(meetingsVisible: meetingsPanel?.isHidden == false)
     }
 
     private var notionAgentTabVisible: Bool {
@@ -2191,7 +2198,8 @@ final class BrowserViewController: NSViewController {
         guard !isSingleTabWindow, notionTabsConnected else { return }
         hideNotion()
         notes.isHidden = true; switcher.isHidden = true
-        meetingsPanel?.rootView = NotionMeetingsPanel(onOpenSettings: { [weak self] in self?.onOpenNotionSettings?() })
+        meetingsPanel?.rootView = NotionMeetingsPanel(onOpenSettings: { [weak self] in self?.onOpenNotionSettings?() }, escapeController: meetingSearchEscape,
+            onUnhandledEscape: { [weak self] in _ = self?.dismissOverlay() })
         meetingsPanel?.isHidden = false
         updateNotionTabSelection()
         updateChrome()

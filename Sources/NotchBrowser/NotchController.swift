@@ -158,6 +158,7 @@ private struct NotionNotificationBanner: View {
 /// Borderless panel that sits over the menu bar, on top of the notch.
 final class NotchPanel: NSPanel {
     var onCancel: (() -> Void)?
+    var onEscape: (() -> Bool)?
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
@@ -166,6 +167,8 @@ final class NotchPanel: NSPanel {
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
 
     override func sendEvent(_ event: NSEvent) {
+        // Route Esc before a field editor, WKWebView or SwiftUI consumes it.
+        if event.type == .keyDown, event.keyCode == 53, onEscape?() == true { return }
         // Take keyboard focus on click without activating the app (like Spotlight),
         // so the app underneath keeps its menu bar.
         if event.type == .leftMouseDown || event.type == .rightMouseDown, !isKeyWindow {
@@ -185,6 +188,7 @@ final class NotchPanel: NSPanel {
     }
 
     override func cancelOperation(_ sender: Any?) {
+        if onEscape?() == true { return }
         onCancel?()
     }
 }
@@ -389,6 +393,7 @@ final class NotchController: NSObject, NSWindowDelegate {
         super.init()
 
         panel.isFloatingPanel = true
+        panel.becomesKeyOnlyIfNeeded = false
         panel.level = Self.level // after isFloatingPanel, which resets the level to .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
         panel.isOpaque = false
@@ -400,6 +405,11 @@ final class NotchController: NSObject, NSWindowDelegate {
         applyScreenCaptureSetting()
         panel.delegate = self
         panel.contentView = root
+        panel.onEscape = { [weak self] in
+            guard let self, self.manager.browser.isViewLoaded,
+                  self.manager.browser.view.window === self.panel else { return false }
+            return self.manager.browser.clearMeetingSearchOnEscape()
+        }
         panel.onCancel = { [weak self] in
             guard let self, !self.manager.browser.dismissOverlay() else { return }
             if self.shelfVisible { self.hideShelf() } else { self.collapse() }

@@ -35,6 +35,14 @@ struct NotionMeeting: Identifiable, Equatable {
     let notes: String?
     let transcript: String?
     let created: Date
+    var edited: Date = .distantPast
+    func listMetadata(timeZone: TimeZone = .current) -> String {
+        let formatter = DateFormatter(); formatter.locale = Locale(identifier: "ja_JP"); formatter.timeZone = timeZone; formatter.dateFormat = "M/d"
+        var parts = [start == .distantPast ? "日時なし" : formatter.string(from: start)]
+        if let duration { parts.append("\(duration)分") }
+        parts.append("\(attendees.count)人")
+        return parts.joined(separator: "・")
+    }
     var start: Date { calendarStart ?? recordingStart ?? created }
     func rowMetadata(timeZone: TimeZone = .current) -> String {
         var parts = [NotionMeetingDateLabels.time(start, timeZone: timeZone)]
@@ -79,7 +87,8 @@ struct NotionMeeting: Identifiable, Equatable {
         guard let id = raw["id"] as? String, let type = raw["type"] as? String,
               ["meeting_notes", "transcription"].contains(type), let value = raw[type] as? [String: Any] else { return nil }
         func date(_ container: String, _ key: String) -> Date? {
-            ((value[container] as? [String: Any])?[key] as? String).flatMap(NotionMessage.parseDate)
+            let object = value[container] as? [String: Any] ?? (container == "calendar" ? value["calendar_event"] as? [String: Any] : nil)
+            return (object?[key] as? String).flatMap(NotionMessage.parseDate)
         }
         func blockID(_ key: String) -> String? {
             let children = value["children"] as? [String: Any] ?? [:]
@@ -98,7 +107,8 @@ struct NotionMeeting: Identifiable, Equatable {
                      calendarStart: date("calendar", "start"), calendarEnd: date("calendar", "end"),
                      recordingStart: date("recording", "start"), recordingEnd: date("recording", "end"), attendees: attendees,
                      summary: blockID("summary"), notes: blockID("notes"), transcript: blockID("transcript"),
-                     created: (raw["created_time"] as? String).flatMap(NotionMessage.parseDate) ?? .distantPast)
+                     created: (raw["created_time"] as? String).flatMap(NotionMessage.parseDate) ?? .distantPast,
+                     edited: (raw["last_edited_time"] as? String).flatMap(NotionMessage.parseDate) ?? .distantPast)
     }
 }
 
@@ -188,7 +198,7 @@ extension NotionDatabaseAPI {
     private let defaults: UserDefaults
     private let tokenProvider: () -> String?
     private let apiFactory: (String) -> NotionDatabaseAPI
-    @Published var fallback: String { didSet { if !isMock { defaults.set(fallback, forKey: "notionMeetings.fallback") }; meetings = []; message = nil } }
+    @Published var fallback: String { didSet { if !isMock { defaults.set(fallback, forKey: "notionMeetings.fallback"); generation = UUID(); MeetingSearchStore.shared.clear() }; meetings = []; message = nil } }
     @Published var meetings: [NotionMeeting] = []
     @Published var refreshing = false
     @Published var message: String?
@@ -212,13 +222,15 @@ extension NotionDatabaseAPI {
         displayLimit = [10, 25, 50].contains(savedLimit) ? savedLimit : 50
         #if DEBUG
         mockState = previewState ?? CommandLine.arguments.first { $0.hasPrefix("--meetings=") }.map { String($0.dropFirst(11)) }
+        let searchPreview = CommandLine.arguments.first { $0.hasPrefix("--meeting-search=") }.map { String($0.dropFirst("--meeting-search=".count)) }
+        if searchPreview != nil { mockState = "search" }
         if let state = mockState {
             meetings = state == "empty" ? [] : (0..<6).compactMap { index in
-                let start = Date().addingTimeInterval(Double(-index * 86400))
+                let start = searchPreview != nil ? Calendar.current.date(byAdding: .day, value: index + 5, to: Calendar.current.dateInterval(of: .month, for: Calendar.current.date(byAdding: .month, value: -1, to: Date())!)!.start)! : Date().addingTimeInterval(Double(-index * 86400))
                 let formatter = ISO8601DateFormatter()
                 var value: [String: Any] = [
                     "title": "プロジェクト定例 \(index + 1)",
-                    "status": state == "progress" ? "summarizing" : ["notes_ready", "transcribing", "summarizing", "failed"][index % 4],
+                    "status": searchPreview != nil ? "notes_ready" : state == "progress" ? "summarizing" : ["notes_ready", "transcribing", "summarizing", "failed"][index % 4],
                     "attendees": ["a", "b", "c"],
                     "calendar": ["start": formatter.string(from: start), "end": formatter.string(from: start.addingTimeInterval(2700))]
                 ]
@@ -232,7 +244,7 @@ extension NotionDatabaseAPI {
         #endif
     }
     private func api(_ token: String) -> NotionDatabaseAPI { var api = apiFactory(token); api.version = "2026-03-11"; return api }
-    func connectionChanged() { guard !isMock else { return }; generation = UUID(); meetings = []; message = nil }
+    func connectionChanged() { guard !isMock else { return }; generation = UUID(); meetings = []; message = nil; MeetingSearchStore.shared.clear() }
     func refresh() async {
         guard !isMock, !refreshing, let token = tokenProvider() else { return }
         let generation = self.generation; let input = fallback
@@ -242,6 +254,7 @@ extension NotionDatabaseAPI {
             let fetched = try await api(token).meetingNotes(fallback: input)
             guard generation == self.generation, input == fallback, token == tokenProvider() else { return }
             meetings = fetched; message = nil
+            await MeetingSearchStore.shared.index(meetings: fetched) { try await self.blocks($0) }
         } catch {
             guard generation == self.generation, input == fallback, token == tokenProvider() else { return }
             message = error.localizedDescription
