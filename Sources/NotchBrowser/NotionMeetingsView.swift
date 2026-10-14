@@ -3,10 +3,16 @@ import SwiftUI
 /// Shared by Settings > fixed pages and the meeting tab's gear.
 @MainActor struct NotionMeetingsSettingsPage: View {
     var onOpenSettings: () -> Void = {}
+    @ObservedObject private var settings: SettingsStore
     @ObservedObject private var connection = NotionConnectionStore.shared
     @ObservedObject private var store = NotionMeetingsStore.shared
+    init(onOpenSettings: @escaping () -> Void = {}, settings: SettingsStore = .shared) {
+        self.onOpenSettings = onOpenSettings
+        _settings = ObservedObject(wrappedValue: settings)
+    }
     var body: some View {
         Form {
+            NotionPageDisplaySettings(page: .meetings, settings: settings)
             NotionTabConnectionSettings(onOpenSettings: onOpenSettings)
             Group {
                 dataSettings
@@ -31,7 +37,7 @@ import SwiftUI
         }
     }
     private var displaySettings: some View {
-        Section("表示") {
+        Section("一覧") {
             Picker("並び順", selection: $store.newestFirst) {
                 Text("新しい順").tag(true)
                 Text("古い順").tag(false)
@@ -62,7 +68,7 @@ import SwiftUI
         .task {
             #if DEBUG
             showingSettings = store.mockState == "settings"
-            if ["detail", "progress"].contains(store.mockState ?? "") { selected = store.meetings.first }
+            if ["detail", "progress", "empty-tabs"].contains(store.mockState ?? "") { selected = store.meetings.first }
             #endif
             if connection.tokenValid { await store.refresh() }
         }
@@ -146,9 +152,7 @@ import SwiftUI
         Button { selected = meeting } label: {
             HStack(spacing: 8) {
                 Text(meeting.title).font(.body).foregroundStyle(.primary).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
-                Text(NotionMeetingDateLabels.time(meeting.start)).monospacedDigit()
-                if let minutes = meeting.duration { Text("\(minutes)分") }
-                Text("\(meeting.attendees.count)人")
+                Text(meeting.rowMetadata()).monospacedDigit()
                 NotionMeetingStatusChip(meeting: meeting)
             }.font(.caption).foregroundStyle(.secondary).padding(.horizontal, 12).frame(height: 36)
                 .background(selected?.id == meeting.id ? Color.accentColor.opacity(0.12) : .clear)
@@ -179,46 +183,132 @@ private struct NotionMeetingStatusChip: View {
     @State private var selection = ""
     @State private var loading = true
     @State private var error: String?
-    private var visibleSections: [(String, String)] { meeting.visibleSections(bodies: bodies) }
+    private var sections: [(String, String)] {
+        [("要約", meeting.summary ?? "summary"), ("メモ", meeting.notes ?? "notes"),
+         ("文字起こし", meeting.transcript ?? "transcript")]
+    }
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                Text(meeting.title).font(.title2.weight(.semibold))
-                Text(meeting.detailMetadata()).lineLimit(1).foregroundStyle(.secondary)
-                Link("Notion で開く", destination: meeting.url)
-                if meeting.progressing {
-                    NotionMeetingStatusChip(meeting: meeting)
-                    Text("Notion で作成中です。しばらくしてから更新してください").foregroundStyle(.secondary)
-                } else if meeting.status == "failed" { NotionMeetingStatusChip(meeting: meeting) }
-                detailContent
-            }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
-        }.contextMenu { Link("Notion で開く", destination: meeting.url) }
+        GeometryReader { geometry in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text(meeting.title).font(.title2.weight(.semibold))
+                    Text(meeting.detailMetadata()).lineLimit(1).foregroundStyle(.secondary)
+                    Link("Notion で開く", destination: meeting.url)
+                    if meeting.progressing {
+                        NotionMeetingStatusChip(meeting: meeting)
+                        Text("Notion で作成中です。しばらくしてから更新してください").foregroundStyle(.secondary)
+                    } else if meeting.status == "failed" { NotionMeetingStatusChip(meeting: meeting) }
+                    detailContent(emptyHeight: max(160, geometry.size.height - 230))
+                }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
+            }.contextMenu { Link("Notion で開く", destination: meeting.url) }
+        }
         .task { await load() }
     }
-    @ViewBuilder private var detailContent: some View {
-        if !meeting.progressing {
-            Divider()
-            if loading { ProgressView() }
-            else if let error {
-                Text(error).foregroundStyle(.red)
-                Button("再試行") { Task { await load() } }
-            } else if visibleSections.isEmpty { Text("本文はありません").foregroundStyle(.secondary) }
-            else {
-                Picker("本文", selection: $selection) {
-                    ForEach(visibleSections, id: \.1) { section in Text(section.0).tag(section.1) }
-                }.pickerStyle(.segmented).labelsHidden()
-                ForEach(bodies[selection] ?? []) { block in NotionTaskBlockView(block: block) }
-            }
+    @ViewBuilder private func detailContent(emptyHeight: CGFloat) -> some View {
+        Divider()
+        Picker("本文", selection: $selection) {
+            ForEach(sections, id: \.1) { Text($0.0).tag($0.1) }
+        }.pickerStyle(.segmented).labelsHidden()
+        if loading { ProgressView() }
+        else if (bodies[selection] ?? []).isEmpty {
+            VStack(spacing: 12) {
+                Spacer(minLength: 40)
+                Text("この議事録には\(sections.first { $0.1 == selection }?.0 ?? "要約")がありません")
+                    .foregroundStyle(.secondary)
+                Link("Notion で開く", destination: meeting.url)
+                Spacer(minLength: 40)
+            }.frame(maxWidth: .infinity, minHeight: emptyHeight)
+        } else {
+            NotionMeetingBodyView(blocks: bodies[selection] ?? [], pageURL: meeting.url,
+                                  transcript: selection == sections[2].1)
+        }
+        if let error {
+            Text(error).font(.caption).foregroundStyle(.secondary)
+            Button("再試行") { Task { await load() } }
         }
     }
 
     private func load() async {
         loading = true; error = nil; bodies = [:]
+        selection = sections[0].1
+        #if DEBUG
+        if let argument = CommandLine.arguments.first(where: { $0.hasPrefix("--meeting-section=") }),
+           let index = ["summary", "notes", "transcript"].firstIndex(of: String(argument.dropFirst(18))) {
+            selection = sections[index].1
+        }
+        #endif
         defer { loading = false }
         guard !meeting.progressing else { return }
-        do {
-            for (_, id) in meeting.sections { bodies[id] = try await store.blocks(id) }
-            selection = visibleSections.first?.1 ?? ""
-        } catch { self.error = error.localizedDescription }
+        for (_, id) in meeting.sections {
+            do { bodies[id] = try await store.blocks(id) }
+            catch {
+                // One inaccessible section must not hide the other sections.
+                bodies[id] = []
+                if id != meeting.transcript { self.error = error.localizedDescription }
+            }
+        }
+    }
+}
+
+struct NotionMeetingBodyView: View {
+    let blocks: [NotionTaskBlock]
+    let pageURL: URL
+    var transcript = false
+    @State private var expanded: Set<String> = []
+    private var visible: [NotionTaskBlock] {
+        var hiddenDepth: Int?
+        return blocks.filter { block in
+            if let depth = hiddenDepth {
+                if block.depth > depth { return false }
+                hiddenDepth = nil
+            }
+            if (block.type == "toggle" && !expanded.contains(block.id)) || block.type == "table" { hiddenDepth = block.depth }
+            return true
+        }
+    }
+    var body: some View {
+        ForEach(visible) { block in
+            if ["table", "image", "table_row"].contains(block.type) {
+                Link("Notion で表示", destination: blockURL(block))
+                    .foregroundStyle(.secondary).padding(.leading, CGFloat(block.depth) * 16)
+            } else if block.type == "toggle" {
+                Button {
+                    if !expanded.insert(block.id).inserted { expanded.remove(block.id) }
+                } label: {
+                    HStack { Text(expanded.contains(block.id) ? "▾" : "▸"); Text(block.text) }
+                }.buttonStyle(.plain).padding(.leading, CGFloat(block.depth) * 16)
+            } else if block.type == "divider" { Divider() }
+            else if block.type == "quote" {
+                HStack(alignment: .top) {
+                    Rectangle().fill(Color.secondary).frame(width: 3)
+                    NotionTaskBlockView(block: block)
+                }.fixedSize(horizontal: false, vertical: true)
+            } else if transcript, let speech = block.speaker.map({ NotionMeetingSpeech(speaker: $0, time: block.timestamp, text: block.text) }) ?? NotionMeetingSpeech.parse(block.text) {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text(speech.speaker).bold()
+                        if let time = speech.time { Text(time).foregroundStyle(.secondary) }
+                    }
+                    Text(speech.text).textSelection(.enabled)
+                }.font(.body)
+            } else { NotionTaskBlockView(block: block) }
+        }
+    }
+    private func blockURL(_ block: NotionTaskBlock) -> URL {
+        URL(string: pageURL.absoluteString + "#" + block.id.replacingOccurrences(of: "-", with: ""))!
+    }
+}
+
+struct NotionMeetingSpeech: Equatable {
+    let speaker: String
+    let time: String?
+    let text: String
+    static func parse(_ text: String) -> Self? {
+        // Notion text exports can prefix a speaker with an elapsed timestamp.
+        let pieces = text.split(separator: "：", maxSplits: 1).map(String.init)
+        guard pieces.count == 2 else { return nil }
+        let header = pieces[0].split(separator: " ", maxSplits: 1).map(String.init)
+        let timed = header.count == 2 && header[0].contains(":")
+        return .init(speaker: timed ? header[1] : pieces[0], time: timed ? header[0] : nil, text: pieces[1])
     }
 }

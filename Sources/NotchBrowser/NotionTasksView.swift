@@ -413,12 +413,15 @@ struct NotionConnectionNotice: View {
 /// The complete task settings page is shared by pinned settings and the tab gear.
 @MainActor struct NotionTasksSettingsPage: View {
     var onOpenSettings: () -> Void = {}
+    @ObservedObject private var settings: SettingsStore
     @ObservedObject private var connection = NotionConnectionStore.shared
-    init(onOpenSettings: @escaping () -> Void = {}) {
+    init(onOpenSettings: @escaping () -> Void = {}, settings: SettingsStore = .shared) {
         self.onOpenSettings = onOpenSettings
+        _settings = ObservedObject(wrappedValue: settings)
     }
     var body: some View {
         Form {
+            NotionPageDisplaySettings(page: .tasks, settings: settings)
             NotionTabConnectionSettings(onOpenSettings: onOpenSettings)
             NotionTasksSettings(title: "タスク")
                 .disabled(!NotionTaskRules.settingsEnabled(state: connection.state))
@@ -432,5 +435,68 @@ struct NotionConnectionLoading: View {
             ProgressView()
             Text("Notion 接続を確認中…").foregroundStyle(.secondary)
         }.accessibilityLabel("Notion 接続を確認中")
+    }
+}
+
+/// Shared icon chooser and display controls for all Notion fixed pages.
+struct NotionPageDisplaySettings: View {
+    enum Page { case agents, tasks, meetings }
+    let page: Page
+    @ObservedObject var settings: SettingsStore
+    var body: some View {
+        Section("表示") {
+            NotionPageDisplayControls(page: page, settings: settings)
+        }
+    }
+}
+
+/// Reusable controls also fit inside the agent page's existing display section.
+struct NotionPageDisplayControls: View {
+    let page: NotionPageDisplaySettings.Page
+    @ObservedObject var settings: SettingsStore
+    @State private var choosingIcon = false
+    private var symbol: Binding<String> {
+        switch page {
+        case .agents: $settings.data.agentsTabSymbol
+        case .tasks: $settings.data.tasksTabSymbol
+        case .meetings: $settings.data.meetingsTabSymbol
+        }
+    }
+    private var display: Binding<NotionTabDisplay> {
+        switch page {
+        case .agents: $settings.data.notionTabDisplay
+        case .tasks: $settings.data.tasksTabDisplay
+        case .meetings: $settings.data.meetingsTabDisplay
+        }
+    }
+    var body: some View {
+        Group {
+            LabeledContent("アイコン") {
+                Button { choosingIcon = true } label: {
+                    if symbol.wrappedValue.isEmpty {
+                        Image(nsImage: NotionTabIcon.image(for: NSAppearance(named: .darkAqua)!))
+                    } else { Image(systemName: symbol.wrappedValue) }
+                }.popover(isPresented: $choosingIcon) {
+                    VStack {
+                        SymbolGrid(selected: symbol.wrappedValue) {
+                            symbol.wrappedValue = $0; choosingIcon = false
+                        }
+                        Button("標準のアイコン") {
+                            switch page {
+                            case .agents: symbol.wrappedValue = ""
+                            case .tasks: symbol.wrappedValue = "checklist"
+                            case .meetings: symbol.wrappedValue = "person.2"
+                            }
+                            choosingIcon = false
+                        }
+                    }.padding()
+                }
+            }
+            Picker("タブに表示", selection: display) {
+                ForEach([NotionTabDisplay.iconOnly, .titleOnly, .iconAndTitle]) { option in
+                    Text(option == .iconOnly ? "アイコン" : option == .titleOnly ? "タイトル" : "両方").tag(option)
+                }
+            }
+        }
     }
 }

@@ -112,7 +112,7 @@ struct NotionDatabaseAPI {
             let (data, response) = try await fetch(request)
             guard let response = response as? HTTPURLResponse else { throw NotionAPIError.invalidResponse }
             if (response.statusCode == 429 || response.statusCode == 529) && attempt < 2 {
-                let seconds = max(0, Double(response.value(forHTTPHeaderField: "Retry-After") ?? "") ?? Double(1 << attempt))
+                let seconds = max(0.25, Double(response.value(forHTTPHeaderField: "Retry-After") ?? "") ?? Double(1 << attempt))
                 try await wait(seconds)
                 continue
             }

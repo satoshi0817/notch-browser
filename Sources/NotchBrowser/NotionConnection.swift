@@ -83,8 +83,14 @@ final class NotionConnectionStore: ObservableObject {
     static func previewState(arguments: [String]) -> PreviewState? {
         if arguments.contains("--meetings=pinned-unconnected") { return .unconnected }
         if arguments.contains("--meetings=error") { return .unverified }
-        return arguments.first { $0.hasPrefix("--notion-connection=") }
-            .flatMap { PreviewState(rawValue: String($0.dropFirst("--notion-connection=".count))) }
+        if let explicit = arguments.first(where: { $0.hasPrefix("--notion-connection=") }) {
+            return PreviewState(rawValue: String(explicit.dropFirst("--notion-connection=".count)))
+        }
+        if arguments.contains(where: {
+            $0 == "--fixed-pages-drag" || $0.hasPrefix("--fixed-display=") ||
+            $0.hasPrefix("--meeting-section=") || $0 == "--meetings=empty-tabs"
+        }) { return .connected }
+        return nil
     }
     static var launchPreviewState: PreviewState? { previewState(arguments: CommandLine.arguments) }
     var isPreview: Bool { previewMock }

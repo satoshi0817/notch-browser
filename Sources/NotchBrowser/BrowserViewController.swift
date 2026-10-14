@@ -139,6 +139,7 @@ final class BrowserViewController: NSViewController {
     private let pinnedTabStack = NSStackView()
     private let tabStrip = BrowserTabStripView()
     private var pinnedTabWidth: NSLayoutConstraint!
+    private var pinnedTabAnchors: [NSLayoutConstraint] = []
     private var needsTabReveal = true
     private lazy var addTabButton = iconButton("plus", "新規タブ (⌘T)", #selector(newTab))
     private lazy var notionTabButton: TabButton = {
@@ -349,11 +350,12 @@ final class BrowserViewController: NSViewController {
         tabStrip.addSubview(tabScroll)
         // Width is budgeted separately, but the fixed stack must fill the same
         // row as the scrolling stack instead of adopting its intrinsic height.
-        NSLayoutConstraint.activate([
+        pinnedTabAnchors = [
             pinnedTabStack.topAnchor.constraint(equalTo: tabStrip.topAnchor),
             pinnedTabStack.bottomAnchor.constraint(equalTo: tabStrip.bottomAnchor),
             pinnedTabStack.leadingAnchor.constraint(equalTo: tabStrip.leadingAnchor),
-        ])
+        ]
+        NSLayoutConstraint.activate(pinnedTabAnchors)
         webContainer.wantsLayer = true
         webContainer.layer?.cornerRadius = 10
         webContainer.layer?.masksToBounds = true
@@ -880,23 +882,47 @@ final class BrowserViewController: NSViewController {
             let items = pinnedTabStack.arrangedSubviews
             let naturalWidths = items.map { item -> CGFloat in
                 guard let button = item as? TabButton else { return 4 }
-                return min(150, max(28, button.cell?.cellSize.width ?? 28))
+                if let display = button.notionFixedDisplay {
+                    return NotchTabLayout.fixedTabWidth(title: button.title, display: display, iconSide: button.notchIconSide) {
+                        ($0 as NSString).size(withAttributes: [.font: button.font ?? NSFont.systemFont(ofSize: 12)]).width
+                    }
+                }
+                let icon: CGFloat = button.image == nil ? 0 : 20
+                let text = (button.title as NSString).size(withAttributes: [.font: button.font ?? NSFont.systemFont(ofSize: 12)]).width
+                return min(150, max(28, 12 + icon + ceil(text)))
             }
             let natural = naturalWidths.reduce(CGFloat(0), +)
-                + CGFloat(max(0, items.count - 1)) * pinnedTabStack.spacing
+                + CGFloat(max(0, items.count - 1)) * 4
             let addWidth = addTabButton.constraints.first {
                 $0.firstAttribute == .width && $0.secondItem == nil
             }?.constant ?? 28
-            let available = max(0, view.bounds.width / 2 + tabTrailingConstraint.constant
-                - addWidth - tabLeadingConstraint.constant - 4)
             let normalButtons = tabButtons.filter { tabs.indices.contains($0.tag) && tabs[$0.tag].pinnedID == nil }
             let normalButton = normalButtons.first { $0.tag == selectedIndex } ?? normalButtons.first
             let normalWidth = NotchTabLayout.normalSlotWidth(natural: normalButton?.cell?.cellSize.width ?? 150)
-            let fixedWidth = NotchTabLayout.pinnedWidth(natural: natural, available: available, hasNormal: !normalButtons.isEmpty, normalWidth: normalWidth)
-            if pinnedTabWidth.constant != fixedWidth { needsTabReveal = true }
-            pinnedTabWidth.constant = fixedWidth
-            tabStrip.fixedWidth = fixedWidth
-            let widths = NotchTabLayout.fixedWidths(natural: naturalWidths, available: pinnedTabWidth.constant, spacing: pinnedTabStack.spacing)
+            let showingFixedPanel = notionPanel?.isHidden == false || tasksPanel?.isHidden == false || meetingsPanel?.isHidden == false
+            let budget = NotchTabLayout.fixedTabBudget(windowWidth: view.bounds.width,
+                trailingOffset: tabTrailingConstraint.constant, leadingInset: tabLeadingConstraint.constant,
+                addWidth: addWidth, hasNormal: !normalButtons.isEmpty, normalWidth: normalWidth, showingFixedPanel: showingFixedPanel)
+            let fixedWidth = min(natural, budget)
+            let minimum = items.map { item -> CGFloat in
+                guard let button = item as? TabButton else { return 4 }
+                if let display = button.notionFixedDisplay, display != .iconOnly {
+                    return NotchTabLayout.fixedTabWidth(title: button.title, display: display, iconSide: button.notchIconSide) {
+                        ($0 as NSString).size(withAttributes: [.font: button.font ?? NSFont.systemFont(ofSize: 12)]).width
+                    }
+                }
+                return 28
+            }
+            let plan = NotchTabLayout.compressionPlan(natural: naturalWidths, minimum: minimum, available: fixedWidth)
+            if pinnedTabWidth.constant != plan.contentWidth { needsTabReveal = true }
+            pinnedTabWidth.constant = plan.contentWidth
+            pinnedTabStack.spacing = plan.spacing
+            tabStrip.fixedWidth = plan.viewportWidth
+            tabStrip.fixedContentWidth = plan.contentWidth
+            if plan.scrolls { NSLayoutConstraint.deactivate(pinnedTabAnchors) }
+            tabStrip.setFixedScrolling(plan.scrolls)
+            if !plan.scrolls { NSLayoutConstraint.activate(pinnedTabAnchors) }
+            let widths = plan.widths
             for (index, item) in items.enumerated() {
                 if let button = item as? TabButton {
                     if button.notchFixedWidth == nil { button.notchFixedWidth = button.widthAnchor.constraint(equalToConstant: widths[index]) }
@@ -1332,7 +1358,7 @@ final class BrowserViewController: NSViewController {
     private func tabDragEnded(_ button: TabButton) {
         isDraggingTab = false
         button.alphaValue = 1
-        if button === notionTabButton || (tabs.indices.contains(button.tag) && tabs[button.tag].pinnedID != nil) {
+        if button === notionTabButton || button === tasksTabButton || button === meetingsTabButton || (tabs.indices.contains(button.tag) && tabs[button.tag].pinnedID != nil) {
             reorderPinnedButtons(afterDragging: button)
             return
         }
@@ -1359,27 +1385,26 @@ final class BrowserViewController: NSViewController {
     }
 
     private func reorderPinnedButtons(afterDragging button: TabButton) {
-        let dragged = button === notionTabButton ? "notion" : tabs[button.tag].pinnedID!.uuidString
-        var order = store.data.pinnedTabs.map { $0.id.uuidString }
-        if notionAgentTabVisible {
-            order.insert("notion", at: min(store.data.notionTabPosition, order.count))
+        func pageID(_ candidate: TabButton) -> UUID? {
+            if candidate === notionTabButton { return PinnedTabsSettings.notionID }
+            if candidate === tasksTabButton { return PinnedTabsSettings.tasksID }
+            if candidate === meetingsTabButton { return PinnedTabsSettings.meetingsID }
+            return tabs.indices.contains(candidate.tag) ? tabs[candidate.tag].pinnedID : nil
         }
+        guard let dragged = pageID(button) else { return }
+        var order = PinnedTabsSettings.pageRows(pinnedTabs: store.data.pinnedTabs,
+            notionPosition: store.data.notionTabPosition, order: store.data.fixedPageOrder).map(\.id)
         order.removeAll { $0 == dragged }
-        let otherButtons = (isDetached ? tabStack : pinnedTabStack).arrangedSubviews.compactMap { $0 as? TabButton }
-            .filter { candidate in
-                candidate !== button && (candidate === notionTabButton ||
-                    (tabs.indices.contains(candidate.tag) && tabs[candidate.tag].pinnedID != nil))
-            }
-        let destination = otherButtons.filter { $0.frame.midX < button.frame.midX }.count
-        order.insert(dragged, at: min(destination, order.count))
+        let others = (isDetached ? tabStack : pinnedTabStack).arrangedSubviews.compactMap { $0 as? TabButton }
+            .filter { $0 !== button && pageID($0) != nil }
+        let before = others.last { $0.frame.midX < button.frame.midX }.flatMap(pageID)
+        let destination = before.flatMap { order.firstIndex(of: $0) }.map { $0 + 1 } ?? 0
+        order.insert(dragged, at: destination)
         var data = store.data
-        if notionAgentTabVisible {
-            data.notionTabPosition = order.firstIndex(of: "notion") ?? data.pinnedTabs.count
-        }
-        data.pinnedTabs.sort { left, right in
-            (order.firstIndex(of: left.id.uuidString) ?? .max) <
-            (order.firstIndex(of: right.id.uuidString) ?? .max)
-        }
+        data.fixedPageOrder = order
+        let legacy = order.filter { $0 != PinnedTabsSettings.tasksID && $0 != PinnedTabsSettings.meetingsID }
+        data.notionTabPosition = legacy.firstIndex(of: PinnedTabsSettings.notionID) ?? data.pinnedTabs.count
+        data.pinnedTabs.sort { (order.firstIndex(of: $0.id) ?? .max) < (order.firstIndex(of: $1.id) ?? .max) }
         store.data = data
         updateChrome()
     }
@@ -1522,6 +1547,17 @@ final class BrowserViewController: NSViewController {
             meetingsTabButton.state = meetingsPanel?.isHidden == false ? .on : .off
             tabStack.addArrangedSubview(meetingsTabButton)
         }
+        func configureFixed(_ button: TabButton, title: String, symbol: String, display: NotionTabDisplay) {
+            button.configureNotionFixedDisplay(title: title,
+                image: NSImage(systemSymbolName: symbol, accessibilityDescription: title),
+                display: display, detached: isDetached, iconSide: NotchTabLayout.fixedIconSide)
+            button.onDragBegan = { [weak self] _ in self?.isDraggingTab = true }
+            button.onDragEnded = { [weak self] button in self?.tabDragEnded(button) }
+            button.lineBreakMode = .byTruncatingTail
+            button.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        }
+        configureFixed(tasksTabButton, title: "タスク", symbol: store.data.tasksTabSymbol, display: store.data.tasksTabDisplay)
+        configureFixed(meetingsTabButton, title: "議事録", symbol: store.data.meetingsTabSymbol, display: store.data.meetingsTabDisplay)
         let notionPosition = min(store.data.notionTabPosition, firstUnpinnedIndex)
         func addNotion() {
             // This button is reused; discard the previous detached title/width snapshot.
@@ -1530,13 +1566,9 @@ final class BrowserViewController: NSViewController {
             notionTabButton.detachedWidthConstraint?.isActive = false
             notionTabButton.notchFixedWidth?.isActive = false
             let display = store.data.notionTabDisplay
-            notionTabButton.title = display == .iconOnly ? "" : "Notion"
-            notionTabButton.image = display == .titleOnly ? nil : NotionTabIcon.image(for: view.effectiveAppearance)
-            notionTabButton.imagePosition = switch display {
-            case .iconAndTitle: .imageLeading
-            case .iconOnly: .imageOnly
-            case .titleOnly: .noImage
-            }
+            notionTabButton.configureNotionFixedDisplay(title: "Notion",
+                image: store.data.agentsTabSymbol.isEmpty ? NotionTabIcon.image(for: view.effectiveAppearance) : NSImage(systemSymbolName: store.data.agentsTabSymbol, accessibilityDescription: "エージェント"),
+                display: display, detached: isDetached, iconSide: NotchTabLayout.fixedIconSide)
             notionTabButton.state = notionPanel?.isHidden == false ? .on : .off
             notionTabButton.showsBorderOnlyWhileMouseInside = notionPanel?.isHidden != false
             notionTabButton.alphaValue = 1
@@ -1588,6 +1620,7 @@ final class BrowserViewController: NSViewController {
             button.lineBreakMode = .byTruncatingTail
             button.notchTruncatesLastVisibleLine = button.cell?.truncatesLastVisibleLine ?? false
             button.tag = i
+            button.notchFixedPage = tab.pinnedID != nil
             let profile = store.profile(tab.profileID)
             button.toolTip = [tab.displayName, profile.isDefault ? nil : "プロファイル: \(profile.name)"]
                 .compactMap { $0 }.joined(separator: "\n")
@@ -1601,7 +1634,21 @@ final class BrowserViewController: NSViewController {
             tabButtons.append(button)
         }
         if !isSingleTabWindow && notionAgentTabVisible && notionPosition == tabs.count { addNotion() }
+        // Settings and the tab bar use the same normalized fixed-page order.
+        if !isSingleTabWindow {
+            let ordered = PinnedTabsSettings.pageRows(pinnedTabs: store.data.pinnedTabs,
+                notionPosition: store.data.notionTabPosition, order: store.data.fixedPageOrder)
+            let fixedButtons = ordered.compactMap { row -> TabButton? in
+                if row.id == PinnedTabsSettings.notionID { return notionAgentTabVisible ? notionTabButton : nil }
+                if row.id == PinnedTabsSettings.tasksID { return notionTabsConnected ? tasksTabButton : nil }
+                if row.id == PinnedTabsSettings.meetingsID { return notionTabsConnected ? meetingsTabButton : nil }
+                return tabButtons.first { tabs.indices.contains($0.tag) && tabs[$0.tag].pinnedID == row.id }
+            }
+            for button in fixedButtons { button.removeFromSuperview() }
+            for (index, button) in fixedButtons.enumerated() { tabStack.insertArrangedSubview(button, at: index) }
+        }
         if !isDetached {
+            tabStrip.revealFixedSelection = true
             for item in tabStack.arrangedSubviews {
                 // Notion participates in the pinned order; keep the divider at
                 // the fixed group's trailing edge, outside the scrolling clip.
@@ -2289,6 +2336,9 @@ extension BrowserViewController: WKUIDelegate {
 /// desaturates in that state, so draw the selected tab independently of focus.
 final class TabButtonCell: NSButtonCell {
     override func titleRect(forBounds rect: NSRect) -> NSRect {
+        if let button = controlView as? TabButton, !button.isDetachedLayout, let display = button.notchDisplay {
+            return NotchTabLayout.notionTitleRect(in: rect, display: display, iconSide: button.notchIconSide)
+        }
         guard let button = controlView as? TabButton, button.isDetachedLayout else {
             return super.titleRect(forBounds: rect)
         }
@@ -2296,6 +2346,12 @@ final class TabButtonCell: NSButtonCell {
     }
 
     func displayedTitle(forBounds rect: NSRect) -> String {
+        if let button = controlView as? TabButton, !button.isDetachedLayout, let display = button.notchDisplay {
+            guard display != .iconOnly else { return "" }
+            return NotchTabLayout.displayedTitle(button.title, available: titleRect(forBounds: rect).width) {
+                ($0 as NSString).size(withAttributes: [.font: button.font ?? NSFont.systemFont(ofSize: 12)]).width
+            }
+        }
         guard let button = controlView as? TabButton, button.isDetachedLayout else { return title }
         guard button.detachedContentFullyVisible else { return "" }
         let width = titleRect(forBounds: rect).width
@@ -2334,6 +2390,50 @@ final class TabButtonCell: NSButtonCell {
             (text as NSString).draw(in: NSRect(x: rect.minX, y: frame.midY - height / 2, width: rect.width, height: height), withAttributes: attributes)
             return
         }
+        if let button = controlView as? TabButton, let display = button.notchDisplay {
+            // All fixed tabs have explicit horizontal geometry, independent of
+            // NSButtonCell's bezel-specific title rectangle and intrinsic size.
+            NSGraphicsContext.saveGraphicsState()
+            NSBezierPath(rect: frame).addClip()
+            defer { NSGraphicsContext.restoreGraphicsState() }
+            if display != .titleOnly, let image = button.image {
+                let rendered: NSImage
+                if image.isTemplate {
+                    rendered = NSImage(size: image.size, flipped: false) { rect in
+                        image.draw(in: rect)
+                        (button.contentTintColor ?? NSColor.labelColor).setFill()
+                        rect.fill(using: .sourceIn)
+                        return true
+                    }
+                } else { rendered = image }
+                rendered.draw(in: button.notchIconRect(in: frame),
+                           from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+            }
+            if display != .iconOnly {
+                let rect = titleRect(forBounds: frame)
+                let attributes: [NSAttributedString.Key: Any] = [
+                    .font: button.font ?? NSFont.systemFont(ofSize: 12),
+                    .foregroundColor: button.contentTintColor ?? NSColor.labelColor
+                ]
+                let text = displayedTitle(forBounds: frame)
+                let height = (text as NSString).size(withAttributes: attributes).height
+                (text as NSString).draw(in: NSRect(x: rect.minX, y: frame.midY - height / 2,
+                                                  width: rect.width, height: height), withAttributes: attributes)
+            }
+            return
+        }
+        if let button = controlView as? TabButton, button.onClose == nil, !button.title.isEmpty {
+            let textRect = super.titleRect(forBounds: frame)
+            let attributes: [NSAttributedString.Key: Any] = [.font: button.font ?? NSFont.systemFont(ofSize: 12)]
+            let rendered = NotchTabLayout.displayedTitle(button.title, available: textRect.width) {
+                ($0 as NSString).size(withAttributes: attributes).width
+            }
+            let original = title
+            title = rendered
+            super.drawInterior(withFrame: frame, in: controlView)
+            title = original
+            return
+        }
         var contentFrame = frame
         if let button = controlView as? TabButton, button.onClose != nil {
             contentFrame.size.width = max(0, frame.width - 20)
@@ -2357,9 +2457,41 @@ final class TabButtonCell: NSButtonCell {
 
 /// Own the fixed/scroll boundary in one layout pass. Internal stack constraints
 /// cannot position the sibling scroll view or leave it at a previous strip width.
-private final class BrowserTabStripView: NSView {
+final class BrowserTabStripView: NSView {
     weak var fixed: NSStackView?
     weak var scroll: NSScrollView?
+    var fixedContentWidth: CGFloat = 0
+    var revealFixedSelection = false
+    private var fixedScrolling = false
+    private var fixedScrollHeight: NSLayoutConstraint?
+    private let fixedScroll: NSScrollView = {
+        let view = NSScrollView()
+        view.drawsBackground = false
+        view.contentView.drawsBackground = false
+        view.automaticallyAdjustsContentInsets = false
+        view.hasHorizontalScroller = true
+        view.scrollerStyle = .overlay
+        view.autohidesScrollers = true
+        return view
+    }()
+    func setFixedScrolling(_ enabled: Bool) {
+        guard enabled != fixedScrolling, let fixed else { return }
+        fixedScrolling = enabled
+        if enabled {
+            fixed.removeFromSuperview()
+            addSubview(fixedScroll)
+            fixedScroll.documentView = fixed
+            fixedScrollHeight = fixed.heightAnchor.constraint(equalToConstant: bounds.height)
+            fixedScrollHeight?.isActive = true
+        } else {
+            fixedScrollHeight?.isActive = false
+            fixedScrollHeight = nil
+            fixedScroll.documentView = nil
+            fixedScroll.removeFromSuperview()
+            addSubview(fixed)
+        }
+        needsLayout = true
+    }
     var fixedWidth: CGFloat = 0 {
         didSet { if fixedWidth != oldValue { needsLayout = true } }
     }
@@ -2372,9 +2504,23 @@ private final class BrowserTabStripView: NSView {
     override func layout() {
         super.layout()
         let width = min(max(0, fixedWidth), bounds.width)
-        fixed?.frame = NSRect(x: 0, y: 0, width: width, height: bounds.height)
+        if fixedScrolling {
+            fixedScroll.frame = NSRect(x: 0, y: 0, width: width, height: bounds.height)
+            fixedScrollHeight?.constant = bounds.height
+            fixed?.frame = NSRect(x: 0, y: 0, width: fixedContentWidth, height: bounds.height)
+            fixedScroll.tile()
+            let x = min(max(0, fixedScroll.contentView.bounds.minX), max(0, fixedContentWidth - fixedScroll.contentSize.width))
+            fixedScroll.contentView.scroll(to: NSPoint(x: x, y: 0))
+            fixedScroll.reflectScrolledClipView(fixedScroll.contentView)
+        } else { fixed?.frame = NSRect(x: 0, y: 0, width: width, height: bounds.height) }
         scroll?.frame = NSRect(x: width, y: 0, width: max(0, bounds.width - width), height: bounds.height)
         fixed?.layoutSubtreeIfNeeded()
+        if fixedScrolling, revealFixedSelection,
+           let selected = fixed?.arrangedSubviews.compactMap({ $0 as? TabButton }).first(where: { $0.state == .on }) {
+            selected.scrollToVisible(selected.bounds)
+            fixedScroll.reflectScrolledClipView(fixedScroll.contentView)
+        }
+        revealFixedSelection = false
         if let scroll {
             scroll.wantsLayer = true
             let mask = CAGradientLayer()
@@ -2408,6 +2554,26 @@ private final class BrowserRootView: NSView {
 
 /// Tab button that can be dragged sideways to reorder. A click without movement acts normally.
 final class TabButton: NSButton {
+    var notchFixedPage = false
+    var notchDisplay: NotionTabDisplay? {
+        notionFixedDisplay ?? (notchFixedPage ? (title.isEmpty ? .iconOnly : image == nil ? .titleOnly : .iconAndTitle) : nil)
+    }
+    private var configuredIconSide: CGFloat = 18
+    var notchIconSide: CGFloat { notionFixedDisplay == nil ? NotchTabLayout.fixedIconSide : configuredIconSide }
+    func notchIconRect(in bounds: NSRect) -> NSRect {
+        let side = notchIconSide
+        let x = notchDisplay == .iconOnly ? bounds.midX - side / 2 : bounds.minX + 6
+        return NSRect(x: x, y: bounds.midY - side / 2, width: side, height: side)
+    }
+    var notionFixedDisplay: NotionTabDisplay?
+    func configureNotionFixedDisplay(title: String, image: NSImage?, display: NotionTabDisplay, detached: Bool = false, iconSide: CGFloat = 18) {
+        configuredIconSide = iconSide
+        notionFixedDisplay = display
+        self.title = display == .iconOnly ? "" : title
+        self.image = display == .titleOnly ? nil : image
+        imagePosition = display == .iconOnly ? .imageOnly : display == .titleOnly ? .noImage : (detached ? .imageLeading : .imageLeft)
+        toolTip = title
+    }
     var maximumTitleWidth: NSLayoutConstraint?
     var notchFixedWidth: NSLayoutConstraint?
     var detachedWidthConstraint: NSLayoutConstraint?

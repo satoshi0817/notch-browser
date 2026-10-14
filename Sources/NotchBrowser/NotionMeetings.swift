@@ -36,6 +36,12 @@ struct NotionMeeting: Identifiable, Equatable {
     let transcript: String?
     let created: Date
     var start: Date { calendarStart ?? recordingStart ?? created }
+    func rowMetadata(timeZone: TimeZone = .current) -> String {
+        var parts = [NotionMeetingDateLabels.time(start, timeZone: timeZone)]
+        if let duration { parts.append("\(duration)分") }
+        parts.append("\(attendees.count)人")
+        return parts.joined(separator: "・")
+    }
     func detailMetadata(timeZone: TimeZone = .current) -> String {
         var parts = [NotionMeetingDateLabels.detail(start, timeZone: timeZone)]
         if let duration { parts.append("\(duration)分") }
@@ -76,9 +82,12 @@ struct NotionMeeting: Identifiable, Equatable {
             ((value[container] as? [String: Any])?[key] as? String).flatMap(NotionMessage.parseDate)
         }
         func blockID(_ key: String) -> String? {
-            if let string = value[key] as? String { return string }
+            let children = value["children"] as? [String: Any] ?? [:]
+            if let string = children["\(key)_block_id"] as? String { return string.isEmpty ? nil : string }
+            if let string = value[key] as? String { return string.isEmpty ? nil : string }
             let object = value[key] as? [String: Any]
-            return (object?["id"] ?? object?["block_id"]) as? String
+            guard let string = (object?["id"] ?? object?["block_id"]) as? String, !string.isEmpty else { return nil }
+            return string
         }
         let rich = value["title"] as? [[String: Any]] ?? []
         let title = value["title"] as? String ?? rich.map {
@@ -140,35 +149,38 @@ extension NotionDatabaseAPI {
         return Array(meetings.filter { seen.insert($0.id).inserted }.sorted { $0.start == $1.start ? $0.id < $1.id : $0.start > $1.start }.prefix(50))
     }
     func meetingBody(_ id: String) async throws -> [NotionTaskBlock] {
-        var remaining = 500
-        var requests = 0
         var visited = Set<String>()
         func children(_ id: String, depth: Int) async throws -> [NotionTaskBlock] {
-            guard depth <= 6, remaining > 0, requests < 100, visited.insert(id).inserted else { return [] }
+            try Task.checkCancellation()
+            guard visited.insert(id).inserted else { return [] }
             var output: [NotionTaskBlock] = []
             var cursor: String?
+            var cursors = Set<String>()
             var number = 0
             repeat {
-                var query = [URLQueryItem(name: "page_size", value: String(min(100, remaining)))]
+                try Task.checkCancellation()
+                var query = [URLQueryItem(name: "page_size", value: "100")]
                 if let cursor { query.append(.init(name: "start_cursor", value: cursor)) }
-                requests += 1
                 let raw = try await request("blocks/\(id)/children", query: query)
                 guard let rows = raw["results"] as? [[String: Any]] else { throw NotionAPIError.invalidResponse }
                 for row in rows {
-                    guard remaining > 0 else { break }
-                    remaining -= 1
                     var block = NotionTaskBlock.parse(row, depth: depth)
                     number = block.type == "numbered_list_item" ? number + 1 : 0
                     block.listNumber = number
                     output.append(block)
                     if row["has_children"] as? Bool == true { output += try await children(block.id, depth: depth + 1) }
                 }
-                cursor = raw["has_more"] as? Bool == true ? raw["next_cursor"] as? String : nil
-            } while cursor != nil && remaining > 0 && requests < 100
+                if raw["has_more"] as? Bool == true {
+                    guard let next = raw["next_cursor"] as? String, !next.isEmpty,
+                          cursors.insert(next).inserted else { throw NotionAPIError.invalidResponse }
+                    cursor = next
+                } else { cursor = nil }
+            } while cursor != nil
             return output
         }
         return try await children(id, depth: 0)
     }
+
 }
 
 @MainActor final class NotionMeetingsStore: ObservableObject {
@@ -237,7 +249,7 @@ extension NotionDatabaseAPI {
     }
     func blocks(_ id: String) async throws -> [NotionTaskBlock] {
         #if DEBUG
-        if isMock { return mockState == "progress" ? [] : Self.previewBlocks(section: id) }
+        if isMock { return ["progress", "empty-tabs"].contains(mockState ?? "") ? [] : Self.previewBlocks(section: id) }
         #endif
         guard let token = tokenProvider() else { throw NotionAPIError.missingToken }
         let generation = self.generation

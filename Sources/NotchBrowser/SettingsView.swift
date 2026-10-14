@@ -190,14 +190,19 @@ struct PinnedTabsSettings: View {
         _selection = State(initialValue: selectNotion ? Self.notionID : initialSelection.id)
         self.onOpenConnection = onOpenConnection
     }
-    static func pageRows(pinnedTabs: [PinnedTab], notionPosition: Int) -> [Row] {
+    static func pageRows(pinnedTabs: [PinnedTab], notionPosition: Int, order: [UUID] = []) -> [Row] {
         var result = pinnedTabs.map { Row(id: $0.id, tab: $0) }
         result.insert(Row(id: notionID, tab: nil), at: max(0, min(notionPosition, result.count)))
         result.append(Row(id: tasksID, tab: nil))
         result.append(Row(id: meetingsID, tab: nil))
-        return result
+        let known = Dictionary(uniqueKeysWithValues: result.map { ($0.id, $0) })
+        var seen = Set<UUID>()
+        return (order + result.map(\.id)).compactMap { id in
+            guard seen.insert(id).inserted else { return nil }
+            return known[id]
+        }
     }
-    private var rows: [Row] { Self.pageRows(pinnedTabs: store.data.pinnedTabs, notionPosition: store.data.notionTabPosition) }
+    private var rows: [Row] { Self.pageRows(pinnedTabs: store.data.pinnedTabs, notionPosition: store.data.notionTabPosition, order: store.data.fixedPageOrder) }
     enum EditorKind: Equatable { case pinned, notionAgents, notionTasks, notionMeetings, empty }
     static func editorKind(selection: UUID?, pinnedIDs: [UUID]) -> EditorKind {
         if let selection, pinnedIDs.contains(selection) { return .pinned }
@@ -216,7 +221,11 @@ struct PinnedTabsSettings: View {
                                 Image(nsImage: TabIconRenderer.image(for: tab.icon, hosts: [tab.host]))
                                 Text(tab.name)
                             } else {
-                                Image(systemName: row.id == Self.meetingsID ? "person.2" : row.id == Self.tasksID ? "checklist" : "bubble.left.and.bubble.right")
+                                let fallback = row.id == Self.meetingsID ? "person.2" : row.id == Self.tasksID ? "checklist" : "bubble.left.and.bubble.right"
+                                let symbol = row.id == Self.meetingsID ? store.data.meetingsTabSymbol : row.id == Self.tasksID ? store.data.tasksTabSymbol : store.data.agentsTabSymbol
+                                if row.id == Self.notionID && symbol.isEmpty {
+                                    Image(nsImage: NotionTabIcon.image(for: NSAppearance(named: .darkAqua)!))
+                                } else { Image(systemName: symbol.isEmpty ? fallback : symbol) }
                                 Text(row.id == Self.meetingsID ? "議事録" : row.id == Self.tasksID ? "タスク" : "エージェント")
                             }
                             Spacer()
@@ -288,6 +297,7 @@ struct PinnedTabsSettings: View {
         var data = store.data
         let orderedPages = reordered.filter { $0.id != Self.tasksID && $0.id != Self.meetingsID }
         data.notionTabPosition = orderedPages.firstIndex(where: { $0.id == Self.notionID }) ?? data.pinnedTabs.count
+        data.fixedPageOrder = reordered.map(\.id)
         data.pinnedTabs = reordered.compactMap(\.tab)
         store.data = data
     }

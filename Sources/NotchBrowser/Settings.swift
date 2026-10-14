@@ -182,6 +182,12 @@ struct SettingsData: Codable {
     ]
     /// Insertion point among pinned pages for the Notion agent panel.
     var notionTabPosition = 2
+    var fixedPageOrder: [UUID] = []
+    var tasksTabDisplay = NotionTabDisplay.iconOnly
+    var meetingsTabDisplay = NotionTabDisplay.iconOnly
+    var tasksTabSymbol = "checklist"
+    var meetingsTabSymbol = "person.2"
+    var agentsTabSymbol = ""
     var notionEnabled = true
     var notionTabDisplay = NotionTabDisplay.iconAndTitle
     var newTabProfileID = Profile.defaultID
@@ -231,6 +237,12 @@ struct SettingsData: Codable {
         pinnedTabs = try c.decodeIfPresent([PinnedTab].self, forKey: .pinnedTabs) ?? fallback.pinnedTabs
         notionTabPosition = min(pinnedTabs.count, max(0,
             (try? c.decode(Int.self, forKey: .notionTabPosition)) ?? pinnedTabs.count))
+        fixedPageOrder = (try? c.decode([UUID].self, forKey: .fixedPageOrder)) ?? []
+        tasksTabDisplay = (try? c.decode(NotionTabDisplay.self, forKey: .tasksTabDisplay)) ?? .iconOnly
+        meetingsTabDisplay = (try? c.decode(NotionTabDisplay.self, forKey: .meetingsTabDisplay)) ?? .iconOnly
+        tasksTabSymbol = (try? c.decode(String.self, forKey: .tasksTabSymbol)) ?? "checklist"
+        meetingsTabSymbol = (try? c.decode(String.self, forKey: .meetingsTabSymbol)) ?? "person.2"
+        agentsTabSymbol = (try? c.decode(String.self, forKey: .agentsTabSymbol)) ?? ""
         notionEnabled = (try? c.decode(Bool.self, forKey: .notionEnabled)) ?? true
         notionTabDisplay = (try? c.decode(NotionTabDisplay.self, forKey: .notionTabDisplay)) ?? .iconAndTitle
         newTabProfileID = try c.decodeIfPresent(UUID.self, forKey: .newTabProfileID) ?? fallback.newTabProfileID

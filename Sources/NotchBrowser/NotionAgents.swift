@@ -1572,15 +1572,7 @@ struct NotionAgentsSettings: View {
                         Toggle("Notionカスタムエージェントを使う", isOn: Self.enabledBinding(settings: settings, connection: connection))
                             .disabled(!connection.tokenValid)
                     }
-                    Picker("タブの表示", selection: $settings.data.notionTabDisplay) {
-                        ForEach(NotionTabDisplay.allCases) { display in
-                            Text(display.title).tag(display)
-                        }
-                    }
-                    LabeledContent("アイコン") {
-                        Image(nsImage: NotionTabIcon.image(for: NSAppearance(named: .darkAqua)!, size: 28))
-                    }
-
+                    NotionPageDisplayControls(page: .agents, settings: settings)
                     Picker("チャットの外観", selection: $settings.data.notionAppearance) {
                         ForEach(NotionAppearance.allCases) { appearance in
                             Text(appearance.title).tag(appearance)

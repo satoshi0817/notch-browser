@@ -36,6 +36,18 @@ struct DesignPreview {
         #if DEBUG
         if selectedNotionTab != nil || connectionPreview != nil { data.notionEnabled = true }
         #endif
+        #if DEBUG
+        // TASK-NOTCH-018: fixtures are compiled only into the debug preview.
+        if let argument = CommandLine.arguments.first(where: { $0.hasPrefix("--fixed-display=") }) {
+            let mode = String(argument.dropFirst(16))
+            let display: NotionTabDisplay = mode == "title" ? .titleOnly : mode == "both" ? .iconAndTitle : .iconOnly
+            data.tasksTabDisplay = display; data.meetingsTabDisplay = display; data.notionTabDisplay = display
+        }
+        if CommandLine.arguments.contains("--fixed-pages-drag") {
+            data.fixedPageOrder = [PinnedTabsSettings.tasksID] + data.pinnedTabs.prefix(1).map(\.id) +
+                [PinnedTabsSettings.meetingsID, PinnedTabsSettings.notionID] + data.pinnedTabs.dropFirst().map(\.id)
+        }
+        #endif
         SettingsStore.shared.data = data
         let manager = NotchManager(shelfStore: ShelfStore(file: fixture.deletingLastPathComponent().appendingPathComponent("preview-shelf.json")))
         if CommandLine.arguments.contains("--shelf") {
@@ -47,7 +59,9 @@ struct DesignPreview {
         let settings = SettingsWindowController()
         var requestedPreviewAction: (() -> Void)? = nil
         #if DEBUG
-        if let preview = SettingsPreviewLaunch.parse(arguments: CommandLine.arguments) {
+        if CommandLine.arguments.contains("--fixed-pages-drag") {
+            requestedPreviewAction = { settings.present(section: .tabs, pinnedSelection: .tasks) }
+        } else if let preview = SettingsPreviewLaunch.parse(arguments: CommandLine.arguments) {
             requestedPreviewAction = { settings.present(section: preview.section, pinnedSelection: preview.selection) }
         } else if let selectedNotionTab {
             requestedPreviewAction = {
@@ -57,6 +71,8 @@ struct DesignPreview {
                 case .meetings: manager.browser.showMeetings()
                 }
             }
+        } else if CommandLine.arguments.contains(where: { $0.hasPrefix("--meetings=") }) {
+            requestedPreviewAction = { manager.browser.showMeetings() }
         }
         #endif
         var onboardingSettings = data
