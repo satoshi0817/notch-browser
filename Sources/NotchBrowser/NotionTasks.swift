@@ -31,6 +31,7 @@ struct NotionTask: Codable, Identifiable, Hashable {
     let completed: Bool
     let due: Date?
     let edited: Date
+    var dueEditable: Bool? = nil
     var statusCategory: NotionTaskStatusCategory? = nil
     var statusColor: String? = nil
     var category: NotionTaskStatusCategory { statusCategory ?? (completed ? .complete : .notStarted) }
@@ -86,7 +87,7 @@ enum NotionTaskRules {
         hasStoredToken && [.verifying, .unverified, .invalid].contains(state)
     }
     static func connectionState(after error: Error) -> NotionConnectionState {
-        if case NotionAPIError.server(401, _) = error { return .invalid }
+        if NotionTaskEditRules.status(error).0 == 401 { return .invalid }
         return .unverified
     }
     static func shouldAutoSelect(available: Bool, alreadySelected: Bool) -> Bool { available && !alreadySelected }
@@ -98,7 +99,8 @@ enum NotionTaskRules {
         sources.first { $0.id == saved }?.id ?? sources.first?.id
     }
     static func errorMessage(_ error: Error) -> String {
-        if case NotionAPIError.server(let code, _) = error {
+        let code = NotionTaskEditRules.status(error).0
+        if code != 0 {
             if code == 404 { return "このデータベースが NotchBrowser に共有されていません" }
             if code == 400 { return "URL がデータベースではありません" }
         }
@@ -177,12 +179,12 @@ extension NotionDatabaseAPI {
     func taskDatabase(_ id: String) async throws -> NotionTaskDatabase {
         let raw: [String: Any]
         do { raw = try await request("databases/\(id)") }
-        catch NotionAPIError.server(let code, let message) where code == 404 {
+        catch where NotionTaskEditRules.status(error).0 == 404 {
             // A shared ordinary page is distinguishable from an inaccessible database.
             if let page = try? await request("pages/\(id)"), page["object"] as? String == "page" {
                 throw NotionAPIError.server(400, "URL がデータベースではありません")
             }
-            throw NotionAPIError.server(code, message)
+            throw error
         }
         guard raw["object"] as? String == "database", let sources = raw["data_sources"] as? [[String: Any]], !sources.isEmpty else {
             throw NotionAPIError.server(400, "URL がデータベースではありません")
@@ -199,7 +201,7 @@ extension NotionDatabaseAPI {
         let properties = raw["properties"] as? [String: [String: Any]] ?? [:]
         let schema = properties.compactMap { name, value -> NotionDatabaseProperty? in
             guard let id = value["id"] as? String, let type = value["type"] as? String else { return nil }
-            return .init(id: id, name: name, type: type)
+            return .init(id: id, name: name, type: type, statusOptions: NotionStatusOption.parse(value))
         }.sorted { $0.name < $1.name }
         let name = statusName ?? schema.first { $0.type == "status" }?.name
         let status = name.flatMap { properties[$0] }?["status"] as? [String: Any] ?? [:]
@@ -228,13 +230,15 @@ extension NotionDatabaseAPI {
                 guard let id = page["id"] as? String else { continue }
                 let properties = page["properties"] as? [String: [String: Any]] ?? [:]
                 let status = (mapping.status.flatMap { properties[$0] }?["status"] as? [String: Any]) ?? [:]
-                let date = (mapping.due.flatMap { properties[$0] }?["date"] as? [String: Any])?["start"] as? String
+                let dueValue = mapping.due.flatMap { properties[$0] }?["date"] as? [String: Any]
+                let date = dueValue?["start"] as? String
                 tasks.append(.init(id: id,
                     title: properties.values.first { $0["type"] as? String == "title" }.map(NotionDatabaseValue.text) ?? "無題",
                     url: (page["url"] as? String).flatMap(URL.init(string:)), status: status["name"] as? String ?? "",
                     completed: completedIDs.contains(status["id"] as? String ?? ""),
                     due: date.flatMap(NotionTaskRules.parseDate),
                     edited: (page["last_edited_time"] as? String).flatMap(NotionMessage.parseDate) ?? .distantPast,
+                    dueEditable: NotionTaskEditRules.dateEditable(dueValue),
                     statusCategory: categories[status["id"] as? String ?? ""],
                     statusColor: status["color"] as? String))
             }
@@ -280,6 +284,14 @@ extension NotionDatabaseAPI {
         let source: String?
         let tasks: [NotionTask]
     }
+    @Published var writeFailures: [String: [NotionTaskField: NotionTaskWriteFailure]] = [:]
+    @Published var noPermission = false
+    var pendingEdits: [String: [NotionTaskField: NotionTaskEdit]] = [:]
+    var writeOrder: [NotionTaskEditKey] = []
+    var writing = false
+    var writeRevision = 0
+    var writeEpoch = UUID()
+    var writeWait: (Double) async throws -> Void = { try await Task.sleep(for: .seconds($0)) }
     private let cache: NotionPageCache<NotionTask>
     private var generation = UUID()
     @Published private(set) var bodies: [String: [NotionTaskBlock]] = [:]
@@ -288,8 +300,8 @@ extension NotionDatabaseAPI {
     var hasCache: Bool { lastUpdated != nil }
     private var scope: String { configuration.url + "|" + (configuration.source ?? "") }
     private let defaults: UserDefaults
-    private let tokenProvider: () -> String?
-    private let apiFactory: (String) -> NotionDatabaseAPI
+    let tokenProvider: () -> String?
+    let apiFactory: (String) -> NotionDatabaseAPI
     @Published var configuration: Configuration { didSet {
         if oldValue.url != configuration.url { configuration.confirmedURL = nil }
         if !mock && (oldValue.url != configuration.url || oldValue.source != configuration.source || oldValue.mapping != configuration.mapping) { clearCache() }
@@ -310,7 +322,9 @@ extension NotionDatabaseAPI {
     private var mock = false
     var available: Bool { NotionTaskRules.available(token: mock || tokenProvider() != nil, url: configuration.url, confirmedURL: configuration.confirmedURL) }
     var isMock: Bool { mock }
+    #if DEBUG
     var mockState: String?
+    #endif
     init(defaults: UserDefaults = SettingsDefaults.current, tokenProvider: @escaping () -> String? = { NotionTokenStore.read() },
          apiFactory: @escaping (String) -> NotionDatabaseAPI = { NotionDatabaseAPI(token: $0) }, previewState: String? = nil, cacheURL: URL? = nil) {
         self.defaults = defaults
@@ -343,6 +357,7 @@ extension NotionDatabaseAPI {
                     statusColor: index == 7 ? "green" : (index % 2 == 0 ? "gray" : "blue"))
             }
             name = "チームのタスク"
+            configureEditingPreview(state)
             if state == "settings" || state == "tab-settings" || state == "sources" {
                 configuration.url = "https://notion.so/0123456789abcdef0123456789abcdef"
                 sources = [.init(id: "mock-source-1", name: "チームのタスク")]
@@ -379,15 +394,18 @@ extension NotionDatabaseAPI {
         let value = cache.load(scope: scope)
         tasks = value.rows; bodies = value.bodies; lastUpdated = value.updated; fullUpdated = value.fullUpdated
     }
-    private func saveCache() {
+    func saveCache() {
         guard !mock else { return }
         cache.save(.init(scope: scope, rows: tasks, bodies: bodies, updated: lastUpdated, fullUpdated: fullUpdated))
     }
     func clearCache() {
+        writeEpoch = UUID()
+        pendingEdits = [:]; writeOrder = []; writeFailures = [:]
         generation = UUID(); tasks = []; bodies = [:]; lastUpdated = nil; fullUpdated = nil; message = nil
         if !mock { cache.clear(); defaults.removeObject(forKey: "notionTasks.cache.v1") }
     }
     func connectionChanged() {
+        resetWritePermission()
         guard !mock else { return }
         clearCache(); verified = false
     }
@@ -425,6 +443,7 @@ extension NotionDatabaseAPI {
         await refresh(remap: true)
     }
     func refresh(remap: Bool = false, confirming: Bool = false, force: Bool = true) async {
+        if force { resetWritePermission() }
         guard !mock, NotionPageRefreshRules.shouldStart(refreshing: refreshing, force: force, updated: lastUpdated, now: Date()), verified || confirming, let token = tokenProvider() else { return }
         refreshing = true
         let input = configuration.url
@@ -456,7 +475,10 @@ extension NotionDatabaseAPI {
                 refreshedBodies[row.id] = try await api.taskBlocks(row.id)
                 guard currentGeneration == generation, token == tokenProvider() else { return }
             }
-            tasks = Array(NotionPageRefreshRules.merge(previous, fetched: fetched, full: full).prefix(NotionPageRefreshRules.rowLimit))
+            tasks = mergePending(previous: tasks, fetched: fetched, full: full)
+            writeFailures = writeFailures.filter {
+                pendingEdits[$0.key] != nil || (noPermission && $0.value.values.contains { $0.kind == .noPermission })
+            }
             bodies = refreshedBodies.filter { id, _ in tasks.contains { $0.id == id } }
             message = nil; verified = true; lastUpdated = started
             if full { fullUpdated = started }
@@ -482,6 +504,26 @@ extension NotionDatabaseAPI {
         bodies[id] = body; saveCache(); return body
     }
     #if DEBUG
+    private func configureEditingPreview(_ state: String) {
+        let preview = NotionTaskEditingPreview(rawValue: state)
+        // The keyboard verification scene needs the same offline editable schema.
+        guard state == "detail" || preview != nil else { return }
+        configuration.source = "mock-source"
+        let options: [NotionStatusOption] = [
+            .init(id: "todo", name: "未着手", color: "gray", category: .notStarted),
+            .init(id: "doing", name: "進行中", color: "blue", category: .inProgress),
+            .init(id: "done", name: "完了", color: "green", category: .complete)
+        ]
+        properties = [.init(id: "status", name: "状態", type: "status", statusOptions: options),
+                      .init(id: "due", name: "期日", type: "date")]
+        configuration.mapping = .automatic(properties)
+        tasks = tasks.map { row in var row = row; row.dueEditable = true; return row }
+        if let preview, [NotionTaskEditingPreview.detailFailed, .listBadgeWarning, .noPermission].contains(preview) {
+            writeFailures["mock-0"] = [.status: .init(kind: preview == .noPermission ? .noPermission : .failed, value: .status(options[1]))]
+        }
+        noPermission = preview == .noPermission
+
+    }
     static func previewBlocks() -> [NotionTaskBlock] {
         func block(_ id: String, _ type: String, _ text: String, depth: Int = 0) -> NotionTaskBlock {
             NotionTaskBlock.parse(["id": id, "type": type, type: ["rich_text": [["plain_text": text]]]], depth: depth)
@@ -499,6 +541,24 @@ extension NotionDatabaseAPI {
     }
     #endif
 }
+
+#if DEBUG
+// The scene names and their routing are absent from Release compilation.
+enum NotionTaskEditingPreview: String {
+    case detailStatusMenu = "022-detail-status-menu"
+    case dateCalendar = "022-date-calendar"
+    case listBadgeMenu = "022-list-badge-menu"
+    case detailFailed = "022-detail-failed"
+    case listBadgeWarning = "022-list-badge-warning"
+    case noPermission = "022-no-permission"
+    var showsDetail: Bool {
+        switch self {
+        case .detailStatusMenu, .dateCalendar, .detailFailed, .noPermission: return true
+        case .listBadgeMenu, .listBadgeWarning: return false
+        }
+    }
+}
+#endif
 
 #if DEBUG
 enum NotionPreviewTab: String, CaseIterable {

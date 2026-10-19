@@ -332,10 +332,12 @@ enum NotionAgentInput {
 
 enum NotionAPIError: LocalizedError {
     case missingToken, invalidResponse, server(Int, String)
+    case coded(Int, String, String)
     var errorDescription: String? {
         switch self {
         case .missingToken: "Notionのトークンを設定してください。"
         case .invalidResponse: "Notionからの応答を読み取れませんでした。"
+        case .coded(let status, _, let message): "Notion API (\(status)): \(message)"
         case .server(let status, let message): "Notion API (\(status)): \(message)"
         }
     }

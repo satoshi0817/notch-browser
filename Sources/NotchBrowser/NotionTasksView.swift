@@ -125,6 +125,7 @@ enum NotionSettingsFieldLayout {
     @ObservedObject private var store = NotionTasksStore.shared
     @State private var selected: NotionTask?
     @State private var deletedSelection = false
+    @Namespace private var taskRows
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
         VStack(spacing: 0) {
@@ -155,12 +156,12 @@ enum NotionSettingsFieldLayout {
                 taskContent
             }
         }
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: store.tasks.map(\.id))
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: store.tasks)
         .background(Color(nsColor: .windowBackgroundColor))
         .task(id: openingID) {
             #if DEBUG
             if ["tab-settings", "settings", "sources", "settings-error"].contains(store.mockState ?? "") { showingSettings = true }
-            if ["detail", "loading", "no-body"].contains(store.mockState ?? "") { selected = store.tasks.first }
+            if ["detail", "loading", "no-body"].contains(store.mockState ?? "") || NotionTaskEditingPreview(rawValue: store.mockState ?? "")?.showsDetail == true { selected = store.tasks.first }
             #endif
             if connection.tokenValid { await store.refresh(force: false) }
         }
@@ -201,7 +202,7 @@ enum NotionSettingsFieldLayout {
         }
     }
     private func detail(_ task: NotionTask, narrow: Bool) -> some View {
-        NotionTaskDetail(task: task, back: { selected = nil }, narrow: narrow)
+        NotionTaskDetail(task: task, back: { selected = nil }, narrow: narrow, onOpenSettings: onOpenSettings)
             .id("\(task.id)-\(openingID)")
     }
     @ViewBuilder private var settingsButton: some View {
@@ -239,9 +240,10 @@ enum NotionSettingsFieldLayout {
                                     .padding(.horizontal, 12).padding(.top, 16).padding(.bottom, 5)
                                 ForEach(items) { task in
                                     row(task)
+                                        .matchedGeometryEffect(id: task.id, in: taskRows)
                                         .contentShape(Rectangle())
                                         .onTapGesture { deletedSelection = false; selected = task }
-                                        .transition(.opacity)
+                                        .transition(.identity)
                                     Divider()
                                 }
                             }
@@ -280,10 +282,14 @@ enum NotionSettingsFieldLayout {
                 .foregroundStyle(taskColor(task)).frame(width: 16)
                 .accessibilityLabel(task.status)
             Text(task.title).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
-            Text(task.status).font(.system(size: 10)).lineLimit(1).padding(.horizontal, 4).padding(.vertical, 3)
-                .foregroundStyle(taskColor(task))
-                .background(taskColor(task).opacity(0.12), in: RoundedRectangle(cornerRadius: 4))
-                .frame(maxWidth: 64, alignment: .trailing)
+            NotionTaskStatusEditor(task: task, compact: true, color: taskColor(task))
+            if let failure = store.writeFailures[task.id]?.values.first {
+                Button { store.retryWrite(page: task.id, field: failure.value.field) } label: {
+                    Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 10)).foregroundStyle(.orange)
+                }.buttonStyle(.plain)
+                    .help(store.noPermission ? NotionTaskWriteFailure(kind: .noPermission, value: failure.value).text : "Notion に保存できませんでした")
+                    .accessibilityLabel("Notion に保存できませんでした。再試行")
+            }
             Text(task.due.map { NotionTaskRules.dateLabel($0) } ?? "").font(.caption).monospacedDigit()
                 .foregroundStyle(NotionTaskRules.group(task, now: Date(), calendar: .current) == .overdue ? Color.orange : Color.secondary)
                 .frame(width: 46, alignment: .trailing)
@@ -295,12 +301,14 @@ enum NotionSettingsFieldLayout {
     let task: NotionTask
     let back: () -> Void
     let narrow: Bool
+    let onOpenSettings: () -> Void
     @ObservedObject private var store = NotionTasksStore.shared
     @State private var blocks: [NotionTaskBlock] = []
     @State private var loading = true
     @State private var error: String?
-    init(task: NotionTask, back: @escaping () -> Void, narrow: Bool) {
-        self.task = task; self.back = back; self.narrow = narrow
+    @FocusState private var editFocus: NotionTaskField?
+    init(task: NotionTask, back: @escaping () -> Void, narrow: Bool, onOpenSettings: @escaping () -> Void) {
+        self.task = task; self.back = back; self.narrow = narrow; self.onOpenSettings = onOpenSettings
         let cached = NotionTasksStore.shared.bodies[task.id]
         _blocks = State(initialValue: cached ?? [])
         _loading = State(initialValue: cached == nil)
@@ -312,9 +320,16 @@ enum NotionSettingsFieldLayout {
                 Text(task.title).font(.title2.weight(.semibold))
                 if let url = task.url { Link("Notion で開く", destination: url) }
                 Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 10) {
-                    GridRow { Text("状態").foregroundStyle(.secondary); Text(task.status) }
-                    GridRow { Text("期日").foregroundStyle(.secondary); Text(task.due.map { NotionTaskRules.dateLabel($0) } ?? "—") }
+                    GridRow(alignment: .firstTextBaseline) {
+                        Text("状態").foregroundStyle(.secondary)
+                        NotionTaskStatusEditor(task: task, detailFocus: $editFocus)
+                    }
+                    GridRow(alignment: .firstTextBaseline) {
+                        Text("期日").foregroundStyle(.secondary)
+                        NotionTaskDueEditor(task: task, detailFocus: $editFocus)
+                    }
                 }
+                NotionTaskDetailSaveNotice(page: task.id, onOpenSettings: onOpenSettings)
                 Divider()
                 if loading {
                     ForEach(0..<5) { index in RoundedRectangle(cornerRadius: 4).fill(Color.secondary.opacity(0.12)).frame(height: index == 0 ? 24 : 14) }
@@ -325,6 +340,9 @@ enum NotionSettingsFieldLayout {
         }.onChange(of: store.bodies) { _, bodies in
             if let body = bodies[task.id] { blocks = body }
         }.task {
+            // Enter the detail's native key loop instead of leaving the web view as responder.
+            if store.canEdit(.status, task: task) { editFocus = .status }
+            else if store.canEdit(.due, task: task) { editFocus = .due }
             if let cached = store.bodies[task.id] { blocks = cached; loading = false }
             else { loading = true }
             do { blocks = try await store.blocks(for: task.id) }

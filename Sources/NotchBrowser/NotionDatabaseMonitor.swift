@@ -7,6 +7,7 @@ struct NotionDatabaseProperty: Identifiable, Hashable {
     let id: String
     let name: String
     let type: String
+    var statusOptions: [NotionStatusOption] = []
 }
 
 struct NotionDatabaseDetails {
@@ -98,12 +99,12 @@ struct NotionDatabaseAPI {
         self.fetch = fetch
     }
 
-    func request(_ path: String, body: [String: Any]? = nil, query: [URLQueryItem] = []) async throws -> [String: Any] {
+    func request(_ path: String, body: [String: Any]? = nil, query: [URLQueryItem] = [], method: String? = nil) async throws -> [String: Any] {
         guard !token.isEmpty else { throw NotionAPIError.missingToken }
         var components = URLComponents(string: "https://api.notion.com/v1/\(path)")!
         components.queryItems = query.isEmpty ? nil : query
         var request = URLRequest(url: components.url!)
-        request.httpMethod = body == nil ? "GET" : "POST"
+        request.httpMethod = method ?? (body == nil ? "GET" : "POST")
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue(version, forHTTPHeaderField: "Notion-Version")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -112,13 +113,15 @@ struct NotionDatabaseAPI {
             let (data, response) = try await fetch(request)
             guard let response = response as? HTTPURLResponse else { throw NotionAPIError.invalidResponse }
             if (response.statusCode == 429 || response.statusCode == 529) && attempt < 2 {
-                let seconds = max(0.25, Double(response.value(forHTTPHeaderField: "Retry-After") ?? "") ?? Double(1 << attempt))
+                let seconds = max(request.httpMethod == "PATCH" ? 0.35 : 0.25, Double(response.value(forHTTPHeaderField: "Retry-After") ?? "") ?? Double(1 << attempt))
                 try await wait(seconds)
                 continue
             }
             guard (200..<300).contains(response.statusCode) else {
-                let message = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["message"] as? String
+                let error = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                let message = error?["message"] as? String
                     ?? HTTPURLResponse.localizedString(forStatusCode: response.statusCode)
+                if let code = error?["code"] as? String { throw NotionAPIError.coded(response.statusCode, code, message) }
                 throw NotionAPIError.server(response.statusCode, message)
             }
             guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -132,7 +135,7 @@ struct NotionDatabaseAPI {
     func details(for inputID: String) async throws -> NotionDatabaseDetails {
         let source: [String: Any]
         do { source = try await request("data_sources/\(inputID)") }
-        catch NotionAPIError.server(let status, _) where status == 400 || status == 404 {
+        catch where [400, 404].contains(NotionTaskEditRules.status(error).0) {
             let database = try await request("databases/\(inputID)")
             guard let first = (database["data_sources"] as? [[String: Any]])?.first,
                   let id = first["id"] as? String else { throw NotionAPIError.invalidResponse }

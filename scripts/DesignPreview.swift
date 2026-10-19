@@ -6,6 +6,9 @@ struct DesignPreview {
     static func main() {
         precondition(Bundle.main.bundleIdentifier == "com.satoshi0817.NotchBrowser.DesignPreview")
         #if DEBUG
+        // TASK-NOTCH-022: --tasks=022-detail-status-menu / 022-date-calendar /
+        // 022-list-badge-menu / 022-detail-failed / 022-list-badge-warning /
+        // 022-no-permission. These use offline stores and never invoke live writes.
         // TASK-NOTCH-020: offline cache states and a pinned failure tooltip.
         if let argument = CommandLine.arguments.first(where: { $0.hasPrefix("--cache-state=") }) {
             precondition(["cached", "refreshing", "failed", "settings"].contains(String(argument.dropFirst(14))))

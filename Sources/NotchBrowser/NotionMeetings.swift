@@ -124,7 +124,7 @@ extension NotionDatabaseAPI {
             // Database pages are enumerated through their data sources.
             let database: [String: Any]?
             do { database = try await request("databases/\(root)") }
-            catch NotionAPIError.server(let status, _) where status == 400 || status == 404 { database = nil }
+            catch where [400, 404].contains(NotionTaskEditRules.status(error).0) { database = nil }
             if let sources = database?["data_sources"] as? [[String: Any]] {
                 queue = []
                 for source in sources.prefix(5) {
