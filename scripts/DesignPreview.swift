@@ -63,7 +63,15 @@ struct DesignPreview {
         let settings = SettingsWindowController()
         var requestedPreviewAction: (() -> Void)? = nil
         #if DEBUG
-        if CommandLine.arguments.contains("--fixed-pages-drag") {
+        if CommandLine.arguments.contains("--web-lifecycle=settings") {
+            requestedPreviewAction = { settings.present(section: .general) }
+        } else if CommandLine.arguments.contains("--web-lifecycle=rest-demo") {
+            requestedPreviewAction = { manager.browser.previewWebRestDemo(fixture: fixture) }
+        } else if CommandLine.arguments.contains("--web-lifecycle=snapshot") || CommandLine.arguments.contains("--web-lifecycle=failed") {
+            requestedPreviewAction = {
+                manager.browser.previewWebLifecycle(failed: CommandLine.arguments.contains("--web-lifecycle=failed"))
+            }
+        } else if CommandLine.arguments.contains("--fixed-pages-drag") {
             requestedPreviewAction = { settings.present(section: .tabs, pinnedSelection: .tasks) }
         } else if let preview = SettingsPreviewLaunch.parse(arguments: CommandLine.arguments) {
             requestedPreviewAction = { settings.present(section: preview.section, pinnedSelection: preview.selection) }

@@ -198,6 +198,7 @@ struct SettingsData: Codable {
     var countdownMinutes = 30
     var calendarLongEventLimit = CalendarLongEventLimit.eightHours
     var openTabBehavior = OpenTabBehavior.lastViewed
+    var tabRestInterval = TabRestInterval.thirtyMinutes
     var grayscaleIcons = false
     /// With grayscale icons, still show the selected tab's icon in color.
     var colorSelectedIcon = true
@@ -253,6 +254,7 @@ struct SettingsData: Codable {
         calendarLongEventLimit = (try? c.decode(CalendarLongEventLimit.self, forKey: .calendarLongEventLimit))
             ?? fallback.calendarLongEventLimit
         hideFromScreenCapture = try c.decodeIfPresent(Bool.self, forKey: .hideFromScreenCapture) ?? fallback.hideFromScreenCapture
+        tabRestInterval = (try? c.decode(TabRestInterval.self, forKey: .tabRestInterval)) ?? fallback.tabRestInterval
         openTabBehavior = try c.decodeIfPresent(OpenTabBehavior.self, forKey: .openTabBehavior) ?? fallback.openTabBehavior
         grayscaleIcons = try c.decodeIfPresent(Bool.self, forKey: .grayscaleIcons) ?? fallback.grayscaleIcons
         colorSelectedIcon = try c.decodeIfPresent(Bool.self, forKey: .colorSelectedIcon) ?? fallback.colorSelectedIcon

@@ -577,6 +577,7 @@ final class NotchController: NSObject, NSWindowDelegate {
                 manager.browser.prepareForOpen()
             }
             manager.willExpand(self)
+            manager.browser.setWebContentVisible(true)
             isExpanded = true
             if ShelfFeature.isAvailable && !manager.shelf.store.entries.isEmpty { manager.showShelf(on: self) }
             panel.hasShadow = true
@@ -595,7 +596,10 @@ final class NotchController: NSObject, NSWindowDelegate {
         hoverTimer?.invalidate()
         explicitReturnOpen = false
         guard isExpanded else { return }
-        if !manager.isDetached { manager.browser.hideNotion() }
+        if !manager.isDetached {
+            manager.browser.setWebContentVisible(false)
+            manager.browser.hideNotion()
+        }
         if preservingShelf && shelfVisible && !manager.shelf.store.entries.isEmpty {
             shelfOnly = true
             if panel.isKeyWindow { panel.orderOut(nil); panel.orderFrontRegardless() }

@@ -2,6 +2,7 @@ import AppKit
 import WebKit
 import SwiftUI
 import Combine
+import os
 
 private final class LinkMenuMessageHandler: NSObject, WKScriptMessageHandler {
     weak var owner: BrowserViewController?
@@ -23,7 +24,29 @@ final class Tab {
     var profileID: UUID
     /// The pinned URL last loaded, to notice when it's edited in settings.
     var homeURL: String?
-    private(set) var webView: WKWebView
+    private(set) var liveWebView: WKWebView?
+    // Preserve the transfer API; passive UI reads use cached metadata.
+    var webView: WKWebView {
+        if liveWebView == nil { wake?() }
+        return liveWebView!
+    }
+    var wake: (() -> Void)?
+    let lifecycleID = UUID()
+    var recovery = WebRecoveryState()
+    var pendingWebOperation: WebTabOperation?
+    var inactiveSince: Date? = Date()
+    var restGeneration = UUID()
+    var navigationGeneration = UUID()
+    var resting = false
+    var restoring = false
+    var savedURL: URL?
+    var savedTitle: String?
+    var savedZoom: CGFloat = 1
+    var scroll: [String: Any] = [:]
+    let snapshot = TabSnapshot()
+    var pageURL: URL? { liveWebView?.url ?? savedURL }
+    func releaseWebView() { liveWebView = nil }
+
     var observations: [NSKeyValueObservation] = []
     var refreshTimer: Timer?
     var refreshInterval: TimeInterval = 0
@@ -32,27 +55,49 @@ final class Tab {
     init(pinnedID: UUID?, profileID: UUID, webView: WKWebView) {
         self.pinnedID = pinnedID
         self.profileID = profileID
-        self.webView = webView
+        self.liveWebView = webView
     }
 
     var pinned: PinnedTab? { pinnedID.flatMap { SettingsStore.shared.pinnedTab($0) } }
 
     var displayName: String {
         if let pinned { return pinned.name }
-        if let title = webView.title, !title.isEmpty { return title }
-        return webView.url?.host() ?? "新規タブ"
+        if let title = liveWebView?.title ?? savedTitle, !title.isEmpty { return title }
+        return pageURL?.host() ?? "新規タブ"
     }
 
     func icon(grayscale: Bool) -> NSImage {
-        TabIconRenderer.image(for: pinned?.icon ?? .favicon, hosts: [webView.url?.host(), pinned?.host], grayscale: grayscale)
+        TabIconRenderer.image(for: pinned?.icon ?? .favicon, hosts: [pageURL?.host(), pinned?.host], grayscale: grayscale)
     }
 
     func replaceWebView(_ newWebView: WKWebView) {
-        webView = newWebView
+        liveWebView = newWebView
     }
 }
 
 final class BrowserViewController: NSViewController {
+    private static let webLog = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.satoshi0817.NotchBrowser", category: "web")
+    private var contentVisible = false
+    private var restTimer: Timer?
+    #if DEBUG
+    private let debugTabRestSeconds = TabRestDebugArguments.seconds(arguments: CommandLine.arguments)
+    private var restDemoLoadingID: UUID?
+    private var restDemoCapturingID: UUID?
+    private var restDemoPageID: UUID?
+    private var restDemoFixtureURL: URL?
+    #endif
+    private var tabRestSeconds: TimeInterval {
+        #if DEBUG
+        if let debugTabRestSeconds { return debugTabRestSeconds }
+        #endif
+        return TimeInterval(store.data.tabRestInterval.rawValue)
+    }
+    private var terminationObserver: NSObjectProtocol?
+    private var snapshotView: NSImageView?
+    private var failureView: NSView?
+    private var nativeSelected: Bool {
+        notionPanel?.isHidden == false || tasksPanel?.isHidden == false || meetingsPanel?.isHidden == false
+    }
     var onToggleDetached: (() -> Void)?
     var onDetachTab: ((Tab, NSPoint?) -> Void)?
     var onCreateTabWindow: ((Tab) -> Void)?
@@ -67,9 +112,10 @@ final class BrowserViewController: NSViewController {
     func takeTab(_ tab: Tab) -> Tab? {
         guard tab.pinnedID == nil, let index = tabs.firstIndex(where: { $0 === tab }) else { return nil }
         let selected = selectedTab
+        tab.restGeneration = UUID()
         tabs.remove(at: index)
         tab.observations.removeAll()
-        tab.webView.removeFromSuperview()
+        tab.liveWebView?.removeFromSuperview()
         select(selected === tab ? (tabs.isEmpty ? nil : min(index, tabs.count - 1)) : selected.flatMap { old in tabs.firstIndex { $0 === old } })
         return tab
     }
@@ -78,13 +124,19 @@ final class BrowserViewController: NSViewController {
         _ = view
         precondition(!isSingleTabWindow || tabs.isEmpty)
         tabs.append(tab)
+        tab.wake = { [weak self, weak tab] in
+            guard let self, let tab else { return }
+            self.resume(tab)
+        }
+        startRestTimer()
+        let needsInstall = tab.liveWebView != nil
         let controller = tab.webView.configuration.userContentController
         controller.removeScriptMessageHandler(forName: "notchBrowserLinkMenu")
         controller.add(LinkMenuMessageHandler(owner: self), name: "notchBrowserLinkMenu")
         linkMenuControllers.add(controller)
         tab.webView.navigationDelegate = self
         tab.webView.uiDelegate = self
-        install(tab)
+        if needsInstall { install(tab) }
         select(tab)
     }
 
@@ -444,7 +496,7 @@ final class BrowserViewController: NSViewController {
         ])
         notes.onClose = { [weak self] in self?.notes.isHidden = true; self?.focusContent() }
         notes.pageLink = { [weak self] in
-            guard let tab = self?.selectedTab, let url = tab.webView.url else { return nil }
+            guard let tab = self?.selectedTab, let url = tab.pageURL else { return nil }
             return (tab.displayName, url)
         }
         let notion = NSHostingView(rootView: NotionAgentsPanel(onOpenSettings: { [weak self] in
@@ -998,10 +1050,10 @@ final class BrowserViewController: NSViewController {
         let previousResponder = sourceWindow?.firstResponder
         let fallbackToContent = previousResponder == nil || previousResponder === sourceWindow
             || previousResponder === view || previousResponder === detachButton
-        let nativeFocus = WebTransferResponderState(webView: selectedTab?.webView,
+        let nativeFocus = WebTransferResponderState(webView: selectedTab?.liveWebView,
                                                    sourceWindow: sourceWindow, fallbackToContent: fallbackToContent)
         let addressWasEditing = addressField.currentEditor() === previousResponder && previousResponder != nil
-        let views = ([selectedTab?.webView].compactMap { $0 } + tabs.map(\.webView))
+        let views = ([selectedTab?.liveWebView].compactMap { $0 } + tabs.compactMap(\.liveWebView))
             .reduce(into: [WKWebView]()) { result, view in
                 if !result.contains(where: { $0 === view }) { result.append(view) }
             }
@@ -1022,13 +1074,13 @@ final class BrowserViewController: NSViewController {
                     self.addressPopover.show(relativeTo: self.addressButton.bounds, of: self.addressButton, preferredEdge: .minY)
                 }
                 let restoreWebFocus = nativeFocus.restore(to: self.view.window,
-                                                         contentVisible: self.selectedTab?.webView.superview === self.webContainer)
+                                                         contentVisible: self.selectedTab?.liveWebView?.superview === self.webContainer)
                 // Restore DOM selection only after native focus, overwriting any WebKit select-all.
                 let restored = DispatchGroup()
                 for webView in views {
                     restored.enter()
                     webView.callAsyncJavaScript(WebViewTransferState.restore,
-                                               arguments: ["restoreFocus": restoreWebFocus && webView === self.selectedTab?.webView],
+                                               arguments: ["restoreFocus": restoreWebFocus && webView === self.selectedTab?.liveWebView],
                                                in: nil, in: .defaultClient) { _ in
                         restored.leave()
                     }
@@ -1050,9 +1102,9 @@ final class BrowserViewController: NSViewController {
 
     func focusContent() {
         guard !preservingWebState else { return }
-        if let tab = selectedTab, tab.webView.url != nil {
+        if let tab = selectedTab, tab.pageURL != nil {
             view.window?.makeFirstResponder(tab.webView)
-            addressField.stringValue = tab.webView.url?.absoluteString ?? ""
+            addressField.stringValue = tab.pageURL?.absoluteString ?? ""
         } else {
             view.window?.makeFirstResponder(addressButton)
         }
@@ -1073,6 +1125,8 @@ final class BrowserViewController: NSViewController {
     }
 
     deinit {
+        restTimer?.invalidate()
+        if let terminationObserver { NotificationCenter.default.removeObserver(terminationObserver) }
         if let systemAppearanceObserver {
             DistributedNotificationCenter.default().removeObserver(systemAppearanceObserver)
         }
@@ -1080,6 +1134,460 @@ final class BrowserViewController: NSViewController {
 
     private func updateNotionAppearance() {
         notionPanel?.appearance = store.data.notionAppearance.resolvedAppearance
+    }
+
+
+    // MARK: Web process recovery and resting tabs
+
+    func setWebContentVisible(_ visible: Bool) {
+        let changed = contentVisible != visible
+        contentVisible = visible
+        if visible {
+            if !nativeSelected { displaySelectedPage() }
+        } else if changed, let tab = selectedTab {
+            tab.inactiveSince = tab.inactiveSince ?? Date()
+            tab.restGeneration = UUID()
+        }
+        startRestTimer()
+    }
+
+    private func logWeb(_ tab: Tab, action: WebTabOperation, phase: String, success: Bool) {
+        let id = tab.lifecycleID.uuidString
+        Self.webLog.info("tab=\(id, privacy: .public) action=\(action.rawValue, privacy: .public) phase=\(phase, privacy: .public) success=\(success)")
+    }
+
+    private func finishWebOperation(_ tab: Tab, success: Bool) {
+        guard let operation = tab.pendingWebOperation else { return }
+        logWeb(tab, action: operation, phase: "finish", success: success)
+        tab.pendingWebOperation = nil
+    }
+
+    #if DEBUG
+    func previewWebRestDemo(fixture: URL) {
+        _ = view
+        contentVisible = true
+        hideNotion()
+        guard let tab = selectedTab else { return }
+        restDemoPageID = tab.lifecycleID
+        restDemoFixtureURL = fixture
+        tab.recovery.finish(success: true)
+        restDemoLoadingID = tab.lifecycleID
+        restDemoCapturingID = nil
+        clearPageOverlays()
+        let web = tab.webView
+        web.navigationDelegate = self
+        web.uiDelegate = self
+        web.load(URLRequest(url: fixture))
+    }
+
+    private static let restDemoLayout = "document.body.style.minHeight = '2400px';"
+
+    private func captureRestDemo(_ tab: Tab, web: WKWebView) {
+        restDemoLoadingID = nil
+        let navigation = tab.navigationGeneration
+        web.evaluateJavaScript(Self.restDemoLayout + "window.scrollTo(0, 240);",
+                               in: nil, in: .defaultClient) { [weak self, weak tab, weak web] result in
+            guard let self, let tab, let web, tab.liveWebView === web,
+                  tab.navigationGeneration == navigation else { return }
+            guard case .success = result else {
+                self.logWeb(tab, action: .rest, phase: "prepare", success: false)
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self, weak tab, weak web] in
+                guard let self, let tab, let web, self.selectedTab === tab,
+                      tab.liveWebView === web, tab.navigationGeneration == navigation, !web.isLoading else { return }
+                self.restDemoCapturingID = tab.lifecycleID
+                tab.inactiveSince = Date()
+                tab.resting = true
+                tab.restGeneration = UUID()
+                self.captureRestingTab(tab, web: web, generation: tab.restGeneration)
+            }
+        }
+    }
+
+    func previewWebLifecycle(failed: Bool) {
+        _ = view
+        contentVisible = true
+        guard let tab = selectedTab else { return }
+        tab.webView.stopLoading()
+        tab.webView.navigationDelegate = nil
+        if failed {
+            tab.recovery.finish(success: false)
+            showPageFailure(tab)
+        } else {
+            let image = NSImage(size: NSSize(width: 960, height: 600), flipped: false) { rect in
+                NSColor.windowBackgroundColor.setFill(); rect.fill()
+                let text = "保存されたページ"
+                text.draw(at: NSPoint(x: 60, y: 440), withAttributes: [
+                    .font: NSFont.systemFont(ofSize: 28), .foregroundColor: NSColor.labelColor
+                ])
+                return true
+            }
+            tab.snapshot.store(image)
+            showSnapshot(tab)
+        }
+    }
+    #endif
+
+    private func startRestTimer() {
+        guard restTimer == nil else { return }
+        var checkInterval: TimeInterval = 15
+        #if DEBUG
+        if let debugTabRestSeconds { checkInterval = min(1, debugTabRestSeconds) }
+        #endif
+        restTimer = Timer.scheduledTimer(withTimeInterval: checkInterval, repeats: true) { [weak self] _ in
+            self?.restInactiveTabs()
+        }
+        terminationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.tabs.forEach { $0.snapshot.clear() }
+            self?.clearPageOverlays()
+        }
+    }
+
+    private func isVisible(_ tab: Tab) -> Bool {
+        (contentVisible || isDetached || isSingleTabWindow) && tab === selectedTab && !nativeSelected
+    }
+
+    private func restVisibleSelected(_ tab: Tab) -> Bool {
+        #if DEBUG
+        if restDemoCapturingID == tab.lifecycleID { return false }
+        #endif
+        return isVisible(tab)
+    }
+
+    private func restDeadlinePassed(_ tab: Tab) -> Bool {
+        #if DEBUG
+        if restDemoCapturingID == tab.lifecycleID { return true }
+        #endif
+        guard tabRestSeconds > 0, let since = tab.inactiveSince else { return false }
+        return Date().timeIntervalSince(since) >= tabRestSeconds
+    }
+
+    private func restInactiveTabs() {
+        let seconds = tabRestSeconds
+        guard seconds > 0, !preservingWebState else { return }
+        for tab in tabs {
+            guard !isVisible(tab), !tab.resting, !tab.restoring,
+                  !tab.recovery.terminated, !tab.recovery.failed,
+                  let web = tab.liveWebView, !web.isLoading, tab.pageURL != nil,
+                  let since = tab.inactiveSince, Date().timeIntervalSince(since) >= Double(seconds) else { continue }
+            tab.resting = true
+            let generation = tab.restGeneration
+            web.requestMediaPlaybackState { [weak self, weak tab, weak web] state in
+                guard let self, let tab, let web else { return }
+                guard state != .playing, state != .suspended else {
+                    tab.resting = false
+                    self.logWeb(tab, action: .rest, phase: "finish", success: false)
+                    return
+                }
+                web.evaluateJavaScript(TabRestRules.activity, in: nil, in: .defaultClient) { [weak self, weak tab, weak web] result in
+                    guard let self, let tab, let web else { return }
+                    guard case .success(let value) = result, let activity = value as? [String: Bool],
+                          TabRestRules.eligible(visibleSelected: self.isVisible(tab),
+                            playingMedia: activity["playing"] ?? true, editing: activity["editing"] ?? true, native: false),
+                          tab.restGeneration == generation, self.tabRestSeconds > 0
+                    else { tab.resting = false; return }
+                    self.captureRestingTab(tab, web: web, generation: generation)
+                }
+            }
+        }
+    }
+
+    private func abortRest(_ tab: Tab) {
+        tab.resting = false
+        #if DEBUG
+        if restDemoCapturingID == tab.lifecycleID { restDemoCapturingID = nil }
+        #endif
+        logWeb(tab, action: .rest, phase: "finish", success: false)
+    }
+
+    private func captureRestingTab(_ tab: Tab, web: WKWebView, generation: UUID) {
+        guard !preservingWebState else { abortRest(tab); return }
+        logWeb(tab, action: .rest, phase: "start", success: true)
+        // Reuse transfer capture without retaining DOM nodes or overwriting a window transfer.
+        let captureScroll = "(() => { const previous = globalThis.__notchTransfer;\n"
+            + WebViewTransferState.capture
+            + "\nconst state = globalThis.__notchTransfer;"
+            + "if (previous) globalThis.__notchTransfer = previous; else delete globalThis.__notchTransfer;"
+            + "return {x: state.x, y: state.y}; })()"
+        web.evaluateJavaScript(captureScroll, in: nil, in: .defaultClient) { [weak self, weak tab, weak web] result in
+            guard let self, let tab, let web else { return }
+            guard case .success(let value) = result, let scroll = value as? [String: Any] else {
+                self.abortRest(tab)
+                return
+            }
+            web.takeSnapshot(with: nil) { [weak self, weak tab, weak web] image, _ in
+                guard let self, let tab, let web else { return }
+                self.logWeb(tab, action: .rest, phase: "snapshot", success: image != nil)
+                #if DEBUG
+                if self.restDemoCapturingID == tab.lifecycleID, image == nil {
+                    self.abortRest(tab)
+                    tab.recovery.finish(success: false)
+                    self.showPageFailure(tab)
+                    return
+                }
+                #endif
+                // Snapshotting is asynchronous: check activity again immediately before disposal.
+                web.requestMediaPlaybackState { [weak self, weak tab, weak web] state in
+                    guard let self, let tab, let web else { return }
+                    guard state != .playing, state != .suspended else {
+                        self.abortRest(tab)
+                        return
+                    }
+                    web.evaluateJavaScript(TabRestRules.activity, in: nil, in: .defaultClient) { [weak self, weak tab, weak web] activityResult in
+                        guard let self, let tab, let web else { return }
+                        defer {
+                            tab.resting = false
+                            if tab.liveWebView === web {
+                                self.logWeb(tab, action: .rest, phase: "finish", success: false)
+                            }
+                            #if DEBUG
+                            if self.restDemoCapturingID == tab.lifecycleID { self.restDemoCapturingID = nil }
+                            #endif
+                        }
+                        guard case .success(let activityValue) = activityResult,
+                              let activity = activityValue as? [String: Bool],
+                              TabRestRules.eligible(visibleSelected: self.restVisibleSelected(tab),
+                                playingMedia: activity["playing"] ?? true, editing: activity["editing"] ?? true, native: false),
+                              tab.liveWebView === web, tab.restGeneration == generation,
+                              self.tabs.contains(where: { $0 === tab }), !self.preservingWebState,
+                              self.restDeadlinePassed(tab),
+                              !web.isLoading else { return }
+                        tab.scroll = scroll
+                        tab.savedURL = web.url; tab.savedTitle = web.title; tab.savedZoom = web.pageZoom
+                        tab.snapshot.store(image)
+                        tab.observations.removeAll()
+                        web.stopLoading()
+                        web.navigationDelegate = nil; web.uiDelegate = nil
+                        web.removeFromSuperview()
+                        tab.releaseWebView()
+                        self.logWeb(tab, action: .rest, phase: "finish", success: true)
+                        #if DEBUG
+                        if self.restDemoCapturingID == tab.lifecycleID {
+                            self.showSnapshot(tab)
+                            self.chromeNeedsUpdate()
+                        }
+                        #endif
+                    }
+                }
+            }
+        }
+    }
+
+    private func resume(_ tab: Tab) {
+        guard tab.liveWebView == nil else { return }
+        tab.restGeneration = UUID()
+        tab.restoring = true
+        tab.pendingWebOperation = .resume
+        logWeb(tab, action: .resume, phase: "start", success: true)
+        tab.replaceWebView(makeWebView(profileID: tab.profileID))
+        install(tab)
+        tab.webView.pageZoom = tab.savedZoom
+        if isVisible(tab) { showSnapshot(tab) }
+        if let url = tab.savedURL { tab.webView.load(URLRequest(url: url)) }
+        else {
+            tab.restoring = false
+            finishWebOperation(tab, success: false)
+        }
+    }
+
+    private func clearPageOverlays() {
+        snapshotView?.removeFromSuperview(); snapshotView = nil
+        failureView?.removeFromSuperview(); failureView = nil
+    }
+
+    private func addPageOverlay(_ overlay: NSView) {
+        overlay.frame = webContainer.bounds
+        overlay.autoresizingMask = [.width, .height]
+        webContainer.addSubview(overlay, positioned: .above, relativeTo: nil)
+    }
+
+    private func showSnapshot(_ tab: Tab) {
+        clearPageOverlays()
+        guard let image = tab.snapshot.image else { return }
+        let overlay = NSImageView()
+        overlay.image = image; overlay.imageScaling = .scaleAxesIndependently
+        addPageOverlay(overlay)
+        snapshotView = overlay
+    }
+
+    private func showPageFailure(_ tab: Tab) {
+        guard isVisible(tab) else { return }
+        clearPageOverlays()
+        let overlay = WebTabFailureView(target: self, action: #selector(reloadPage(_:)))
+        addPageOverlay(overlay); failureView = overlay
+        tab.liveWebView?.stopLoading()
+        chromeNeedsUpdate()
+    }
+
+    private func reload(_ tab: Tab, automatic: Bool) {
+        let operation: WebTabOperation = automatic ? .autoReload : .reload
+        tab.pendingWebOperation = operation
+        logWeb(tab, action: operation, phase: "start", success: true)
+        if tab.liveWebView == nil { resume(tab); return }
+        let web = tab.webView
+        if web.url != nil { web.reload() }
+        else if let url = tab.pageURL ?? tab.homeURL.flatMap(Self.url(from:)) { web.load(URLRequest(url: url)) }
+        else {
+            tab.recovery.finish(success: false)
+            finishWebOperation(tab, success: false)
+            showPageFailure(tab)
+        }
+    }
+
+    private func automaticReload(_ tab: Tab) {
+        guard !tab.recovery.recovering else { return }
+        guard tab.recovery.beginAutomatic() else {
+            logWeb(tab, action: .autoReload, phase: "exhausted", success: false)
+            showPageFailure(tab); return
+        }
+        reload(tab, automatic: true)
+    }
+
+    private func displaySelectedPage() {
+        clearPageOverlays()
+        guard let tab = selectedTab, !nativeSelected else { return }
+        tab.inactiveSince = nil
+        if !tab.restoring { tab.restGeneration = UUID() }
+        if tab.liveWebView == nil { resume(tab); return }
+        if tab.recovery.failed { showPageFailure(tab); return }
+        if tab.recovery.terminated { automaticReload(tab); return }
+        if tab.restoring { showSnapshot(tab); return }
+        let web = tab.webView
+        guard !web.isLoading, tab.pageURL != nil else { return }
+        // A newly created empty tab has no URL and is intentionally excluded.
+        web.evaluateJavaScript("document.body ? document.body.innerText.trim().length === 0 && document.body.children.length === 0 : true",
+                               in: nil, in: .defaultClient) { [weak self, weak tab, weak web] result in
+            guard let self, let tab, let web, tab.liveWebView === web, self.isVisible(tab),
+                  !web.isLoading, !tab.recovery.recovering, !tab.recovery.failed else { return }
+            if case .success(let empty) = result, empty as? Bool == true { self.automaticReload(tab) }
+        }
+    }
+
+    private func pageFinished(_ web: WKWebView) {
+        guard let index = index(of: web) else { return }
+        let tab = tabs[index]
+        #if DEBUG
+        if restDemoLoadingID == tab.lifecycleID {
+            captureRestDemo(tab, web: web)
+            return
+        }
+        #endif
+        guard tab.recovery.recovering || tab.restoring else {
+            completePageFinished(web); return
+        }
+        let generation = tab.navigationGeneration
+        web.evaluateJavaScript("document.body ? document.body.innerText.trim().length === 0 && document.body.children.length === 0 : true",
+                               in: nil, in: .defaultClient) { [weak self, weak tab, weak web] result in
+            guard let self, let tab, let web, tab.liveWebView === web,
+                  tab.navigationGeneration == generation, !web.isLoading else { return }
+            if case .success(let value) = result, value as? Bool == false {
+                self.completePageFinished(web)
+            } else {
+                self.pageFailed(web, error: NSError(domain: "WebTabRecovery", code: 1))
+            }
+        }
+    }
+
+    private func completePageFinished(_ web: WKWebView) {
+        guard let index = index(of: web) else { return }
+        let tab = tabs[index]
+        tab.recovery.finish(success: true)
+        guard tab.restoring else {
+            finishWebOperation(tab, success: true)
+            if isVisible(tab) { clearPageOverlays() }
+            return
+        }
+        let scroll = tab.scroll
+        let generation = tab.navigationGeneration
+        var setup = "globalThis.__notchTransfer = {x: scroll.x || 0, y: scroll.y || 0};\n"
+        #if DEBUG
+        if restDemoPageID == tab.lifecycleID, web.url == restDemoFixtureURL {
+            setup = Self.restDemoLayout + setup
+        }
+        #endif
+        web.callAsyncJavaScript(setup + WebViewTransferState.restore,
+            arguments: ["scroll": scroll, "restoreFocus": false], in: nil, in: .defaultClient) { [weak self, weak tab, weak web] result in
+            guard let self, let tab, let web, tab.liveWebView === web,
+                  tab.navigationGeneration == generation else { return }
+            if case .success = result { self.finishWebOperation(tab, success: true) }
+            else { self.finishWebOperation(tab, success: false) }
+            tab.restoring = false
+            self.chromeNeedsUpdate()
+            guard self.isVisible(tab) else { tab.snapshot.clear(); return }
+            let overlay = self.snapshotView
+            #if DEBUG
+            let reduceMotion = CommandLine.arguments.contains("--force-reduce-motion")
+                || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            if overlay != nil {
+                let id = tab.lifecycleID.uuidString
+                let transition = reduceMotion ? "reduce-motion=instant" : "duration=0.15"
+                Self.webLog.info("tab=\(id, privacy: .public) action=snapshot-to-live \(transition, privacy: .public)")
+            }
+            #else
+            let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            #endif
+            if reduceMotion {
+                self.clearPageOverlays(); tab.snapshot.clear()
+            } else {
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0.15
+                    overlay?.animator().alphaValue = 0
+                } completionHandler: { [weak self, weak tab, weak overlay] in
+                    overlay?.removeFromSuperview()
+                    if self?.snapshotView === overlay { self?.snapshotView = nil }
+                    tab?.snapshot.clear()
+                }
+            }
+        }
+    }
+
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        guard let index = index(of: webView) else { return }
+        tabs[index].restGeneration = UUID()
+        tabs[index].navigationGeneration = UUID()
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        guard let index = index(of: webView) else { return }
+        let tab = tabs[index]
+        tab.restGeneration = UUID()
+        tab.navigationGeneration = UUID()
+        finishWebOperation(tab, success: false)
+        tab.recovery.terminate()
+        logWeb(tab, action: .terminate, phase: "event", success: true)
+        if isVisible(tab) { automaticReload(tab) }
+    }
+
+    private func pageFailed(_ web: WKWebView, error: Error) {
+        let nsError = error as NSError
+        guard !(nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled),
+              let index = index(of: web) else { return }
+        let tab = tabs[index]
+        #if DEBUG
+        if restDemoLoadingID == tab.lifecycleID {
+            restDemoLoadingID = nil
+            logWeb(tab, action: .rest, phase: "prepare", success: false)
+            tab.recovery.finish(success: false)
+            showPageFailure(tab)
+            return
+        }
+        #endif
+        guard tab.restoring || tab.recovery.recovering else { return }
+        tab.restoring = false; tab.snapshot.clear()
+        chromeNeedsUpdate()
+        tab.recovery.finish(success: false)
+        finishWebOperation(tab, success: false)
+        showPageFailure(tab)
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        pageFailed(webView, error: error)
+    }
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        pageFailed(webView, error: error)
     }
 
     // MARK: Tabs
@@ -1097,6 +1605,7 @@ final class BrowserViewController: NSViewController {
         installLinkMenu(in: configuration.userContentController)
         let webView = WKWebView(frame: .zero, configuration: configuration)
         // Google refuses sign-in from "embedded" browsers; present as Safari.
+        webView.underPageBackgroundColor = .windowBackgroundColor
         webView.customUserAgent = Self.userAgent
         webView.allowsBackForwardNavigationGestures = true
         webView.isInspectable = true
@@ -1183,7 +1692,7 @@ final class BrowserViewController: NSViewController {
         for entry in pinned {
             if let tab = tabs.first(where: { $0.pinnedID == entry.id }) {
                 if tab.profileID != entry.profileID {
-                    switchProfile(of: tab, to: entry.profileID, reloading: tab.webView.url ?? URL(string: entry.url))
+                    switchProfile(of: tab, to: entry.profileID, reloading: tab.pageURL ?? URL(string: entry.url))
                 }
                 if tab.homeURL != entry.url {
                     tab.homeURL = entry.url
@@ -1204,6 +1713,11 @@ final class BrowserViewController: NSViewController {
 
     private func makeTab(pinnedID: UUID?, profileID: UUID, configuration: WKWebViewConfiguration? = nil) -> Tab {
         let tab = Tab(pinnedID: pinnedID, profileID: profileID, webView: makeWebView(profileID: profileID, configuration: configuration))
+        tab.wake = { [weak self, weak tab] in
+            guard let self, let tab else { return }
+            self.resume(tab)
+        }
+        startRestTimer()
         install(tab)
         return tab
     }
@@ -1212,8 +1726,14 @@ final class BrowserViewController: NSViewController {
     private func install(_ tab: Tab) {
         let webView = tab.webView
         tab.observations = [
-            webView.observe(\.url) { [weak self] _, _ in self?.chromeNeedsUpdate() },
-            webView.observe(\.title) { [weak self] _, _ in self?.chromeNeedsUpdate() },
+            webView.observe(\.url) { [weak self, weak tab] web, _ in
+                if let url = web.url { tab?.savedURL = url }
+                self?.chromeNeedsUpdate()
+            },
+            webView.observe(\.title) { [weak self, weak tab] web, _ in
+                if let title = web.title, !title.isEmpty { tab?.savedTitle = title }
+                self?.chromeNeedsUpdate()
+            },
             webView.observe(\.isLoading) { [weak self] _, _ in self?.chromeNeedsUpdate() },
             webView.observe(\.canGoBack) { [weak self] _, _ in self?.chromeNeedsUpdate() },
             webView.observe(\.canGoForward) { [weak self] _, _ in self?.chromeNeedsUpdate() },
@@ -1233,9 +1753,11 @@ final class BrowserViewController: NSViewController {
         tab.refreshTimer?.invalidate()
         tab.refreshTimer = nil
         tab.refreshInterval = 0
+        tab.restGeneration = UUID()
+        tab.snapshot.clear()
         tab.observations.removeAll()
-        tab.webView.stopLoading()
-        tab.webView.removeFromSuperview()
+        tab.liveWebView?.stopLoading()
+        tab.liveWebView?.removeFromSuperview()
     }
 
     /// A web view's data store is fixed at creation, so changing profile means a new web view.
@@ -1267,9 +1789,8 @@ final class BrowserViewController: NSViewController {
 
     /// Called just before the notch expands.
     func prepareForOpen() {
-        guard case .pinned(let id) = store.data.openTabBehavior,
-              let tab = tabs.first(where: { $0.pinnedID == id }) else { return }
-        select(tab)
+        if case .pinned(let id) = store.data.openTabBehavior,
+           let tab = tabs.first(where: { $0.pinnedID == id }) { select(tab) }
     }
 
     private func select(_ index: Int?, preservingNotion: Bool = false) {
@@ -1278,9 +1799,13 @@ final class BrowserViewController: NSViewController {
         findGeneration += 1
         findStatus.stringValue = ""
         if selectedIndex != index { addressPopover.close() }
+        if selectedIndex != index, let previous = selectedTab {
+            previous.inactiveSince = previous.inactiveSince ?? Date(); previous.restGeneration = UUID()
+        }
         selectedIndex = index
         if let index, let id = tabs[index].pinnedID { store.lastViewedPinnedID = id }
-        for (i, tab) in tabs.enumerated() { tab.webView.isHidden = i != index }
+        for (i, tab) in tabs.enumerated() { tab.liveWebView?.isHidden = i != index }
+        if contentVisible || isDetached || isSingleTabWindow { displaySelectedPage() }
         updateChrome()
         needsTabReveal = true
         view.needsLayout = true
@@ -1293,8 +1818,8 @@ final class BrowserViewController: NSViewController {
 
     private func closeTab(at index: Int) {
         let tab = tabs.remove(at: index)
-        if tab.pinnedID == nil, let url = tab.webView.url {
-            closedTabs.push(ClosedTab(url: url, profileID: tab.profileID, zoom: tab.webView.pageZoom))
+        if tab.pinnedID == nil, let url = tab.pageURL {
+            closedTabs.push(ClosedTab(url: url, profileID: tab.profileID, zoom: Double(tab.liveWebView?.pageZoom ?? tab.savedZoom)))
         }
         discard(tab)
         if tabs.isEmpty {
@@ -1306,7 +1831,7 @@ final class BrowserViewController: NSViewController {
     }
 
     private func index(of webView: WKWebView) -> Int? {
-        tabs.firstIndex { $0.webView === webView }
+        tabs.firstIndex { $0.liveWebView === webView }
     }
 
     @objc func newTab(_ sender: Any?) {
@@ -1327,7 +1852,7 @@ final class BrowserViewController: NSViewController {
 
     private func releaseNewTabToWindow(_ tab: Tab) {
         tab.observations.removeAll()
-        tab.webView.removeFromSuperview()
+        tab.liveWebView?.removeFromSuperview()
         onCreateTabWindow?(tab)
     }
 
@@ -1416,8 +1941,8 @@ final class BrowserViewController: NSViewController {
     @objc private func pinTab(_ sender: NSMenuItem) {
         guard !isSingleTabWindow else { return }
         let tab = tabs[sender.tag]
-        guard tab.pinnedID == nil, let url = tab.webView.url else { return }
-        let name = tab.webView.title.flatMap { $0.isEmpty ? nil : String($0.prefix(14)) } ?? url.host() ?? "Web"
+        guard tab.pinnedID == nil, let url = tab.pageURL else { return }
+        let name = (tab.liveWebView?.title ?? tab.savedTitle).flatMap { $0.isEmpty ? nil : String($0.prefix(14)) } ?? url.host() ?? "Web"
         let entry = PinnedTab(name: name, url: url.absoluteString, profileID: tab.profileID)
         tab.pinnedID = entry.id
         tab.homeURL = entry.url
@@ -1434,13 +1959,13 @@ final class BrowserViewController: NSViewController {
 
     @objc private func setPinnedHome(_ sender: NSMenuItem) {
         let tab = tabs[sender.tag]
-        guard let id = tab.pinnedID, let url = tab.webView.url else { return }
+        guard let id = tab.pinnedID, let url = tab.pageURL else { return }
         tab.homeURL = url.absoluteString
         store.updatePinnedTab(id) { $0.url = url.absoluteString }
     }
 
     @objc private func openTabExternally(_ sender: NSMenuItem) {
-        guard tabs.indices.contains(sender.tag), let url = tabs[sender.tag].webView.url else { return }
+        guard tabs.indices.contains(sender.tag), let url = tabs[sender.tag].pageURL else { return }
         let tab = tabs[sender.tag]
         ExternalBrowserLauncher.open(url, bundleID: store.data.externalBrowserBundleID) { [weak self, weak tab] opened in
             guard opened, let self, let tab,
@@ -1461,7 +1986,7 @@ final class BrowserViewController: NSViewController {
         if let id = tab.pinnedID {
             store.updatePinnedTab(id) { $0.profileID = profileID } // syncPinnedTabs swaps the web view
         } else {
-            switchProfile(of: tab, to: profileID, reloading: tab.webView.url)
+            switchProfile(of: tab, to: profileID, reloading: tab.pageURL)
             updateChrome()
         }
     }
@@ -1490,21 +2015,38 @@ final class BrowserViewController: NSViewController {
         guard isViewLoaded else { return }
         rebuildTabButtons()
 
-        let webView = selectedTab?.webView
+        let webView = selectedTab?.liveWebView
         backButton.isEnabled = webView?.canGoBack ?? false
         forwardButton.isEnabled = webView?.canGoForward ?? false
-        reloadButton.image = symbol(webView?.isLoading == true ? "xmark" : "arrow.clockwise")
+        let failureVisible = failureView?.superview != nil
+        let failed = selectedTab?.recovery.failed == true || failureVisible
+        let resuming = !failed && selectedTab?.restoring == true
+        let reloadSymbol = selectedTab?.recovery.reloadSymbol(
+            isLoading: webView?.isLoading == true, restoring: resuming, failureVisible: failureVisible
+        ) ?? "arrow.clockwise"
+        reloadButton.image = symbol(reloadSymbol)
+        reloadButton.wantsLayer = true
+        if resuming {
+            if reloadButton.layer?.animation(forKey: "webResume") == nil {
+                let rotation = CABasicAnimation(keyPath: "transform.rotation.z")
+                rotation.toValue = -2 * Double.pi
+                rotation.duration = 0.8; rotation.repeatCount = .infinity
+                reloadButton.layer?.add(rotation, forKey: "webResume")
+            }
+        } else {
+            reloadButton.layer?.removeAnimation(forKey: "webResume")
+        }
         keepOpenButton.image = symbol(keepOpen ? "pin.fill" : "pin")
         keepOpenButton.contentTintColor = keepOpen ? .controlAccentColor : nil
         homeButton.isEnabled = selectedTab?.homeURL.flatMap(Self.url(from:)) != nil
-        addressButton.toolTip = "URLを表示・検索 (⌘L)" + (webView?.url.map { "\n" + $0.absoluteString } ?? "")
+        addressButton.toolTip = "URLを表示・検索 (⌘L)" + (selectedTab?.pageURL.map { "\n" + $0.absoluteString } ?? "")
         rebuildToolsMenu()
         updateStartPage()
         if !switcher.isHidden { rebuildSwitcherResults() }
 
         // Don't clobber what the user is typing.
         if addressField.currentEditor() == nil {
-            addressField.stringValue = webView?.url?.absoluteString ?? ""
+            addressField.stringValue = selectedTab?.pageURL?.absoluteString ?? ""
         }
         // Start-page hosting and other chrome updates above can invalidate ancestor layout.
         // Settle again before returning to tab commands, rather than waiting for a run loop.
@@ -1521,7 +2063,7 @@ final class BrowserViewController: NSViewController {
             let key = [(try? encoder.encode(store.data))?.base64EncodedString() ?? "",
                        String(describing: selectedIndex), String(describing: notionPanel?.isHidden), String(describing: tasksPanel?.isHidden), String(notionTabsConnected), String(describing: meetingsPanel?.isHidden),
                        String(describing: view.effectiveAppearance.name)]
-                + tabs.map { "\(ObjectIdentifier($0)):\($0.profileID):\($0.displayName):\($0.webView.url?.absoluteString ?? "")" }
+                + tabs.map { "\(ObjectIdentifier($0)):\($0.profileID):\($0.displayName):\($0.pageURL?.absoluteString ?? "")" }
             let titlesMatch = tabButtons.count == tabs.count && zip(tabButtons, tabs).allSatisfy { button, tab in
                 (button.detachedOriginalTitle ?? button.title) == (tab.pinned?.iconOnly == true ? "" : tab.displayName)
             }
@@ -1704,7 +2246,7 @@ final class BrowserViewController: NSViewController {
             add("固定タブにする", #selector(pinTab)).isEnabled = !isSingleTabWindow
         }
 
-        add("ブラウザで開く", #selector(openTabExternally)).isEnabled = tab.webView.url != nil
+        add("ブラウザで開く", #selector(openTabExternally)).isEnabled = tab.pageURL != nil
 
         let profiles = NSMenu()
         for profile in store.data.profiles {
@@ -1750,7 +2292,7 @@ final class BrowserViewController: NSViewController {
         // Only explicit URL editing activates the app; hover opening stays nonactivating.
         NSApp.activate()
         if !addressPopover.isShown {
-            addressField.stringValue = selectedTab?.webView.url?.absoluteString ?? ""
+            addressField.stringValue = selectedTab?.pageURL?.absoluteString ?? ""
             onModalChange?(true)
             let anchor: NSView = addressButton.isHidden ? toolsButton : addressButton
             addressPopover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
@@ -1800,13 +2342,23 @@ final class BrowserViewController: NSViewController {
         return components.url
     }
 
-    @objc func goBack(_ sender: Any?) { selectedTab?.webView.goBack() }
-    @objc func goForward(_ sender: Any?) { selectedTab?.webView.goForward() }
-    @objc func reloadPage(_ sender: Any?) { selectedTab?.webView.reload() }
+    @objc func goBack(_ sender: Any?) { selectedTab?.liveWebView?.goBack() }
+    @objc func goForward(_ sender: Any?) { selectedTab?.liveWebView?.goForward() }
+    @objc func reloadPage(_ sender: Any?) {
+        guard let tab = selectedTab else { return }
+        tab.recovery.manualReload()
+        clearPageOverlays()
+        reload(tab, automatic: false)
+    }
 
     @objc private func reloadOrStop() {
-        guard let webView = selectedTab?.webView else { return }
-        if webView.isLoading { webView.stopLoading() } else { webView.reload() }
+        guard let tab = selectedTab else { return }
+        guard let webView = tab.liveWebView else { reloadPage(nil); return }
+        if !tab.recovery.failed, failureView?.superview == nil, webView.isLoading {
+            webView.stopLoading()
+        } else {
+            reloadPage(nil)
+        }
     }
 
     @objc func toggleDetached(_ sender: Any?) { ShortcutController.shared.cancelPending(); if isSingleTabWindow { onReturnTab?() } else { onToggleDetached?() } }
@@ -1814,7 +2366,7 @@ final class BrowserViewController: NSViewController {
     @objc private func toggleKeepOpen() { onToggleKeepOpen?() }
 
     @objc private func openExternally() {
-        if let url = selectedTab?.webView.url { ExternalBrowserLauncher.open(url, bundleID: store.data.externalBrowserBundleID) }
+        if let url = selectedTab?.pageURL { ExternalBrowserLauncher.open(url, bundleID: store.data.externalBrowserBundleID) }
     }
 
     // MARK: Page tools
@@ -1831,8 +2383,8 @@ final class BrowserViewController: NSViewController {
         detach.target = self
         detach.image = detachButton.image
         menu.addItem(detach)
-        let hasPage = selectedTab?.webView.url != nil
-        let zoom = selectedTab?.webView.pageZoom ?? 1
+        let hasPage = selectedTab?.pageURL != nil
+        let zoom = selectedTab?.liveWebView?.pageZoom ?? 1
         for action in ToolbarAction.allCases {
             guard let button = toolbarButtons[action] else { continue }
             switch action {
@@ -1841,7 +2393,7 @@ final class BrowserViewController: NSViewController {
             case .zoomOut: button.isEnabled = hasPage && zoom > 0.5
             case .restore: button.isEnabled = !closedTabs.isEmpty
             case .closeTab: button.isEnabled = selectedTab != nil && selectedTab?.pinnedID == nil
-            case .reload: button.isEnabled = hasPage || selectedTab?.webView.isLoading == true
+            case .reload: button.isEnabled = hasPage || selectedTab?.liveWebView?.isLoading == true
             default: break
             }
             guard button.isHidden, action != .autoRefresh, !(isDetached && action == .keepOpen) else { continue }
@@ -1878,14 +2430,14 @@ final class BrowserViewController: NSViewController {
     @objc private func openShelf() { onOpenShelf?() }
 
     @objc func copyPageURL(_ sender: Any?) {
-        guard let url = selectedTab?.webView.url else { return }
+        guard let url = selectedTab?.pageURL else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(url.absoluteString, forType: .string)
     }
 
     @objc func zoomIn(_ sender: Any?) { changeZoom(by: 0.1) }
     @objc func zoomOut(_ sender: Any?) { changeZoom(by: -0.1) }
-    @objc func resetZoom(_ sender: Any?) { selectedTab?.webView.pageZoom = 1; updateChrome() }
+    @objc func resetZoom(_ sender: Any?) { selectedTab?.liveWebView?.pageZoom = 1; updateChrome() }
     private func changeZoom(by delta: Double) {
         guard let webView = selectedTab?.webView else { return }
         webView.pageZoom = BrowserTools.zoom(((webView.pageZoom + delta) * 100).rounded() / 100)
@@ -1911,8 +2463,8 @@ final class BrowserViewController: NSViewController {
         tab.refreshInterval = Double(sender.tag)
         if sender.tag > 0 {
             let timer = Timer(timeInterval: Double(sender.tag), repeats: true) { [weak tab] _ in
-                guard let tab, !tab.webView.isLoading else { return }
-                tab.webView.reload()
+                guard let tab, let web = tab.liveWebView, !web.isLoading, !tab.recovery.failed, !tab.recovery.terminated, !tab.recovery.recovering else { return }
+                web.reload()
             }
             timer.tolerance = min(5, Double(sender.tag) * 0.1)
             RunLoop.main.add(timer, forMode: .common)
@@ -1923,7 +2475,7 @@ final class BrowserViewController: NSViewController {
 
     @objc func showFind(_ sender: Any?) {
         addressPopover.close()
-        guard selectedTab?.webView.url != nil else { return }
+        guard selectedTab?.liveWebView?.url != nil else { return }
         switcher.isHidden = true
         notes.isHidden = true
         findBar.isHidden = false
@@ -1937,7 +2489,7 @@ final class BrowserViewController: NSViewController {
         findBar.isHidden = true
         findHeight.constant = 0
         findStatus.stringValue = ""
-        selectedTab?.webView.find("", configuration: WKFindConfiguration()) { _ in }
+        selectedTab?.liveWebView?.find("", configuration: WKFindConfiguration()) { _ in }
         focusContent()
     }
     @objc func findNext(_ sender: Any?) { find(backwards: false) }
@@ -1952,7 +2504,7 @@ final class BrowserViewController: NSViewController {
         config.wraps = true
         config.caseSensitive = false
         webView.find(query, configuration: config) { [weak self, weak webView] result in
-            guard let self, generation == self.findGeneration, webView === self.selectedTab?.webView else { return }
+            guard let self, generation == self.findGeneration, webView === self.selectedTab?.liveWebView else { return }
             self.findStatus.stringValue = query.isEmpty ? "" : (result.matchFound ? "一致あり" : "見つかりません")
         }
     }
@@ -1960,7 +2512,7 @@ final class BrowserViewController: NSViewController {
     // MARK: Start page and tab switcher
 
     private func updateStartPage() {
-        let show = selectedTab == nil || (selectedTab?.webView.url == nil && selectedTab?.webView.isLoading != true)
+        let show = selectedTab == nil || (selectedTab?.pageURL == nil && selectedTab?.liveWebView?.isLoading != true && selectedTab?.recovery.failed != true && selectedTab?.restoring != true)
         guard show else { startPage?.isHidden = true; return }
         let page = StartPage(tabID: selectedTab.map(ObjectIdentifier.init), tabs: store.data.pinnedTabs, open: { [weak self] id in
             guard let self, let tab = self.tabs.first(where: { $0.pinnedID == id }) else { return }
@@ -2047,7 +2599,7 @@ final class BrowserViewController: NSViewController {
         searchRow = 0
         let width = max(220, view.bounds.width * 0.75 - 40)
         for (index, tab) in tabs.enumerated() where BrowserTools.matches(query: tabSearch.stringValue,
-                title: tab.displayName, url: tab.webView.url?.absoluteString ?? tab.homeURL ?? "", profile: store.profile(tab.profileID).name) {
+                title: tab.displayName, url: tab.pageURL?.absoluteString ?? tab.homeURL ?? "", profile: store.profile(tab.profileID).name) {
             let button = NSButton(title: "  \(tab.displayName)  ·  \(store.profile(tab.profileID).name)",
                                   image: tab.icon(grayscale: false), target: self, action: #selector(switcherTabClicked))
             button.tag = index
@@ -2059,7 +2611,7 @@ final class BrowserViewController: NSViewController {
             button.lineBreakMode = .byTruncatingTail
             button.font = .systemFont(ofSize: 13, weight: index == selectedIndex ? .semibold : .regular)
             button.contentTintColor = index == selectedIndex ? .systemCyan : .white
-            button.toolTip = tab.webView.url?.absoluteString
+            button.toolTip = tab.pageURL?.absoluteString
             button.widthAnchor.constraint(equalToConstant: width).isActive = true
             button.heightAnchor.constraint(equalToConstant: 38).isActive = true
             switchResults.addArrangedSubview(button)
@@ -2122,6 +2674,10 @@ final class BrowserViewController: NSViewController {
     }
 
     private func updateNotionTabSelection() {
+        if nativeSelected, let tab = selectedTab, tab.inactiveSince == nil {
+            tab.inactiveSince = Date(); tab.restGeneration = UUID()
+            clearPageOverlays()
+        }
         let active = notionPanel?.isHidden == false || tasksPanel?.isHidden == false || meetingsPanel?.isHidden == false
         glass.opaqueBackdrop = active
         meetingsTabButton.state = meetingsPanel?.isHidden == false ? .on : .off
@@ -2243,6 +2799,7 @@ extension BrowserViewController: WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        pageFinished(webView)
         chromeNeedsUpdate()
     }
 

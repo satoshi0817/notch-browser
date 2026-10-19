@@ -439,6 +439,11 @@ struct GeneralSettings: View {
             } header: { Label("Liquid Glass", systemImage: "circle.hexagongrid") }
 
             Section {
+                Picker("使っていないタブを休ませる", selection: $store.data.tabRestInterval) {
+                    ForEach(TabRestInterval.allCases, id: \.self) { interval in
+                        Text(interval.title).tag(interval)
+                    }
+                }.pickerStyle(.menu)
                 Picker("ノッチを開いたときのタブ", selection: $store.data.openTabBehavior) {
                     Text("前回見ていたタブ").tag(OpenTabBehavior.lastViewed)
                     if !store.data.pinnedTabs.isEmpty {
