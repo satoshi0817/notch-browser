@@ -5,7 +5,7 @@ import XCTest
 final class UpdateCheckerTests: XCTestCase {
     private func defaults() -> UserDefaults {
         let name = "NotchBrowserTests.Updates." + UUID().uuidString
-        let defaults = UserDefaults(suiteName: name)!
+        let defaults = TestDefaults.make(name, test: self)
         addTeardownBlock { defaults.removePersistentDomain(forName: name) }
         return defaults
     }

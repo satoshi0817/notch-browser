@@ -6,6 +6,8 @@ struct DesignPreview {
     static func main() {
         precondition(Bundle.main.bundleIdentifier == "com.satoshi0817.NotchBrowser.DesignPreview")
         #if DEBUG
+        // TASK-NOTCH-024: --tasks=detail includes mock-due-time and mock-due-range.
+        // Select either row to inspect its display-only due (no calendar).
         // TASK-NOTCH-022: --tasks=022-detail-status-menu / 022-date-calendar /
         // 022-list-badge-menu / 022-detail-failed / 022-list-badge-warning /
         // 022-no-permission. These use offline stores and never invoke live writes.

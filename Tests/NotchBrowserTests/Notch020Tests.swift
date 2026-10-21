@@ -44,7 +44,7 @@ final class Notch020Tests: XCTestCase {
     @MainActor func testTokenNeverEntersFileAndAllTaskInvalidationConditions() async throws {
         let url = file(); defer { try? FileManager.default.removeItem(at: url) }
         let suite = "notch020-\(UUID())"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = TestDefaults.make(suite, test: self)
         defer { defaults.removePersistentDomain(forName: suite) }
         let token = "secret-test-token-never-serialize"
         let store = NotionTasksStore(defaults: defaults, tokenProvider: { token }, apiFactory: { token in
@@ -89,7 +89,7 @@ final class Notch020Tests: XCTestCase {
     @MainActor func testNewCacheLimitsSavedDisplayedAndFetchedRowsToOneThousand() async throws {
         let url = file(); defer { try? FileManager.default.removeItem(at: url) }
         let suite = "notch020-limit-\(UUID())"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = TestDefaults.make(suite, test: self)
         defer { defaults.removePersistentDomain(forName: suite) }
         var configuration = NotionTasksStore.Configuration()
         configuration.url = "https://notion.so/0123456789abcdef0123456789abcdef"
@@ -140,7 +140,7 @@ final class Notch020Tests: XCTestCase {
         let meeting = try XCTUnwrap(NotionMeeting.parse(["id": "a", "type": "meeting_notes", "meeting_notes": ["title": "保存済み", "status": "notes_ready"]]))
         let date = Date().addingTimeInterval(-120)
         cache.save(.init(scope: "", rows: [meeting], updated: date))
-        let suite = "notch020-\(UUID())"; let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let suite = "notch020-\(UUID())"; let defaults = TestDefaults.make(suite, test: self)
         defer { defaults.removePersistentDomain(forName: suite) }
         let store = NotionMeetingsStore(defaults: defaults, tokenProvider: { "token" }, apiFactory: { token in
             NotionDatabaseAPI(token: token) { _ in throw URLError(.notConnectedToInternet) }
@@ -168,7 +168,7 @@ final class Notch020Tests: XCTestCase {
         let url = file(); defer { try? FileManager.default.removeItem(at: url) }
         let cache = NotionPageCache<NotionMeeting>(name: "test", url: url)
         cache.save(.init(scope: "", updated: Date()))
-        let suite = "notch020-\(UUID())"; let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let suite = "notch020-\(UUID())"; let defaults = TestDefaults.make(suite, test: self)
         defer { defaults.removePersistentDomain(forName: suite) }
         let gate = Notch020TransportGate()
         let store = NotionMeetingsStore(defaults: defaults, tokenProvider: { "token" }, apiFactory: { token in

@@ -1,13 +1,38 @@
 import AppKit
 import SwiftUI
 
+/// Non-pointer includes programmatic, accessibility and future keyboard row selection.
+enum NotionTaskSelectionOrigin {
+    case pointer, keyboard
+}
+
+struct NotionDetailFocusRingPolicy {
+    enum Event {
+        case selected(NotionTaskSelectionOrigin)
+        case keyboardFocusMove
+        case pointerFocus
+    }
+    private(set) var showsRing = true
+
+    mutating func handle(_ event: Event) {
+        switch event {
+        case .selected(let origin): showsRing = origin != .pointer
+        case .keyboardFocusMove: showsRing = true
+        case .pointerFocus: showsRing = false
+        }
+    }
+}
+
 /// Shared by the detail field and the list badge. The left circle is intentionally separate.
 @MainActor struct NotionTaskStatusEditor: View {
     let task: NotionTask
     var compact = false
     var color: Color = .primary
     var detailFocus: FocusState<NotionTaskField?>.Binding? = nil
+    var detailGroup: UUID? = nil
+    var initialSelectionOrigin: NotionTaskSelectionOrigin = .keyboard
     @ObservedObject var store = NotionTasksStore.shared
+    @FocusState private var badgeFocus: NotionTaskField?
     @State private var presented = false
     private var editable: Bool { store.canEdit(.status, task: task) }
     private var label: some View {
@@ -22,19 +47,17 @@ import SwiftUI
     }
     @ViewBuilder private var trigger: some View {
         if !compact, let detailFocus {
-            NotionDetailFieldButton(field: .status, focus: detailFocus, enabled: editable,
+            NotionDetailFieldButton(field: .status, group: detailGroup, initialSelectionOrigin: initialSelectionOrigin, focus: detailFocus, enabled: editable,
                                    accessibilityLabel: "状態: \(task.status)",
                                    onOpen: { if editable { presented = true } },
                                    onTab: {
                                        if store.canEdit(.due, task: task) { detailFocus.wrappedValue = .due }
                                    }) { label }
         } else {
-            Button { if editable { presented = true } } label: { label }
-                .buttonStyle(.plain).disabled(!editable)
-                .focusable(editable)
-                .accessibilityLabel("状態: \(task.status)")
-                .onKeyPress(.return) { if editable { presented = true; return .handled }; return .ignored }
-                .onKeyPress(.space) { if editable { presented = true; return .handled }; return .ignored }
+            NotionDetailFieldButton(field: .status, focus: $badgeFocus, enabled: editable,
+                                   accessibilityLabel: "状態: \(task.status)",
+                                   onOpen: { if editable { presented = true } }, onTab: {},
+                                   handlesDetailTab: false) { label }
         }
     }
     var body: some View {
@@ -69,6 +92,8 @@ import SwiftUI
 @MainActor struct NotionTaskDueEditor: View {
     let task: NotionTask
     var detailFocus: FocusState<NotionTaskField?>.Binding? = nil
+    var detailGroup: UUID? = nil
+    var initialSelectionOrigin: NotionTaskSelectionOrigin = .keyboard
     @ObservedObject var store = NotionTasksStore.shared
     @State private var presented = false
     private var editable: Bool { store.canEdit(.due, task: task) }
@@ -84,7 +109,7 @@ import SwiftUI
     }
     @ViewBuilder private var trigger: some View {
         if let detailFocus {
-            NotionDetailFieldButton(field: .due, focus: detailFocus, enabled: editable,
+            NotionDetailFieldButton(field: .due, group: detailGroup, initialSelectionOrigin: initialSelectionOrigin, focus: detailFocus, enabled: editable,
                                    accessibilityLabel: "期日: \(task.due.map { NotionTaskRules.dateLabel($0) } ?? "期日なし")",
                                    onOpen: { if editable { presented = true } },
                                    onTab: {
@@ -100,7 +125,7 @@ import SwiftUI
     }
     var body: some View {
         trigger
-            .help(task.dueEditable == false ? "時刻または終了日を含む期日は Notion で編集してください" : "期日を変更")
+            .help(NotionDueTooltip.text(dueEditable: task.dueEditable, editable: editable))
             .background {
                 NotionDueCalendarPopover(presented: $presented, date: task.due ?? Date(), onChoose: choose)
             }
@@ -115,20 +140,40 @@ import SwiftUI
     }
 }
 
+/// Logical group identity limits the native view-tree search to one detail instance.
+enum NotionDetailFocusRules {
+    static func isTarget(sourceField: NotionTaskField?, sourceGroup: UUID?,
+                         sourceHandlesDetailTab: Bool, candidateField: NotionTaskField?,
+                         candidateGroup: UUID?, candidateHandlesDetailTab: Bool) -> Bool {
+        sourceHandlesDetailTab && candidateHandlesDetailTab
+            && sourceGroup != nil && sourceGroup == candidateGroup
+            && sourceField != nil && candidateField != nil && sourceField != candidateField
+    }
+}
+
+enum NotionDueTooltip {
+    static func text(dueEditable: Bool?, editable: Bool) -> String {
+        dueEditable == true && editable ? "期日を変更" : "時刻や終了日のある期日は Notion で変更してください"
+    }
+}
+
 /// Preserve the approved SwiftUI label, using a native button as its sole input/AX target.
 /// Native first-responder eligibility does not depend on Full Keyboard Access settings.
 @MainActor private struct NotionDetailFieldButton<Label: View>: View {
     let field: NotionTaskField
+    var group: UUID? = nil
+    var initialSelectionOrigin: NotionTaskSelectionOrigin = .keyboard
     let focus: FocusState<NotionTaskField?>.Binding
     let enabled: Bool
     let accessibilityLabel: String
     let onOpen: () -> Void
     let onTab: () -> Void
+    var handlesDetailTab = true
     @ViewBuilder var label: () -> Label
 
     var body: some View {
-        label().accessibilityHidden(true).overlay {
-            NotionDetailNativeButton(field: field, enabled: enabled, selected: focus.wrappedValue == field,
+        label().padding(.horizontal, 4).padding(.vertical, 2).accessibilityHidden(true).overlay {
+            NotionDetailNativeButton(field: field, group: group, initialSelectionOrigin: initialSelectionOrigin, handlesDetailTab: handlesDetailTab, enabled: enabled, selected: focus.wrappedValue == field,
                                      accessibilityLabel: accessibilityLabel,
                                      onFocus: { focus.wrappedValue = field },
                                      onOpen: onOpen, onTab: onTab)
@@ -139,6 +184,9 @@ import SwiftUI
 
 @MainActor private struct NotionDetailNativeButton: NSViewRepresentable {
     let field: NotionTaskField
+    let group: UUID?
+    let initialSelectionOrigin: NotionTaskSelectionOrigin
+    let handlesDetailTab: Bool
     let enabled: Bool
     let selected: Bool
     let accessibilityLabel: String
@@ -151,12 +199,14 @@ import SwiftUI
         button.title = ""
         button.isBordered = false
         button.isTransparent = true
-        button.focusRingType = .none
+        button.focusRingType = .exterior
         button.target = button
         button.action = #selector(DetailKeyButton.activate)
         return button
     }
     func updateNSView(_ button: DetailKeyButton, context: Context) {
+        button.configureSelection(group: group, origin: initialSelectionOrigin)
+        button.handlesDetailTab = handlesDetailTab
         button.field = field
         button.isEnabled = enabled
         button.setAccessibilityLabel(accessibilityLabel)
@@ -172,6 +222,38 @@ import SwiftUI
     }
 
     @MainActor final class DetailKeyButton: NSButton {
+        var group: UUID?
+        var handlesDetailTab = true
+        // Selection origin survives the async SwiftUI -> AppKit focus request.
+        // AppKit still supplies the standard accent / Increase Contrast ring appearance.
+        private var ringPolicy = NotionDetailFocusRingPolicy()
+        private var selectionConfigured = false
+        private var preservesFocusPolicyUntilBecome = false
+
+        func configureSelection(group: UUID?, origin: NotionTaskSelectionOrigin) {
+            if !selectionConfigured || self.group != group {
+                ringPolicy.handle(.selected(origin))
+                preservesFocusPolicyUntilBecome = true
+                selectionConfigured = true
+                noteFocusRingMaskChanged()
+            }
+            self.group = group
+        }
+        private func recordFocusEvent(_ event: NotionDetailFocusRingPolicy.Event) {
+            ringPolicy.handle(event)
+            noteFocusRingMaskChanged()
+        }
+        override var focusRingMaskBounds: NSRect { bounds }
+        override func drawFocusRingMask() {
+            guard ringPolicy.showsRing else { return }
+            NSBezierPath(roundedRect: bounds, xRadius: 4, yRadius: 4).fill()
+        }
+        override func mouseDown(with event: NSEvent) {
+            recordFocusEvent(.pointerFocus)
+            preservesFocusPolicyUntilBecome = true
+            super.mouseDown(with: event)
+            preservesFocusPolicyUntilBecome = false
+        }
         var field: NotionTaskField?
         var onFocus: (() -> Void)?
         var onOpen: (() -> Void)?
@@ -194,6 +276,9 @@ import SwiftUI
         }
         override func becomeFirstResponder() -> Bool {
             guard isEnabled, super.becomeFirstResponder() else { return false }
+            if !preservesFocusPolicyUntilBecome { recordFocusEvent(.keyboardFocusMove) }
+            preservesFocusPolicyUntilBecome = false
+            noteFocusRingMaskChanged()
             // FocusState updates must happen outside a representable update pass.
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.window?.firstResponder === self else { return }
@@ -202,7 +287,12 @@ import SwiftUI
             return true
         }
         override func setAccessibilityFocused(_ focused: Bool) {
-            if focused && isEnabled { window?.makeFirstResponder(self) }
+            if focused && isEnabled {
+                recordFocusEvent(.keyboardFocusMove)
+                preservesFocusPolicyUntilBecome = true
+                window?.makeFirstResponder(self)
+                preservesFocusPolicyUntilBecome = false
+            }
             else { super.setAccessibilityFocused(focused) }
         }
         @objc func activate() {
@@ -220,6 +310,7 @@ import SwiftUI
             }
         }
         private func beginTabHandoff() {
+            recordFocusEvent(.keyboardFocusMove)
             cancelTabHandoff()
             let handoff = UUID()
             tabHandoffID = handoff
@@ -258,24 +349,35 @@ import SwiftUI
         }
         private func otherDetailField(in view: NSView) -> DetailKeyButton? {
             if let button = view as? DetailKeyButton, button !== self,
-               button.field != field, button.isEnabled, !button.isHiddenOrHasHiddenAncestor { return button }
+               NotionDetailFocusRules.isTarget(sourceField: field, sourceGroup: group,
+                   sourceHandlesDetailTab: handlesDetailTab, candidateField: button.field,
+                   candidateGroup: button.group, candidateHandlesDetailTab: button.handlesDetailTab),
+               button.isEnabled, !button.isHiddenOrHasHiddenAncestor { return button }
             for child in view.subviews {
                 if let button = otherDetailField(in: child) { return button }
             }
             return nil
         }
         override func keyDown(with event: NSEvent) {
+            recordFocusEvent(.keyboardFocusMove)
             guard isEnabled, event.modifierFlags.intersection([.command, .control, .option]).isEmpty else {
                 super.keyDown(with: event); return
             }
             switch event.keyCode {
             case 48:
-                // Synchronize logical focus and the actual responder in this same key event.
+                // Only the other detail field with this view's identity may receive a handoff.
                 // With two fields, Tab and Shift-Tab share the same other target.
-                onTab?()
-                if let root = window?.contentView, let other = otherDetailField(in: root) {
+                if handlesDetailTab, let root = window?.contentView,
+                   let other = otherDetailField(in: root) {
+                    onTab?()
                     window?.makeFirstResponder(other)
                     other.beginTabHandoff()
+                } else {
+                    // Badges (and details without another editable field) use AppKit's key loop.
+                    cancelTabHandoff()
+                    focusRequested = false
+                    if event.modifierFlags.contains(.shift) { window?.selectPreviousKeyView(self) }
+                    else { window?.selectNextKeyView(self) }
                 }
             case 36, 76, 49: activate() // Return, keypad Enter, Space.
             default: super.keyDown(with: event)
@@ -290,6 +392,44 @@ import SwiftUI
             keyDown(with: event)
             return true
         }
+    }
+}
+
+enum NotionDueCalendarPlacement {
+    struct Placement {
+        let edge: NSRectEdge
+        let positioningRect: NSRect // Window coordinates, whose positive Y points up.
+    }
+
+    static func placement(anchorInWindow anchor: NSRect, windowBounds: NSRect,
+                          popoverSize: NSSize, flipped: Bool) -> Placement {
+        let bounds = windowBounds.insetBy(dx: 4, dy: 4)
+        // Allow for the arrow and native chrome before AppKit has laid out its window.
+        let height = popoverSize.height + 13
+        let width = popoverSize.width + 26
+        let below = max(0, anchor.minY - bounds.minY)
+        let above = max(0, bounds.maxY - anchor.maxY)
+        let useBelow = below >= height || (above < height && below >= above)
+        let centerX = clamp(anchor.midX, low: bounds.minX + width / 2,
+                            high: bounds.maxX - width / 2)
+        // If neither side fits at the value, shift the attachment point inward.
+        let y = useBelow
+            ? clamp(anchor.minY, low: bounds.minY + height, high: bounds.maxY)
+            : clamp(anchor.maxY, low: bounds.minY, high: bounds.maxY - height)
+        return Placement(edge: useBelow ? (flipped ? .maxY : .minY) : (flipped ? .minY : .maxY),
+                         positioningRect: NSRect(x: centerX, y: y, width: 0, height: 0))
+    }
+
+    static func containedFrame(_ frame: NSRect, in bounds: NSRect) -> NSRect {
+        NSRect(x: clamp(frame.minX, low: bounds.minX, high: bounds.maxX - frame.width),
+               y: clamp(frame.minY, low: bounds.minY, high: bounds.maxY - frame.height),
+               width: frame.width, height: frame.height)
+    }
+
+    private static func clamp(_ value: CGFloat, low: CGFloat, high: CGFloat) -> CGFloat {
+        // A window smaller than the fixed popover cannot contain it without resizing.
+        guard low <= high else { return (low + high) / 2 }
+        return min(max(value, low), high)
     }
 }
 
@@ -323,10 +463,11 @@ import SwiftUI
         private let popover = NSPopover()
         fileprivate var picker: RinglessDuePicker?
         private var tabMonitor: Any?
+        private var containmentBoundsInScreen: NSRect?
         init(parent: NotionDueCalendarPopover) { self.parent = parent }
 
         func show(relativeTo anchor: NSView) {
-            guard !popover.isShown else { return }
+            guard !popover.isShown, let window = anchor.window, let windowContent = window.contentView else { return }
             let picker = RinglessDuePicker(frame: .zero)
             picker.datePickerStyle = .clockAndCalendar
             picker.datePickerElements = .yearMonthDay
@@ -387,7 +528,14 @@ import SwiftUI
             popover.behavior = .transient
             popover.contentViewController = controller
             popover.contentSize = size
-            popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
+            let windowBounds = window.contentLayoutRect.intersection(windowContent.convert(windowContent.bounds, to: nil))
+            let placement = NotionDueCalendarPlacement.placement(
+                anchorInWindow: anchor.convert(anchor.bounds, to: nil), windowBounds: windowBounds,
+                popoverSize: size, flipped: anchor.isFlipped)
+            containmentBoundsInScreen = window.convertToScreen(windowBounds.insetBy(dx: 4, dy: 4))
+            popover.show(relativeTo: anchor.convert(placement.positioningRect, from: nil),
+                         of: anchor, preferredEdge: placement.edge)
+            constrainPopoverToWindow()
             clearInitialCalendarFocus()
             // acceptsFirstResponder stays false until an actual Tab (or pointer) interaction.
             tabMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self, weak picker] event in
@@ -418,9 +566,17 @@ import SwiftUI
             picker.needsDisplay = true
         }
         func popoverDidShow(_ notification: Notification) {
+            constrainPopoverToWindow()
             // AppKit may assign initial focus again as the presentation finishes.
             // Do not displace focus after a user's Tab or click interaction.
             clearInitialCalendarFocus()
+        }
+        private func constrainPopoverToWindow() {
+            // Use the actual native frame as well: AppKit may choose a screen-based
+            // fallback edge, and chrome dimensions can vary between macOS versions.
+            guard let bounds = containmentBoundsInScreen, let window = picker?.window else { return }
+            let frame = NotionDueCalendarPlacement.containedFrame(window.frame, in: bounds)
+            if frame.origin != window.frame.origin { window.setFrameOrigin(frame.origin) }
         }
         func popoverDidClose(_ notification: Notification) {
             removeMonitor()

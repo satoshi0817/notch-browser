@@ -421,11 +421,12 @@ extension NSScreen {
 enum SettingsDefaults {
     static let current = make(arguments: CommandLine.arguments)
 
-    static func make(arguments: [String]) -> UserDefaults {
+    static func make(arguments: [String],
+                     suiteFactory: (String) -> UserDefaults? = { UserDefaults(suiteName: $0) }) -> UserDefaults {
         #if DEBUG
         if let argument = arguments.first(where: { $0.hasPrefix("--defaults-suite=") }) {
             let name = String(argument.dropFirst("--defaults-suite=".count))
-            if !name.isEmpty, let defaults = UserDefaults(suiteName: name) { return defaults }
+            if !name.isEmpty, let defaults = suiteFactory(name) { return defaults }
         }
         #endif
         return .standard

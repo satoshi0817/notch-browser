@@ -11,7 +11,7 @@ import XCTest
     private func isolatedSettings() throws -> (SettingsStore, UserDefaults, String) {
         _ = NSApplication.shared
         let suite = "NotionDisplayHostingTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = TestDefaults.make(suite, test: self)
         let settings = SettingsStore(defaults: defaults)
         settings.data.tasksTabSymbol = "star"
         settings.data.meetingsTabSymbol = "person.2"

@@ -106,7 +106,8 @@ final class NotionSettingsHotfixTests: XCTestCase {
 
     func testDebugDefaultsSuiteArgumentKeepsWritesInNamedDomain() throws {
         let name = "NotionSettingsHotfixTests.Argument.\(UUID().uuidString)"
-        let defaults = SettingsDefaults.make(arguments: ["app", "--defaults-suite=\(name)"])
+        let defaults = SettingsDefaults.make(arguments: ["app", "--defaults-suite=\(name)"],
+                                             suiteFactory: { TestDefaults.make($0, test: self) })
         defer { defaults.removePersistentDomain(forName: name) }
         defaults.set(true, forKey: "previewIsolationProbe")
         XCTAssertEqual(defaults.persistentDomain(forName: name)?["previewIsolationProbe"] as? Bool, true)
@@ -194,7 +195,7 @@ final class NotionSettingsHotfixTests: XCTestCase {
 
     @MainActor func testSettingsAndTaskConfigurationUseInjectedIsolatedDefaults() throws {
         let name = "NotionSettingsHotfixTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        let defaults = TestDefaults.make(name, test: self)
         defer { defaults.removePersistentDomain(forName: name) }
         let settings = SettingsStore(defaults: defaults)
         let pinnedID = UUID()
@@ -431,7 +432,7 @@ final class NotionSettingsHotfixTests: XCTestCase {
     #if DEBUG
     @MainActor func testUnconnectedAgentToggleIsOffDisabledWithoutChangingSavedPreference() throws {
         let name = "AgentTogglePreview.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        let defaults = TestDefaults.make(name, test: self)
         defer { defaults.removePersistentDomain(forName: name) }
         let settings = SettingsStore(defaults: defaults)
         for saved in [true, false] {

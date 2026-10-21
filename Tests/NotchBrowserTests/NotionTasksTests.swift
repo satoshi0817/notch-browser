@@ -34,7 +34,7 @@ final class NotionTasksTests: XCTestCase {
         let url = "https://notion.so/0123456789abcdef0123456789abcdef"
         for status in [400, 401, 403, 404, 500] {
             let suite = "notion-confirmation-failure-\(UUID().uuidString)"
-            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            let defaults = TestDefaults.make(suite, test: self)
             defer { defaults.removePersistentDomain(forName: suite) }
             var config = NotionTasksStore.Configuration()
             config.url = url; config.confirmedURL = url
@@ -58,7 +58,7 @@ final class NotionTasksTests: XCTestCase {
     }
     @MainActor func testSuccessfulConfirmationPersistsExactURLAndEditingInvalidatesIt() async throws {
         let suite = "notion-confirmation-success-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = TestDefaults.make(suite, test: self)
         defer { defaults.removePersistentDomain(forName: suite) }
         let store = NotionTasksStore(defaults: defaults, tokenProvider: { "test" }, apiFactory: { token in
             NotionDatabaseAPI(token: token) { request in
@@ -85,7 +85,7 @@ final class NotionTasksTests: XCTestCase {
     @MainActor func testMissingTokenAndTransportFailureAlsoRevokeConfirmation() async throws {
         for missingToken in [true, false] {
             let suite = "notion-confirmation-transport-\(UUID().uuidString)"
-            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            let defaults = TestDefaults.make(suite, test: self)
             defer { defaults.removePersistentDomain(forName: suite) }
             let store = NotionTasksStore(defaults: defaults, tokenProvider: { missingToken ? nil : "test" }, apiFactory: { token in
                 NotionDatabaseAPI(token: token) { _ in throw URLError(.notConnectedToInternet) }
@@ -202,7 +202,7 @@ final class NotionTasksTests: XCTestCase {
     }
     @MainActor func testLegacyMineFilterMigratesAndPersistsIncomplete() throws {
         let suite = "notion-filter-migration-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = TestDefaults.make(suite, test: self)
         defer { defaults.removePersistentDomain(forName: suite) }
         XCTAssertEqual(NotionTasksStore(defaults: defaults).filter, .incomplete)
         defaults.set("自分の担当", forKey: "notionTasks.filter")
@@ -375,7 +375,7 @@ final class NotionTasksTests: XCTestCase {
     }
     @MainActor func testBoundedJSONCacheFilterAndFirstSelectionPersist() throws {
         let suite = "notion-tasks-test-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = TestDefaults.make(suite, test: self)
         defer { defaults.removePersistentDomain(forName: suite) }
         var configuration = NotionTasksStore.Configuration()
         configuration.url = "https://notion.so/0123456789abcdef0123456789abcdef"

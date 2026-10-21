@@ -173,7 +173,7 @@ final class NotionMeetingsTests: XCTestCase {
     #if DEBUG
     @MainActor func testDisplayPreferencesSortLimitAndPersist() throws {
         let suite = "meeting-display-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = TestDefaults.make(suite, test: self)
         defer { defaults.removePersistentDomain(forName: suite) }
         let store = NotionMeetingsStore(defaults: defaults, tokenProvider: { nil })
         store.meetings = (0..<30).compactMap { index in
@@ -267,7 +267,7 @@ final class NotionMeetingsTests: XCTestCase {
     }
     @MainActor func testMocksNeverPersistOrCallAPI() async throws {
         let suite = "meetings-tests-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = TestDefaults.make(suite, test: self)
         defer { defaults.removePersistentDomain(forName: suite) }
         for state in ["list", "detail", "progress", "empty", "settings"] {
             let store = NotionMeetingsStore(defaults: defaults, tokenProvider: { XCTFail("mock token access"); return nil },

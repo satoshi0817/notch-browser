@@ -124,6 +124,8 @@ enum NotionSettingsFieldLayout {
     @State private var showingSettings = false
     @ObservedObject private var store = NotionTasksStore.shared
     @State private var selected: NotionTask?
+    @State private var selectionOrigin: NotionTaskSelectionOrigin = .keyboard
+    @State private var selectionID = UUID()
     @State private var deletedSelection = false
     @Namespace private var taskRows
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -161,7 +163,7 @@ enum NotionSettingsFieldLayout {
         .task(id: openingID) {
             #if DEBUG
             if ["tab-settings", "settings", "sources", "settings-error"].contains(store.mockState ?? "") { showingSettings = true }
-            if ["detail", "loading", "no-body"].contains(store.mockState ?? "") || NotionTaskEditingPreview(rawValue: store.mockState ?? "")?.showsDetail == true { selected = store.tasks.first }
+            if ["detail", "loading", "no-body"].contains(store.mockState ?? "") || NotionTaskEditingPreview(rawValue: store.mockState ?? "")?.showsDetail == true { selectTask(store.tasks.first) }
             #endif
             if connection.tokenValid { await store.refresh(force: false) }
         }
@@ -201,9 +203,16 @@ enum NotionSettingsFieldLayout {
             }
         }
     }
+    // Default origin covers preview/programmatic/AX selection; row taps opt into pointer.
+    private func selectTask(_ task: NotionTask?, origin: NotionTaskSelectionOrigin = .keyboard) {
+        selectionOrigin = origin
+        selectionID = UUID()
+        deletedSelection = false
+        selected = task
+    }
     private func detail(_ task: NotionTask, narrow: Bool) -> some View {
-        NotionTaskDetail(task: task, back: { selected = nil }, narrow: narrow, onOpenSettings: onOpenSettings)
-            .id("\(task.id)-\(openingID)")
+        NotionTaskDetail(task: task, selectionOrigin: selectionOrigin, back: { selected = nil }, narrow: narrow, onOpenSettings: onOpenSettings)
+            .id("\(task.id)-\(openingID)-\(selectionID)")
     }
     @ViewBuilder private var settingsButton: some View {
         if !connection.showsConnectionError {
@@ -242,7 +251,8 @@ enum NotionSettingsFieldLayout {
                                     row(task)
                                         .matchedGeometryEffect(id: task.id, in: taskRows)
                                         .contentShape(Rectangle())
-                                        .onTapGesture { deletedSelection = false; selected = task }
+                                        .onTapGesture { selectTask(task, origin: .pointer) }
+                                        .accessibilityAction(.default) { selectTask(task) }
                                         .transition(.identity)
                                     Divider()
                                 }
@@ -299,6 +309,7 @@ enum NotionSettingsFieldLayout {
 }
 @MainActor private struct NotionTaskDetail: View {
     let task: NotionTask
+    let selectionOrigin: NotionTaskSelectionOrigin
     let back: () -> Void
     let narrow: Bool
     let onOpenSettings: () -> Void
@@ -306,8 +317,10 @@ enum NotionSettingsFieldLayout {
     @State private var blocks: [NotionTaskBlock] = []
     @State private var loading = true
     @State private var error: String?
+    @State private var editFocusGroup = UUID()
     @FocusState private var editFocus: NotionTaskField?
-    init(task: NotionTask, back: @escaping () -> Void, narrow: Bool, onOpenSettings: @escaping () -> Void) {
+    init(task: NotionTask, selectionOrigin: NotionTaskSelectionOrigin, back: @escaping () -> Void, narrow: Bool, onOpenSettings: @escaping () -> Void) {
+        self.selectionOrigin = selectionOrigin
         self.task = task; self.back = back; self.narrow = narrow; self.onOpenSettings = onOpenSettings
         let cached = NotionTasksStore.shared.bodies[task.id]
         _blocks = State(initialValue: cached ?? [])
@@ -322,11 +335,11 @@ enum NotionSettingsFieldLayout {
                 Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 10) {
                     GridRow(alignment: .firstTextBaseline) {
                         Text("状態").foregroundStyle(.secondary)
-                        NotionTaskStatusEditor(task: task, detailFocus: $editFocus)
+                        NotionTaskStatusEditor(task: task, detailFocus: $editFocus, detailGroup: editFocusGroup, initialSelectionOrigin: selectionOrigin)
                     }
                     GridRow(alignment: .firstTextBaseline) {
                         Text("期日").foregroundStyle(.secondary)
-                        NotionTaskDueEditor(task: task, detailFocus: $editFocus)
+                        NotionTaskDueEditor(task: task, detailFocus: $editFocus, detailGroup: editFocusGroup, initialSelectionOrigin: selectionOrigin)
                     }
                 }
                 NotionTaskDetailSaveNotice(page: task.id, onOpenSettings: onOpenSettings)

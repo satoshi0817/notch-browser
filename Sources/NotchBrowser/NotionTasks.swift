@@ -358,6 +358,19 @@ extension NotionDatabaseAPI {
             }
             name = "チームのタスク"
             configureEditingPreview(state)
+            // Preserve the actual API date shape when deriving display-only eligibility.
+            if state != "empty" {
+                let dates: [(String, String, [String: Any])] = [
+                    ("mock-due-time", "時刻のある期日（024）", ["start": "2026-10-22T15:00:00+09:00"]),
+                    ("mock-due-range", "終了日のある期日（024）", ["start": "2026-10-22", "end": "2026-10-24"])
+                ]
+                for (id, title, date) in dates {
+                    tasks.append(.init(id: id, title: title, url: nil, status: "未着手",
+                        completed: false, due: (date["start"] as? String).flatMap(NotionTaskRules.parseDate),
+                        edited: now, dueEditable: NotionTaskEditRules.dateEditable(date),
+                        statusCategory: .notStarted, statusColor: "gray"))
+                }
+            }
             if state == "settings" || state == "tab-settings" || state == "sources" {
                 configuration.url = "https://notion.so/0123456789abcdef0123456789abcdef"
                 sources = [.init(id: "mock-source-1", name: "チームのタスク")]

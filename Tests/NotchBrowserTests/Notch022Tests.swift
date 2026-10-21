@@ -12,10 +12,10 @@ final class Notch022Tests: XCTestCase {
     }
     @MainActor private func makeStore(_ transport: Notch022HTTP) throws -> (NotionTasksStore, URL) {
         let suite = "notch022-\(UUID())"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let defaults = TestDefaults.make(suite, test: self)
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("\(suite).json")
         addTeardownBlock {
-            UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite)
+            defaults.removePersistentDomain(forName: suite)
             try? FileManager.default.removeItem(at: file)
         }
         let store = NotionTasksStore(defaults: defaults, tokenProvider: { "injected-test-token" }, apiFactory: { token in

@@ -4,7 +4,7 @@ import XCTest
 final class ScratchpadTests: XCTestCase {
     func testNotesPersistWithoutMixingProfilesAndDeletionIsScoped() {
         let suite = "NotchBrowserTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
+        let defaults = TestDefaults.make(suite, test: self)
         defer { defaults.removePersistentDomain(forName: suite) }
         let first = UUID(), second = UUID()
         let store = ScratchpadStore(defaults: defaults)

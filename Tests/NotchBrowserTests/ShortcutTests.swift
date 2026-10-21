@@ -22,7 +22,7 @@ final class ShortcutTests: XCTestCase {
 
     @MainActor
     func testRecorderErrorDismissesOnNextInteractionAndFocusLoss() {
-        let store = SettingsStore(defaults: MemoryShortcutDefaults())
+        let store = SettingsStore(defaults: TestDefaults.make(test: self))
         let controller = ShortcutController(registrar: FakeShortcutRegistrar(), store: store,
                                             permissionAvailable: { false })
         let recorder = ShortcutRecorder(controller: controller)
@@ -58,7 +58,7 @@ final class ShortcutTests: XCTestCase {
 
     @MainActor
     func testStorePublishesSetAndResetAllSynchronouslyWithoutPermissionIPC() {
-        let store = SettingsStore(defaults: MemoryShortcutDefaults())
+        let store = SettingsStore(defaults: TestDefaults.make(test: self))
         var permissionChecks = 0
         let controller = ShortcutController(registrar: FakeShortcutRegistrar(), store: store,
             permissionAvailable: { permissionChecks += 1; return false })
@@ -85,7 +85,7 @@ final class ShortcutTests: XCTestCase {
 
     @MainActor
     func testResetAllClearsAssignedTabShortcutAndSkipsItsUnassignedDefault() {
-        let store = SettingsStore(defaults: MemoryShortcutDefaults())
+        let store = SettingsStore(defaults: TestDefaults.make(test: self))
         let registrar = FakeShortcutRegistrar()
         var permissionChecks = 0
         let controller = ShortcutController(registrar: registrar, store: store,
@@ -108,7 +108,7 @@ final class ShortcutTests: XCTestCase {
 
     @MainActor
     func testResetAllRegistrationFailurePreservesPreferencesAndCleansEarlierProbes() {
-        let store = SettingsStore(defaults: MemoryShortcutDefaults())
+        let store = SettingsStore(defaults: TestDefaults.make(test: self))
         let registrar = FakeShortcutRegistrar()
         let controller = ShortcutController(registrar: registrar, store: store, permissionAvailable: { false })
         defer { controller.shutdown() }
@@ -128,7 +128,7 @@ final class ShortcutTests: XCTestCase {
 
     @MainActor
     func testRecorderSuccessAndResetClearAttemptedAndErrorsSynchronously() {
-        let store = SettingsStore(defaults: MemoryShortcutDefaults())
+        let store = SettingsStore(defaults: TestDefaults.make(test: self))
         let controller = ShortcutController(registrar: FakeShortcutRegistrar(), store: store,
                                             permissionAvailable: { false })
         let recorder = ShortcutRecorder(controller: controller)
@@ -821,11 +821,6 @@ final class ShortcutTests: XCTestCase {
     }
 }
 
-private final class MemoryShortcutDefaults: UserDefaults {
-    private var values: [String: Any] = [:]
-    override func data(forKey defaultName: String) -> Data? { values[defaultName] as? Data }
-    override func set(_ value: Any?, forKey defaultName: String) { values[defaultName] = value }
-}
 
 private final class FakeShortcutRegistrar: ShortcutRegistrar {
     var fail = false
